@@ -1,45 +1,11 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { execa } from 'execa';
-import { access } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { ensureSamples, hasFfmpeg, noiseSource, samplePath } from './analysis-fixtures.js';
 import { probeMedia } from '../src/ffprobe.js';
 import { analyseMusic, BEAT_DETECTION, detectBeats } from '../src/analysis/index.js';
 
-const SAMPLES_DIR = process.env['STUDIO_SAMPLES_DIR'] ?? fileURLToPath(new URL('../../../data/samples/', import.meta.url));
-const SAMPLE_SCRIPT = fileURLToPath(new URL('../../../scripts/make-sample-footage.sh', import.meta.url));
-const MUSIC_SAMPLE = path.join(SAMPLES_DIR, 'sample_music_120bpm.mp3');
-
-async function hasFfmpeg(): Promise<boolean> {
-  try {
-    await execa('ffmpeg', ['-version']);
-    await execa('ffprobe', ['-version']);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function ensureMusicSample(): Promise<void> {
-  try {
-    await access(MUSIC_SAMPLE);
-    return;
-  } catch {
-    await execa('bash', [SAMPLE_SCRIPT, SAMPLES_DIR], { timeout: 240_000 });
-  }
-  await access(MUSIC_SAMPLE);
-}
-
+const MUSIC_SAMPLE = samplePath('sample_music_120bpm.mp3');
 const SAMPLE_RATE = 22050;
-
-/** Deterministic pseudo-random noise so the tests never flake. */
-function noiseSource(seed: number): () => number {
-  let state = seed;
-  return () => {
-    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-    return state / 4294967296 - 0.5;
-  };
-}
 
 interface ClickTrackOptions {
   bpm: number;
@@ -132,7 +98,7 @@ const ffmpegAvailable = await hasFfmpeg();
 if (!ffmpegAvailable) console.warn('ffmpeg/ffprobe not found on PATH: skipping the music analysis test that needs them.');
 
 describe.skipIf(!ffmpegAvailable)('analyseMusic with FFmpeg', () => {
-  beforeAll(ensureMusicSample, 300_000);
+  beforeAll(ensureSamples, 300_000);
 
   it('finds 120 BPM in the sample click track', async () => {
     const probe = await probeMedia(MUSIC_SAMPLE);

@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execa } from 'execa';
-import { access, mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { CancelledError, type AssetProbe, type Shot, type ShotQuality } from '@studio/core';
 import { probeMedia } from '../src/ffprobe.js';
+import { ensureSamples, hasFfmpeg, SAMPLE_FILES, samplePath as sample } from './analysis-fixtures.js';
 import {
   assembleShots,
   chooseFrameTimes,
@@ -22,43 +22,6 @@ import {
   spansFromCuts,
   type FrameMeasurement,
 } from '../src/analysis/index.js';
-
-// ---------------------------------------------------------------------------------------------
-// Test media: the synthetic samples from scripts/make-sample-footage.sh (generated when missing).
-// ---------------------------------------------------------------------------------------------
-const SAMPLES_DIR = process.env['STUDIO_SAMPLES_DIR'] ?? fileURLToPath(new URL('../../../data/samples/', import.meta.url));
-const SAMPLE_SCRIPT = fileURLToPath(new URL('../../../scripts/make-sample-footage.sh', import.meta.url));
-const SAMPLE_FILES = ['sample_a_portrait_sdr.mp4', 'sample_b_rotated_hevc_hlg.mov', 'sample_c_noaudio_scenes.mp4', 'sample_d_tiny.mp4', 'sample_music_120bpm.mp3'];
-const sample = (name: string): string => path.join(SAMPLES_DIR, name);
-
-async function hasFfmpeg(): Promise<boolean> {
-  try {
-    await execa('ffmpeg', ['-version']);
-    await execa('ffprobe', ['-version']);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function missingSamples(): Promise<string[]> {
-  const missing: string[] = [];
-  for (const name of SAMPLE_FILES) {
-    try {
-      await access(sample(name));
-    } catch {
-      missing.push(name);
-    }
-  }
-  return missing;
-}
-
-async function ensureSamples(): Promise<void> {
-  if ((await missingSamples()).length === 0) return;
-  await execa('bash', [SAMPLE_SCRIPT, SAMPLES_DIR], { timeout: 240_000 });
-  const still = await missingSamples();
-  if (still.length > 0) throw new Error(`Sample footage could not be generated: ${still.join(', ')}`);
-}
 
 async function lavfiClip(outputPath: string, source: string, videoFilter: string | null): Promise<AssetProbe> {
   await execa('ffmpeg', [
