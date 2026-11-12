@@ -191,7 +191,9 @@ export function buildAssDocument(plan: EditPlan, timeline: Timeline, output: Out
       }
     }
     const text = overlay.style === 'label' ? overlay.text.toLocaleUpperCase('en-AU') : overlay.text;
-    const tags = animationTags(overlay.animation, centreX, y, alignment, risePx);
+    // A rising line starts below its resting spot; a bottom-anchored one must not start in the margin.
+    const riseFromY = alignment === 2 ? Math.min(y + risePx, Math.round(area.y + area.height)) : y + risePx;
+    const tags = animationTags(overlay.animation, centreX, y, alignment, riseFromY);
     events.push(dialogue(1, start, end, styleName, `${tags}${escapeAssText(text)}`));
   }
 
@@ -217,9 +219,9 @@ export function buildAssDocument(plan: EditPlan, timeline: Timeline, output: Out
         plan.textOverlays.some((o) => o.placement === placement && overlaps(o.startSec, Math.min(o.endSec, total), start, total));
       const captionsBusy = captionWindows.some((c) => overlaps(c.start, c.end, start, total));
       if (!busy('lower') && !captionsBusy) {
-        events.push(dialogue(1, start, total, 'Handle', `${animationTags('fade', centreX, bottomY, 2, risePx)}${escapeAssText(handle)}`));
+        events.push(dialogue(1, start, total, 'Handle', `${animationTags('fade', centreX, bottomY, 2, bottomY)}${escapeAssText(handle)}`));
       } else if (!busy('top')) {
-        events.push(dialogue(1, start, total, 'Handle', `${animationTags('fade', centreX, topY, 8, risePx)}${escapeAssText(handle)}`));
+        events.push(dialogue(1, start, total, 'Handle', `${animationTags('fade', centreX, topY, 8, topY)}${escapeAssText(handle)}`));
       }
     }
   }
@@ -245,13 +247,16 @@ export function buildAssDocument(plan: EditPlan, timeline: Timeline, output: Out
   ].join('\n');
 }
 
-/** Override tags for one animation: position/alignment first, then the movement. */
-export function animationTags(animation: TextOverlay['animation'], x: number, y: number, alignment: number, risePx: number): string {
+/**
+ * Override tags for one animation: alignment and position first, then the movement.
+ * `riseFromY` is where a rising line starts (it eases up to `y` over 350 ms).
+ */
+export function animationTags(animation: TextOverlay['animation'], x: number, y: number, alignment: number, riseFromY: number): string {
   switch (animation) {
     case 'fade':
       return `{\\an${alignment}\\pos(${x},${y})\\fad(250,250)}`;
     case 'rise':
-      return `{\\an${alignment}\\move(${x},${y + risePx},${x},${y},0,350)\\fad(200,250)}`;
+      return `{\\an${alignment}\\move(${x},${riseFromY},${x},${y},0,350)\\fad(200,250)}`;
     case 'pop':
       return `{\\an${alignment}\\pos(${x},${y})\\fad(120,200)\\t(0,180,\\fscx108\\fscy108)\\t(180,320,\\fscx100\\fscy100)}`;
     default:

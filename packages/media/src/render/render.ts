@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
   AppError,
@@ -72,6 +72,12 @@ export async function renderEditPlan(inputs: RenderInputs, outputPath: string): 
 
   let assPath: string | null = null;
   if (planHasText({ plan, brand: inputs.brand })) {
+    const fonts = await stat(inputs.fontsDir).catch(() => null);
+    if (!fonts?.isDirectory()) {
+      throw new AppError('INTERNAL', 'The fonts for video text are missing on the server, so this edit could not be rendered.', {
+        details: { fontsDir: inputs.fontsDir },
+      });
+    }
     assPath = join(inputs.tmpDir, `overlay-${randomUUID()}.ass`);
     const document = buildAssDocument(plan, timeline, output, safeZone, inputs.brand, {
       headline: inputs.brand.fontHeadline,

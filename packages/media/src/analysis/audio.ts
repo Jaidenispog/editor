@@ -6,25 +6,30 @@ import { movingAverage, percentile, rmsOf, SpectrumAnalyser, zeroCrossingRate } 
 export interface DecodePcmOptions extends AnalysisToolOptions {
   /** Output sample rate; default 22050 Hz. */
   sampleRate?: number;
+  /** 1 (default) returns a mono downmix; 2 returns interleaved left/right samples. */
+  channels?: 1 | 2;
 }
 
 /**
- * Decodes the first audio stream to mono 32-bit float PCM at `sampleRate` (via an FFmpeg pipe).
- * Returns an empty array for a file without audio.
+ * Decodes the first audio stream to 32-bit float PCM at `sampleRate` via an FFmpeg pipe: mono by
+ * default, or interleaved stereo with `channels: 2`. Rejects with FfmpegError when the file has no
+ * audio stream, so check `probe.audio` first.
  */
 export async function decodePcm(inputPath: string, options: DecodePcmOptions = {}): Promise<Float32Array> {
   const sampleRate = Math.round(options.sampleRate ?? 22050);
+  const channels = options.channels ?? 1;
   if (!(sampleRate > 0)) throw new Error('decodePcm: sampleRate must be positive');
   throwIfAborted(options.signal, 'Audio decode');
   const buffer = await runFfmpegToBuffer(
-    ['-i', inputPath, '-map', '0:a:0?', '-vn', '-sn', '-dn', '-ac', '1', '-ar', String(sampleRate), '-c:a', 'pcm_f32le', '-f', 'f32le', 'pipe:1'],
+    ['-i', inputPath, '-map', '0:a:0', '-vn', '-sn', '-dn', '-ac', String(channels), '-ar', String(sampleRate), '-c:a', 'pcm_f32le', '-f', 'f32le', 'pipe:1'],
     {
       ...(options.ffmpegPath ? { ffmpegPath: options.ffmpegPath } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
     },
   );
   // Copy into a fresh, 4-byte aligned ArrayBuffer: Node buffers can be unaligned slices of a pool.
-  const usable = buffer.length - (buffer.length % 4);
+  const frameBytes = 4 * channels;
+  const usable = buffer.length - (buffer.length % frameBytes);
   const aligned = new ArrayBuffer(usable);
   new Uint8Array(aligned).set(buffer.subarray(0, usable));
   const pcm = new Float32Array(aligned);

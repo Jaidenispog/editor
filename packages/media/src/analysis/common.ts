@@ -64,12 +64,15 @@ export function fitSize(source: PixelSize, limits: { maxHeight?: number; maxLong
 
 /**
  * HDR (HLG or PQ) → SDR BT.709 conversion for the FFmpeg filtergraph, or null for SDR sources.
- * Linearises with zscale, tone-maps with the Hable curve, then re-encodes to BT.709 limited range.
- * Verified on 10-bit HLG HEVC footage with FFmpeg 6.1 (zimg + tonemap filters).
+ * zscale linearises the signal with 1.0 = 203 nits (the HLG/PQ reference white), so mid-tones map
+ * roughly 1:1 onto SDR; the mobius curve then leaves everything below 0.6 untouched and rolls the
+ * highlights (up to about 1000 nits) smoothly into the top of the SDR range instead of clipping.
+ * Calibrated against measured zscale output on 10-bit HLG HEVC footage with FFmpeg 6.1: the Hable
+ * curve with the usual `npl=100` recipe darkened mid-tones by about a third, which this avoids.
  */
 export function tonemapChain(probe: AssetProbe): string | null {
   if (!probe.video?.isHdr) return null;
-  return 'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p';
+  return 'zscale=t=linear:npl=203,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=mobius:param=0.6:peak=5:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p';
 }
 
 /** Clamps a requested time into the playable range of the file (slightly before the end so a frame exists). */

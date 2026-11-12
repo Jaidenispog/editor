@@ -1,3 +1,5 @@
+> **New session? Start with docs/HANDOVER.md — it says exactly where the previous session stopped.**
+
 # Studio Assistant — notes for Claude Code sessions
 
 Private web app for a barber studio in Ivanhoe, VIC (Australian English, AUD, `Australia/Melbourne`).

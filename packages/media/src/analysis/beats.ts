@@ -15,6 +15,11 @@ export interface BeatAnalysis {
   confidence: number;
 }
 
+export interface DetectBeatsOptions {
+  /** Number of interleaved channels in `pcm`; default 1. Onsets are measured per channel and summed. */
+  channels?: number;
+}
+
 /** Tunables of the beat tracker (documented so the numbers in the tests make sense). */
 export const BEAT_DETECTION = {
   frameLength: 1024,
@@ -26,6 +31,9 @@ export const BEAT_DETECTION = {
   foldHighBpm: 160,
   /** Autocorrelation at the folded lag must be at least this share of the raw peak to fold. */
   foldSupportRatio: 0.5,
+  /** Centre and width (octaves) of the gentle log-normal tempo prior that breaks ties between octaves. */
+  priorCentreBpm: 120,
+  priorWidthOctaves: 1,
   energyStepSec: 0.25,
   /** Beats are moved onto an onset peak at most this far away. */
   snapToleranceSec: 0.04,
@@ -38,28 +46,32 @@ export const BEAT_DETECTION = {
   /** log(1 + magnitude × this) compresses the spectrum before the flux is taken. */
   logCompression: 50,
   /**
-   * Spectral flux peaks when an onset is fully inside the frame, roughly half a frame after its start,
-   * so beat times are reported at the frame centre.
+   * Spectral flux peaks in the first frame that contains most of an onset, so the onset sits about
+   * 1.2 hops after that frame's start (calibrated on synthetic clicks: mean error under 2 ms).
    */
-  onsetOffsetFrames: 0.5,
+  onsetOffsetHops: 1.2,
 } as const;
 
 const EMPTY: Omit<BeatAnalysis, 'energy' | 'energyStepSec'> = { bpm: null, beatTimesSec: [], confidence: 0 };
 
 /**
- * Finds the tempo and beat grid of mono PCM: spectral-flux onset strength (1024/512 frames, log-magnitude,
- * half-wave rectified), tempo from the autocorrelation of the onset envelope over 60–180 BPM with octave
- * ambiguities folded towards 80–160 BPM, phase from the best comb alignment, a beat grid that follows
- * nearby onsets (±40 ms) and an RMS energy curve per 0.25 s. Silence or noise yields bpm null, an empty
- * grid and a low confidence.
+ * Finds the tempo and beat grid of PCM audio: spectral-flux onset strength (1024/512 frames, log-magnitude,
+ * half-wave rectified, summed over channels), tempo from the autocorrelation of the onset envelope over
+ * 60–180 BPM with a gentle prior around 120 BPM and octave ambiguities folded towards 80–160 BPM, phase
+ * from the best comb alignment, a beat grid that settles on nearby onsets (±40 ms) so slow drift is
+ * followed, and an RMS energy curve per 0.25 s. Silence or noise yields bpm null, an empty grid and a
+ * low confidence.
  */
-export function detectBeats(pcm: Float32Array, sampleRate: number): BeatAnalysis {
+export function detectBeats(pcm: Float32Array, sampleRate: number, options: DetectBeatsOptions = {}): BeatAnalysis {
   const c = BEAT_DETECTION;
   if (!(sampleRate > 0)) throw new Error('detectBeats: sampleRate must be positive');
-  const energy = energyCurve(pcm, sampleRate, c.energyStepSec);
+  const channelCount = Math.max(1, Math.floor(options.channels ?? 1));
+  const channels = splitChannels(pcm, channelCount);
+  const mono = channelCount === 1 ? pcm : mixDown(channels);
+  const energy = energyCurve(mono, sampleRate, c.energyStepSec);
   const base = { energy, energyStepSec: c.energyStepSec };
 
-  const flux = onsetStrength(pcm);
+  const flux = onsetStrength(channels);
   const fps = sampleRate / c.hop;
   const frameCount = flux.length;
   if (frameCount < Math.ceil(fps * 2)) return { ...EMPTY, ...base };
@@ -90,7 +102,8 @@ export function detectBeats(pcm: Float32Array, sampleRate: number): BeatAnalysis
   const lagMin = Math.max(1, Math.floor((fps * 60) / c.maxBpm));
   const lagMax = Math.ceil((fps * 60) / c.minBpm);
   const lagLimit = Math.min(frameCount - 2, lagMax * 2 + 1);
-  if (lagLimit <= lagMin) return { ...EMPTY, ...base };
+  const lagTop = Math.min(lagMax, lagLimit);
+  if (lagTop <= lagMin) return { ...EMPTY, ...base };
   const acf = new Float64Array(lagLimit + 1);
   for (let lag = 1; lag <= lagLimit; lag++) {
     let sum = 0;
@@ -98,12 +111,18 @@ export function detectBeats(pcm: Float32Array, sampleRate: number): BeatAnalysis
     acf[lag] = sum / acf0;
   }
 
+  // Pick the lag with the best prior-weighted autocorrelation; confidence comes from the raw values.
   let bestLag = lagMin;
-  for (let lag = lagMin; lag <= Math.min(lagMax, lagLimit); lag++) {
-    if (acf[lag]! > acf[bestLag]!) bestLag = lag;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (let lag = lagMin; lag <= lagTop; lag++) {
+    const score = acf[lag]! * tempoPrior((60 * fps) / lag);
+    if (score > bestScore) {
+      bestScore = score;
+      bestLag = lag;
+    }
   }
   const peak = acf[bestLag]!;
-  const median = percentile(acf.subarray(lagMin, Math.min(lagMax, lagLimit) + 1), 50);
+  const median = percentile(acf.subarray(lagMin, lagTop + 1), 50);
   const confidence = Math.round(Math.min(1, Math.max(0, peak - median)) * 1000) / 1000;
   if (confidence < c.minConfidence) return { ...EMPTY, ...base, confidence };
 
@@ -154,28 +173,61 @@ export function detectBeats(pcm: Float32Array, sampleRate: number): BeatAnalysis
     if (slope > 0 && Math.abs(slope - period) < period * 0.1) refinedPeriod = slope;
   }
   const bpm = Math.round(((60 * fps) / refinedPeriod) * 10) / 10;
-  const beatTimesSec = positions.map((p) => Math.round((((p + c.onsetOffsetFrames) * c.hop) / sampleRate) * 1000) / 1000);
+  const beatTimesSec = positions.map((p) => Math.round((((p + c.onsetOffsetHops) * c.hop) / sampleRate) * 1000) / 1000);
   return { bpm, beatTimesSec, confidence, ...base };
 }
 
-/** Spectral flux per frame: half-wave rectified increase of the log-magnitude spectrum. */
-function onsetStrength(pcm: Float32Array): Float64Array {
+/** Gentle log-normal weight favouring tempos near the prior centre (1 at the centre, ~0.6 one octave away). */
+function tempoPrior(bpm: number): number {
+  const { priorCentreBpm, priorWidthOctaves } = BEAT_DETECTION;
+  const octaves = Math.log2(bpm / priorCentreBpm) / priorWidthOctaves;
+  return Math.exp(-0.5 * octaves * octaves);
+}
+
+/** De-interleaves PCM into one array per channel (the input itself for mono). */
+function splitChannels(pcm: Float32Array, channelCount: number): Float32Array[] {
+  if (channelCount === 1) return [pcm];
+  const frames = Math.floor(pcm.length / channelCount);
+  const channels = Array.from({ length: channelCount }, () => new Float32Array(frames));
+  for (let i = 0; i < frames; i++) {
+    for (let ch = 0; ch < channelCount; ch++) channels[ch]![i] = pcm[i * channelCount + ch]!;
+  }
+  return channels;
+}
+
+function mixDown(channels: Float32Array[]): Float32Array {
+  const frames = channels[0]?.length ?? 0;
+  const mono = new Float32Array(frames);
+  for (let i = 0; i < frames; i++) {
+    let sum = 0;
+    for (const ch of channels) sum += ch[i]!;
+    mono[i] = sum / channels.length;
+  }
+  return mono;
+}
+
+/** Spectral flux per frame, summed over channels: half-wave rectified increase of the log-magnitude spectrum. */
+function onsetStrength(channels: Float32Array[]): Float64Array {
   const { frameLength, hop, logCompression } = BEAT_DETECTION;
-  const frameCount = pcm.length >= frameLength ? Math.floor((pcm.length - frameLength) / hop) + 1 : 0;
+  const length = channels[0]?.length ?? 0;
+  const frameCount = length >= frameLength ? Math.floor((length - frameLength) / hop) + 1 : 0;
   const flux = new Float64Array(Math.max(0, frameCount));
   if (frameCount === 0) return flux;
   const analyser = new SpectrumAnalyser(frameLength, frameLength);
   const current = new Float64Array(analyser.bins);
   const previous = new Float64Array(analyser.bins);
-  for (let f = 0; f < frameCount; f++) {
-    analyser.magnitudes(pcm, f * hop, current);
-    let sum = 0;
-    for (let k = 1; k < analyser.bins; k++) {
-      const logMag = Math.log1p(current[k]! * logCompression);
-      if (f > 0) sum += Math.max(0, logMag - previous[k]!);
-      previous[k] = logMag;
+  for (const channel of channels) {
+    previous.fill(0);
+    for (let f = 0; f < frameCount; f++) {
+      analyser.magnitudes(channel, f * hop, current);
+      let sum = 0;
+      for (let k = 1; k < analyser.bins; k++) {
+        const logMag = Math.log1p(current[k]! * logCompression);
+        if (f > 0) sum += Math.max(0, logMag - previous[k]!);
+        previous[k] = logMag;
+      }
+      if (f > 0) flux[f] = flux[f]! + sum;
     }
-    flux[f] = f > 0 ? sum : 0;
   }
   return flux;
 }
@@ -221,18 +273,24 @@ export interface MusicAnalysis extends BeatAnalysis {
 /** Sample rate the music track is decoded at before beat detection. */
 export const MUSIC_ANALYSIS_SAMPLE_RATE = 22050;
 
-/** Decodes a music file to mono PCM and runs detectBeats, returning the track's beat grid and duration. */
+/**
+ * Decodes a music file (stereo when the track is stereo, so hard-panned rhythm parts are not lost in a
+ * downmix) and runs detectBeats, returning the track's beat grid and duration.
+ */
 export async function analyseMusic(inputPath: string, options: AnalyseMusicOptions): Promise<MusicAnalysis> {
   const { probe, signal } = options;
   throwIfAborted(signal, 'Music analysis');
   if (!probe.audio) throw new Error('Music analysis: the file has no audio');
+  const channels: 1 | 2 = probe.audio.channels >= 2 ? 2 : 1;
   const pcm = await decodePcm(inputPath, {
     sampleRate: MUSIC_ANALYSIS_SAMPLE_RATE,
+    channels,
     ...(options.ffmpegPath ? { ffmpegPath: options.ffmpegPath } : {}),
     ...(signal ? { signal } : {}),
   });
   throwIfAborted(signal, 'Music analysis');
-  const beats = detectBeats(pcm, MUSIC_ANALYSIS_SAMPLE_RATE);
-  const durationSec = probe.durationSec > 0 ? probe.durationSec : Math.round((pcm.length / MUSIC_ANALYSIS_SAMPLE_RATE) * 1000) / 1000;
+  const beats = detectBeats(pcm, MUSIC_ANALYSIS_SAMPLE_RATE, { channels });
+  const frames = pcm.length / channels;
+  const durationSec = probe.durationSec > 0 ? probe.durationSec : Math.round((frames / MUSIC_ANALYSIS_SAMPLE_RATE) * 1000) / 1000;
   return { durationSec, ...beats };
 }
