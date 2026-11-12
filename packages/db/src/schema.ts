@@ -377,7 +377,7 @@ export const socialAccounts = pgTable(
     externalId: text('external_id').notNull(),
     username: text('username').notNull(),
     displayName: text('display_name').notNull().default(''),
-    /** Encrypted at rest with APP_ENCRYPTION_KEY (see packages/db/src/crypto.ts). */
+    /** Encrypted at rest (AES-256-GCM, packages/db/src/crypto.ts). */
     accessTokenEncrypted: text('access_token_encrypted').notNull(),
     refreshTokenEncrypted: text('refresh_token_encrypted'),
     tokenExpiresAt: timestamp('token_expires_at', { withTimezone: true }),
