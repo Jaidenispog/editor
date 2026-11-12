@@ -28,85 +28,99 @@ const PLANNING_CONCURRENCY = 2;
 export async function handleGenerateEdits(ctx: WorkerContext, run: TrackedRun, payload: { generationId: string; projectId: string }): Promise<void> {
   const generation = await ctx.db.query.generations.findFirst({ where: eq(schema.generations.id, payload.generationId) });
   if (!generation) throw new AppError('NOT_FOUND', 'This generation no longer exists');
-  const footage = await loadProjectFootage(ctx, payload.projectId);
-  if (!footage || footage.assets.length === 0) throw new AppError('UNSUPPORTED', 'No processed clips are available in this project yet.');
-  const settings = await loadSettings(ctx);
-  const music = await loadMusic(ctx, generation.settings.musicTrackId);
-  if (generation.settings.musicTrackId && !music) {
-    throw new AppError('UNSUPPORTED', 'The chosen music track is not ready yet. Wait for it to finish analysing, then generate again.');
-  }
+  const setGeneration = (values: Partial<typeof schema.generations.$inferInsert>) =>
+    ctx.db.update(schema.generations).set({ ...values, updatedAt: new Date() }).where(eq(schema.generations.id, generation.id));
+  const setProjectStatus = (status: 'ready' | 'generating') =>
+    ctx.db.update(schema.projects).set({ status, updatedAt: new Date() }).where(eq(schema.projects.id, payload.projectId));
 
-  await ctx.db.update(schema.generations).set({ status: 'planning', statusMessage: 'Planning five edits', updatedAt: new Date() }).where(eq(schema.generations.id, generation.id));
-  await ctx.db.update(schema.projects).set({ status: 'generating', updatedAt: new Date() }).where(eq(schema.projects.id, payload.projectId));
-
-  const edits = await ctx.db.query.edits.findMany({ where: eq(schema.edits.generationId, generation.id), orderBy: [asc(schema.edits.slot)] });
-  const versionIds = edits.map((e) => e.currentVersionId).filter((v): v is string => Boolean(v));
-  const versions = versionIds.length ? await ctx.db.query.editVersions.findMany({ where: inArray(schema.editVersions.id, versionIds) }) : [];
-  const pending = edits
-    .map((edit) => ({ edit, version: versions.find((v) => v.id === edit.currentVersionId) }))
-    .filter((x): x is { edit: (typeof edits)[number]; version: EditVersion } => Boolean(x.version) && x.version!.status === 'planning');
-
-  const support = new Map(evaluateStyleSupport(footage.analyses).map((s) => [s.styleId, s]));
-  let planned = 0;
-  let failed = 0;
-  let done = 0;
-  const total = pending.length;
-
-  const worker = async (item: { edit: (typeof edits)[number]; version: EditVersion }) => {
-    const styleId = item.edit.styleId as StyleId;
-    const sup = support.get(styleId);
-    try {
-      run.checkCancelled();
-      if (sup && !sup.supported) throw new AppError('UNSUPPORTED', `${STYLES[styleId].name}: ${sup.reason}`);
-      const input = buildPlannerInput({ styleId, settings: generation.settings, footage, music, appSettings: settings, attempt: 0 });
-      const vctx = validationContextFor(footage, music, generation.settings.durationSec);
-      const outcome = await planWithFallback(ctx.ai.planner, ctx.ai.rulesPlanner, input, vctx, ctx.logger, run.signal);
-      for (const u of outcome.usages) await recordAiUsage(ctx, payload.projectId, `planning:${styleId}`, u);
-      await ctx.db
-        .update(schema.editVersions)
-        .set({
-          plan: outcome.plan,
-          validation: { ok: true, errors: [], warnings: outcome.validation.warnings },
-          planSource: outcome.source,
-          plannerModel: outcome.model,
-          status: 'planned',
-          statusMessage: outcome.fallbackReason ? `Planned with the rules-based editor (${outcome.fallbackReason})` : 'Planned · rendering preview',
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.editVersions.id, item.version.id));
-      await enqueueTracked(ctx, JOB_TYPES.RENDER_PREVIEW, { editVersionId: item.version.id, projectId: payload.projectId }, { singletonKey: `preview:${item.version.id}` });
-      planned++;
-    } catch (err) {
-      if (err instanceof CancelledError) throw err;
-      failed++;
-      ctx.logger.error({ err, styleId }, 'planning failed');
-      await ctx.db
-        .update(schema.editVersions)
-        .set({ status: 'failed', statusMessage: friendlyFailure(err), updatedAt: new Date() })
-        .where(eq(schema.editVersions.id, item.version.id));
-    } finally {
-      done++;
-      await run.progress(0.1 + 0.85 * (done / Math.max(1, total)), `Planned ${done} of ${total} edits`);
+  try {
+    const footage = await loadProjectFootage(ctx, payload.projectId);
+    if (!footage || footage.assets.length === 0) throw new AppError('UNSUPPORTED', 'No processed clips are available in this project yet.');
+    const settings = await loadSettings(ctx);
+    const music = await loadMusic(ctx, generation.settings.musicTrackId);
+    if (generation.settings.musicTrackId && !music) {
+      throw new AppError('UNSUPPORTED', 'The chosen music track is not ready yet. Wait for it to finish analysing, then generate again.');
     }
-  };
 
-  await runPool(pending, PLANNING_CONCURRENCY, worker);
+    await setGeneration({ status: 'planning', statusMessage: 'Planning the edits' });
+    await setProjectStatus('generating');
 
-  const status = planned === 0 ? 'failed' : failed > 0 ? 'rendering' : 'rendering';
-  await ctx.db
-    .update(schema.generations)
-    .set({
-      status,
-      statusMessage: planned === 0 ? 'None of the edits could be planned from this footage' : `${planned} edit${planned === 1 ? '' : 's'} planned, rendering previews`,
+    const edits = await ctx.db.query.edits.findMany({ where: eq(schema.edits.generationId, generation.id), orderBy: [asc(schema.edits.slot)] });
+    const versionIds = edits.map((e) => e.currentVersionId).filter((v): v is string => Boolean(v));
+    const versions = versionIds.length ? await ctx.db.query.editVersions.findMany({ where: inArray(schema.editVersions.id, versionIds) }) : [];
+    const pending = edits
+      .map((edit) => ({ edit, version: versions.find((v) => v.id === edit.currentVersionId) }))
+      .filter((x): x is { edit: (typeof edits)[number]; version: EditVersion } => Boolean(x.version) && x.version!.status === 'planning');
+
+    const support = new Map(evaluateStyleSupport(footage.analyses).map((s) => [s.styleId, s]));
+    let planned = 0;
+    let done = 0;
+    const total = pending.length;
+
+    const worker = async (item: { edit: (typeof edits)[number]; version: EditVersion }) => {
+      const styleId = item.edit.styleId as StyleId;
+      const sup = support.get(styleId);
+      try {
+        run.checkCancelled();
+        if (sup && !sup.supported) throw new AppError('UNSUPPORTED', `${STYLES[styleId].name}: ${sup.reason}`);
+        const input = buildPlannerInput({ styleId, settings: generation.settings, footage, music, appSettings: settings, attempt: 0 });
+        const vctx = validationContextFor(footage, music, generation.settings.durationSec);
+        const outcome = await planWithFallback(ctx.ai.planner, ctx.ai.rulesPlanner, input, vctx, ctx.logger, run.signal);
+        for (const u of outcome.usages) await recordAiUsage(ctx, payload.projectId, `planning:${styleId}`, u);
+        await ctx.db
+          .update(schema.editVersions)
+          .set({
+            plan: outcome.plan,
+            validation: { ok: true, errors: [], warnings: outcome.validation.warnings },
+            planSource: outcome.source,
+            plannerModel: outcome.model,
+            status: 'planned',
+            statusMessage: outcome.fallbackReason ? `Planned with the rules-based editor (${outcome.fallbackReason})` : 'Planned · rendering preview',
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.editVersions.id, item.version.id));
+        await enqueueTracked(ctx, JOB_TYPES.RENDER_PREVIEW, { editVersionId: item.version.id, projectId: payload.projectId }, { singletonKey: `preview:${item.version.id}` });
+        planned++;
+      } catch (err) {
+        if (err instanceof CancelledError) throw err;
+        ctx.logger.error({ err, styleId }, 'planning failed');
+        await ctx.db
+          .update(schema.editVersions)
+          .set({ status: 'failed', statusMessage: friendlyFailure(err), updatedAt: new Date() })
+          .where(eq(schema.editVersions.id, item.version.id));
+      } finally {
+        done++;
+        await run.progress(0.1 + 0.85 * (done / Math.max(1, total)), `Planned ${done} of ${total} edits`);
+      }
+    };
+
+    await runPool(pending, PLANNING_CONCURRENCY, worker);
+
+    if (planned === 0) {
+      await setGeneration({ status: 'failed', statusMessage: 'None of the chosen styles could be built from this footage', plannerUsed: ctx.ai.planner.name });
+      await setProjectStatus('ready');
+      throw new AppError('PROCESSING_FAILED', 'None of the chosen styles could be built from this footage.');
+    }
+    await setGeneration({
+      status: 'rendering',
+      statusMessage: `${planned} edit${planned === 1 ? '' : 's'} planned, rendering previews`,
       plannerUsed: ctx.ai.planner.name,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.generations.id, generation.id));
-  if (planned === 0) {
-    await ctx.db.update(schema.projects).set({ status: 'ready', updatedAt: new Date() }).where(eq(schema.projects.id, payload.projectId));
-    throw new AppError('PROCESSING_FAILED', 'None of the chosen styles could be built from this footage.');
+    });
+    await run.progress(1, 'Edits planned');
+  } catch (err) {
+    if (err instanceof CancelledError) {
+      await setGeneration({ status: 'cancelled', statusMessage: 'Cancelled' });
+      await ctx.db
+        .update(schema.editVersions)
+        .set({ status: 'cancelled', statusMessage: 'Cancelled', updatedAt: new Date() })
+        .where(and(inArray(schema.editVersions.editId, (await ctx.db.query.edits.findMany({ columns: { id: true }, where: eq(schema.edits.generationId, generation.id) })).map((e) => e.id)), eq(schema.editVersions.status, 'planning')));
+      await setProjectStatus('ready');
+    } else if (!(err instanceof AppError && err.code === 'PROCESSING_FAILED')) {
+      await setGeneration({ status: 'failed', statusMessage: friendlyFailure(err) });
+      await setProjectStatus('ready');
+    }
+    throw err;
   }
-  await run.progress(1, 'Edits planned');
 }
 
 /** Plans a new version of one edit from an instruction (revise) or a fresh take (regenerate). */
