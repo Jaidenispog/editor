@@ -1,0 +1,27 @@
+{
+  "name": "@studio/queue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "build": "echo 'source package (no build step)'"
+  },
+  "dependencies": {
+    "@studio/config": "workspace:*",
+    "@studio/core": "workspace:*",
+    "pg-boss": "12.38.1",
+    "pino": "10.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

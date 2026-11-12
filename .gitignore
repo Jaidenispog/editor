@@ -1,0 +1,17 @@
+node_modules/
+.pnpm-store/
+.next/
+dist/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+# local runtime data (media, database, temp renders)
+/data/
+/tmp/
+/.pg/
+.DS_Store
+*.tsbuildinfo
+test-results/
+playwright-report/

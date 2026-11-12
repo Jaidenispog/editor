@@ -1,0 +1,4 @@
+The Inter and Inter Display font files in this directory are Copyright 2016 The Inter Project Authors
+(https://github.com/rsms/inter) and are licensed under the SIL Open Font License, Version 1.1.
+The full licence text is available at https://openfontlicense.org and in the upstream repository.
+They are vendored so that video text renders identically in every environment (worker container, CI, local dev).

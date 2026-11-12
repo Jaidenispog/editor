@@ -1,0 +1,25 @@
+{
+  "name": "studio-assistant",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Studio Assistant: private video-editing and business tools app for a barber studio (Ivanhoe, VIC)",
+  "packageManager": "pnpm@10.28.0",
+  "engines": { "node": ">=22.12" },
+  "scripts": {
+    "dev": "pnpm --filter @studio/web dev",
+    "dev:worker": "pnpm --filter @studio/worker dev",
+    "build": "pnpm -r --filter './packages/*' --filter './apps/*' build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r --no-bail test",
+    "lint": "pnpm -r --no-bail lint",
+    "db:generate": "pnpm --filter @studio/db generate",
+    "db:migrate": "pnpm --filter @studio/db migrate",
+    "db:seed": "pnpm --filter @studio/db seed",
+    "local:pg": "bash scripts/local-postgres.sh",
+    "samples": "bash scripts/make-sample-footage.sh"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "prettier": "3.9.10"
+  }
+}
