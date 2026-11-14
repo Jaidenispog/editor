@@ -18,6 +18,7 @@ import { apiRequest } from '@/lib/client/api-client';
 import { ChunkedUploader, type UploadItem } from '@/lib/client/uploader';
 import { formatBytes, formatDate, formatSeconds } from '@/lib/format';
 import type { MusicTrackSummary } from '@/lib/music';
+import { finishedUploadsShownAsTracks, isAnalysisCancelled, isTrackAnalysing, showsLicenceEnd, trackStatusPill } from '@/lib/shared/music-display';
 import {
   LICENCE_PLACES,
   LicencePassportForm,
@@ -196,6 +197,11 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
   useEffect(() => () => uploader.dispose(), [uploader]);
   const uploads = useSyncExternalStore(uploader.subscribe, uploader.getSnapshot, () => EMPTY_UPLOADS);
 
+  // A finished upload's row goes once its track is listed below (the track row says the same and more).
+  useEffect(() => {
+    for (const key of finishedUploadsShownAsTracks(uploads, tracks.map((t) => t.id))) uploader.dismiss(key);
+  }, [uploads, tracks, uploader]);
+
   const analysing = tracks.some((t) => t.status === 'uploaded' || t.status === 'processing');
   useEffect(() => {
     if (!analysing) return;
@@ -254,26 +260,26 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
               const state = t.licenceState;
               const info = LICENCE_STATE_TEXT[state];
               const places = LICENCE_PLACES.filter(([key]) => key !== 'promotionalUse' && t.licence.permitted[key]).map(([, label]) => label);
+              const pill = trackStatusPill(t.status, t.statusMessage);
+              const busy = isTrackAnalysing(t);
+              const stopped = isAnalysisCancelled(t);
               return (
                 <li key={t.id} className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="truncate text-sm font-semibold">{t.title}</p>
-                      <StatusPill status={t.status} />
+                      <StatusPill status={pill.status} label={pill.label} />
                     </div>
                     <p className="mt-0.5 text-sm text-charcoal-500">
                       {[t.artist || null, t.durationSec ? formatSeconds(t.durationSec) : null, t.bpm ? `${Math.round(t.bpm)} BPM` : null, formatBytes(t.byteSize)].filter(Boolean).join(' · ')}
                     </p>
                     {t.status === 'failed' && t.statusMessage ? <p className="mt-1 text-sm text-red-600">{t.statusMessage}</p> : null}
+                    {busy ? <p className="mt-1 text-sm text-charcoal-600">{`${(t.statusMessage || 'Finding the beat').replace(/[.\s]+$/, '')}. It can be used in edits once this finishes.`}</p> : null}
+                    {stopped ? <p className="mt-1 text-sm text-charcoal-600">The beat analysis was stopped, so this track cannot be used in edits. Remove it and upload it again to analyse it.</p> : null}
                     <div className="mt-2 flex flex-wrap gap-1.5">
                       <Badge tone={info.tone}>{LICENCE_STATE_LABELS[state]}</Badge>
                       <Badge>{licenceKindLabel(t.licence.kind)}</Badge>
                       {t.licence.planName ? <Badge>{t.licence.planName}</Badge> : t.licence.licenceName ? <Badge>{t.licence.licenceName}</Badge> : null}
-                      {places.map((p) => (
-                        <Badge key={p} tone="info">
-                          {p}
-                        </Badge>
-                      ))}
                       {[...t.genres, ...t.moods].map((g) => (
                         <Badge key={`tag-${g}`} tone="accent">
                           {g}
@@ -286,10 +292,12 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
                         <dt className="inline font-medium text-charcoal-700">Allowed for: </dt>
                         <dd className="inline">{places.length ? places.join(', ') : 'nothing recorded yet'}</dd>
                       </div>
-                      <div>
-                        <dt className="inline font-medium text-charcoal-700">Licence ends: </dt>
-                        <dd className="inline">{t.licence.expiresAt ? formatDate(t.licence.expiresAt) : 'no end date recorded'}</dd>
-                      </div>
+                      {showsLicenceEnd(t.licence) ? (
+                        <div>
+                          <dt className="inline font-medium text-charcoal-700">Licence ends: </dt>
+                          <dd className="inline">{t.licence.expiresAt ? formatDate(t.licence.expiresAt) : 'no end date recorded'}</dd>
+                        </div>
+                      ) : null}
                       {t.licence.attributionRequired ? (
                         <div className="sm:col-span-2">
                           <dt className="inline font-medium text-charcoal-700">Credit line: </dt>

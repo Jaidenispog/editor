@@ -69,6 +69,8 @@ const TONES: Record<string, BadgeTone> = {
   check_before_retry: 'warning',
   awaiting_approval: 'warning',
   pending_approval: 'warning',
+  // A capability check that failed (e.g. a chart fetch that did not work). A card for which "Not available" is a
+  // plain fact sets its own neutral `pillStatus` instead.
   unavailable: 'warning',
   quota: 'warning',
   paused: 'warning',

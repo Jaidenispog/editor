@@ -37,7 +37,7 @@ export async function handleAnalyseMusic(ctx: WorkerContext, run: TrackedRun, pa
     const outcome = err instanceof CancelledError ? await stopOutcome(run) : null;
     const values =
       outcome === 'cancelled'
-        ? { status: 'uploaded' as const, statusMessage: 'Analysis cancelled' }
+        ? { status: 'uploaded' as const, statusMessage: 'Analysis cancelled' } // the web app reads this exact text (MUSIC_ANALYSIS_CANCELLED_MESSAGE)
         : outcome === 'resume'
           ? { status: 'processing' as const, statusMessage: INTERRUPTED_MESSAGE }
           : { status: 'failed' as const, statusMessage: err instanceof AppError ? err.message : 'The track could not be analysed' };

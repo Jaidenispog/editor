@@ -1,6 +1,7 @@
 'use client';
 
 import { Headphones, Scissors, Wand2 } from 'lucide-react';
+import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -13,7 +14,7 @@ import { apiRequest } from '@/lib/client/api-client';
 import { formatSeconds } from '@/lib/format';
 import type { MusicTrackSummary } from '@/lib/music';
 import type { VersionMusicDto } from '@/lib/shared/studio-dto';
-import { buildAudioPatch, type SoundState } from '@/lib/shared/studio-schemas';
+import { buildAudioPatch, originalSoundChoices, withTrack, type SoundState } from '@/lib/shared/studio-schemas';
 import { EnergyStrip, strongestWindowStart } from './energy-strip';
 
 function initialState(m: VersionMusicDto): SoundState {
@@ -30,6 +31,12 @@ function initialState(m: VersionMusicDto): SoundState {
     originalVolume: Math.round(m.sound.originalVolume * 100),
   };
 }
+
+const ORIGINAL_SOUND_LABELS: Record<SoundState['original'], string> = {
+  off: 'Off',
+  under_music: 'Under the music',
+  only: 'Original sound only',
+};
 
 function Slider({ label, value, min, max, step, format, onChange, disabled }: { label: string; value: number; min: number; max: number; step: number; format: (v: number) => string; onChange: (v: number) => void; disabled?: boolean }) {
   return (
@@ -98,6 +105,7 @@ export function SoundPanel({ editId, editName, versionId, open, onClose, onDone 
   const patch = from && state ? buildAudioPatch(from, state, true) : {};
   const nothing = Object.keys(patch).length === 0;
   const montage = music?.styleId === 'beat_montage';
+  const otherTracks = usable.filter((t) => t.id !== music?.track?.id);
 
   const listen = async () => {
     if (!state || state.track === 'none') return;
@@ -135,6 +143,7 @@ export function SoundPanel({ editId, editName, versionId, open, onClose, onDone 
 
   const footer = (
     <>
+      {music && state && nothing && !sectionChanged ? <p className="mr-auto self-center text-xs text-charcoal-500">Change something to make a new version.</p> : null}
       <Button variant="ghost" onClick={onClose}>
         Cancel
       </Button>
@@ -165,12 +174,23 @@ export function SoundPanel({ editId, editName, versionId, open, onClose, onDone 
           <Select
             label="Track"
             value={state.track}
-            onChange={(e) => setState({ ...state, track: e.target.value, start: e.target.value === from?.track ? from.start : 0 })}
+            onChange={(e) => setState(withTrack(state, e.target.value, from))}
             options={[
               ...(music.track && music.sound.hasMusic ? [{ value: music.track.id, label: `Current track: ${music.track.title}` }] : []),
-              ...usable.filter((t) => t.id !== music.track?.id).map((t) => ({ value: t.id, label: `${t.title}${t.artist ? ` · ${t.artist}` : ''}` })),
+              ...otherTracks.map((t) => ({ value: t.id, label: `${t.title}${t.artist ? ` · ${t.artist}` : ''}` })),
               { value: 'none', label: 'No music' },
             ]}
+            hint={
+              otherTracks.length === 0 ? (
+                <>
+                  {music.track && music.sound.hasMusic ? 'No other track fits this edit yet.' : 'No track fits this edit yet.'} Add one with “Upload licensed track” on this page or in{' '}
+                  <Link href="/settings?tab=music" className="font-medium text-charcoal-800 underline decoration-[var(--accent)] decoration-2 underline-offset-4">
+                    Settings → Music library
+                  </Link>
+                  . A track needs a confirmed licence, must have finished analysing and must be at least as long as this edit.
+                </>
+              ) : undefined
+            }
           />
           {otherTrack ? <p className="text-sm text-charcoal-600">A new track re-cuts the edit to its beat.</p> : null}
           {chosenTrack && trackSec > 0 ? (
@@ -211,16 +231,10 @@ export function SoundPanel({ editId, editName, versionId, open, onClose, onDone 
             <legend className="text-sm font-medium text-charcoal-800">Original sound</legend>
             {!music.clipsHaveSound ? <p className="text-sm text-charcoal-500">None of the clips in this edit has its own sound.</p> : null}
             <div className="flex flex-wrap gap-x-5">
-              {(
-                [
-                  ['off', 'Off'],
-                  ['under_music', 'Under the music'],
-                  ['only', 'Original sound only'],
-                ] as const
-              ).map(([value, label]) => (
+              {originalSoundChoices(state.track, state.original).map((value) => (
                 <label key={value} className="flex min-h-11 items-center gap-2 text-sm text-charcoal-800">
-                  <input type="radio" name={`original-${versionId}`} className="size-4 accent-[var(--accent)]" checked={state.original === value} onChange={() => set('original', value)} />
-                  {label}
+                  <input type="radio" name={`original-${versionId}`} className="size-4 shrink-0 accent-[var(--accent)]" checked={state.original === value} onChange={() => set('original', value)} />
+                  {ORIGINAL_SOUND_LABELS[value]}
                 </label>
               ))}
             </div>

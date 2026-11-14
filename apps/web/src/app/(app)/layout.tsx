@@ -33,7 +33,10 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
         <div className="mt-8 flex-1 overflow-y-auto">
           <SidebarNav />
         </div>
-        <p className="px-3 text-xs text-charcoal-500">Private studio tools · Melbourne time</p>
+        <p className="px-3 text-xs text-charcoal-500">
+          {/* Breaks only after the dot, never leaving one word alone on the second line. */}
+          <span className="whitespace-nowrap">Private studio tools ·</span> <span className="whitespace-nowrap">Melbourne time</span>
+        </p>
       </aside>
       <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-4 border-b border-charcoal-200/70 bg-white/90 px-4 backdrop-blur sm:px-6 lg:px-10">
         <BrandMark appName={appName} businessName={businessName} logoUrl={logoUrl} className="text-charcoal-950 lg:hidden" />

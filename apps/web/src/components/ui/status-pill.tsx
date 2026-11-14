@@ -22,12 +22,12 @@ const pill: Record<BadgeTone, string> = {
   info: 'bg-sky-50 text-sky-800',
 };
 
-/** Status chip with a coloured dot; animated while work is in progress. */
+/** Status chip with a coloured dot; animated while work is in progress. Never shrinks or wraps onto two lines. */
 export function StatusPill({ status, label, className }: { status: string; label?: string | undefined; className?: string }) {
   const tone = toneForStatus(status);
   const busy = tone === 'info';
   return (
-    <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium', pill[tone], className)}>
+    <span className={cn('inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium whitespace-nowrap', pill[tone], className)}>
       <span className={cn('size-1.5 rounded-full', dot[tone], busy && 'animate-pulse')} aria-hidden="true" />
       {label ?? statusLabel(status)}
     </span>

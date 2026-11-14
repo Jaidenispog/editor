@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import { CC_BY_NC_REFUSAL, normaliseLicence, planNameWarning, type MusicLicence, type MusicLicenceKind } from '@studio/core';
 import { Input, Textarea } from '@/components/ui/field';
 import { cn } from '@/lib/shared/cn';
+import { LIBRARY_LICENCE_KINDS } from '@/lib/shared/music-display';
 
 /**
  * The licence passport (memo §2): a three-step form shared by the upload dialog (Studio and Settings → Music) and
@@ -182,7 +183,7 @@ export function stepTitle(step: 1 | 2 | 3): string {
 function Check({ checked, disabled, onChange, children }: { checked: boolean; disabled?: boolean; onChange: (v: boolean) => void; children: ReactNode }) {
   return (
     <label className={cn('flex min-h-11 items-center gap-2 text-sm text-charcoal-700', disabled && 'opacity-70')}>
-      <input type="checkbox" className="size-4 accent-[var(--accent)]" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" className="size-4 shrink-0 accent-[var(--accent)]" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       {children}
     </label>
   );
@@ -192,7 +193,7 @@ function Check({ checked, disabled, onChange, children }: { checked: boolean; di
 export function LicencePassportForm({ draft, onChange, step, disabled = false }: { draft: LicenceDraft; onChange: (next: LicenceDraft) => void; step: 1 | 2 | 3; disabled?: boolean }) {
   const set = <K extends keyof LicenceDraft>(key: K, value: LicenceDraft[K]) => onChange({ ...draft, [key]: value });
   const meta = draft.kind === 'meta_sound_collection';
-  const library = draft.kind === 'catalogue' || draft.kind === 'commercial_licence';
+  const library = LIBRARY_LICENCE_KINDS.has(draft.kind);
   const warning = library ? planNameWarning(draft.planName) : null;
 
   if (step === 1) {
@@ -201,7 +202,7 @@ export function LicencePassportForm({ draft, onChange, step, disabled = false }:
         <legend className="text-sm font-medium text-charcoal-800">{STEP_TITLES[0]}</legend>
         {LICENCE_KIND_OPTIONS.map((o) => (
           <label key={o.value} className="flex min-h-11 items-start gap-2 rounded-lg border border-charcoal-200 px-3 py-2 text-sm text-charcoal-800 has-[:checked]:border-charcoal-900">
-            <input type="radio" name="licence-kind" className="mt-0.5 size-4 accent-[var(--accent)]" checked={draft.kind === o.value} onChange={() => onChange({ ...draft, kind: o.value })} />
+            <input type="radio" name="licence-kind" className="mt-0.5 size-4 shrink-0 accent-[var(--accent)]" checked={draft.kind === o.value} onChange={() => onChange({ ...draft, kind: o.value })} />
             <span>{o.label}</span>
           </label>
         ))}
@@ -235,7 +236,7 @@ export function LicencePassportForm({ draft, onChange, step, disabled = false }:
       <div className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <Input
-            label={library ? 'Library or seller' : 'Who owns the recording (optional)'}
+            label={library ? 'Library or seller' : 'Recording owner (optional)'}
             value={draft.source}
             disabled={disabled}
             onChange={(e) => set('source', e.target.value)}
@@ -252,7 +253,7 @@ export function LicencePassportForm({ draft, onChange, step, disabled = false }:
         {library ? (
           <div className="grid gap-4 sm:grid-cols-2">
             <Input label="Account holder" hint="Should be the business name." value={draft.accountHolder} disabled={disabled} onChange={(e) => set('accountHolder', e.target.value)} maxLength={120} />
-            <Input label="Track link or ID at the library (optional)" value={draft.providerTrackRef} disabled={disabled} onChange={(e) => set('providerTrackRef', e.target.value)} maxLength={300} />
+            <Input label="Track link or ID (optional)" hint="The track’s page or ID at the library." value={draft.providerTrackRef} disabled={disabled} onChange={(e) => set('providerTrackRef', e.target.value)} maxLength={300} />
             <Input label="Download date (optional)" type="date" value={draft.downloadedOn} disabled={disabled} onChange={(e) => set('downloadedOn', e.target.value)} />
             <Input label="Licence end date (optional)" type="date" value={draft.expiresOn} disabled={disabled} onChange={(e) => set('expiresOn', e.target.value)} />
           </div>
@@ -305,7 +306,7 @@ export function LicencePassportForm({ draft, onChange, step, disabled = false }:
 export function RightsConfirmation({ checked, onChange, disabled = false }: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
   return (
     <label className="flex items-start gap-2 rounded-lg bg-charcoal-50 p-3 text-sm text-charcoal-800">
-      <input type="checkbox" className="mt-0.5 size-4 accent-[var(--accent)]" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" className="mt-0.5 size-4 shrink-0 accent-[var(--accent)]" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       <span>{RIGHTS_CONFIRMATION_TEXT}.</span>
     </label>
   );

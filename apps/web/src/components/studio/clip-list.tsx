@@ -11,7 +11,8 @@ import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
 import { formatSeconds } from '@/lib/format';
 import type { AssetDto, StyleOptionDto } from '@/lib/shared/studio-dto';
-import { CLIP_TAG_OPTIONS, clipTagName } from '@/lib/shared/studio-schemas';
+import { CLIP_TAG_OPTIONS } from '@/lib/shared/studio-schemas';
+import { clipStatusLine } from '@/lib/shared/clip-summary';
 import { moveInOrder, type MoveDirection } from '@/lib/shared/clip-order';
 import { ShotsPanel } from './shots-panel';
 import { useStableLink } from './use-studio-status';
@@ -22,16 +23,6 @@ const ASSET_STATUS_LABELS: Record<AssetDto['status'], string> = {
   ready: 'Ready',
   failed: 'Needs attention',
 };
-
-function shotSummary(asset: AssetDto): string | null {
-  if (!asset.shots) return null;
-  const { count, labels } = asset.shots;
-  const named = Object.entries(labels)
-    .filter(([label]) => label !== 'unknown' && label !== 'other')
-    .map(([label, n]) => `${clipTagName(label)}${n > 1 ? ` ×${n}` : ''}`);
-  const base = `${count} shot${count === 1 ? '' : 's'}`;
-  return named.length ? `${base}: ${named.join(', ')}` : base;
-}
 
 /**
  * One clip: position controls, thumbnail, duration, badges, analysis status, the "What's in this clip?" tag,
@@ -81,7 +72,7 @@ function ClipCard({
   const [savingTag, setSavingTag] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [busy, setBusy] = useState(false);
-  const summary = shotSummary(asset);
+  const statusLine = clipStatusLine(asset);
 
   const saveTag = async (value: string) => {
     const previous = tag;
@@ -161,8 +152,7 @@ function ClipCard({
           </p>
           <StatusPill status={asset.status} label={ASSET_STATUS_LABELS[asset.status]} className="shrink-0" />
         </div>
-        <p className={asset.status === 'failed' ? 'text-xs text-red-600' : 'text-xs text-charcoal-500'}>{asset.statusMessage || summary || ' '}</p>
-        {asset.status === 'ready' && summary && asset.statusMessage !== summary ? <p className="text-xs text-charcoal-500">{summary}</p> : null}
+        <p className={asset.status === 'failed' ? 'text-xs text-red-600' : 'text-xs text-charcoal-500'}>{statusLine || ' '}</p>
         <div className="flex flex-wrap gap-1.5">
           {asset.isHdr ? <Badge tone="info">HDR, colour converted</Badge> : null}
           {asset.rotation !== 0 ? <Badge>Rotated</Badge> : null}
