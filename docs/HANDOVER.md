@@ -39,6 +39,11 @@ History of the background runs:
    ("publishing"); G3 = WP5 (no migration) then Stage B acceptance; G4 = WP6 ("square") ∥ WP7 ("email_reviews") ∥
    WP8 ("website"); G5 = WP6b ("square_changes") ∥ WP9 ("business_profile") ∥ WP10 (none).
 
+7. G0 merged and pushed 2026-11-14 (HEAD cd32d1b): 428 unit tests, worker integration 12/12, browser test 51/51,
+   migration 0001_foundations applied to the preview database. G1 (WP1 music ∥ WP3 trends) started right after.
+   If a group run stops mid-way (usage limit), commit the worktree's changes as a WIP commit on its branch and
+   relaunch the group with `resumeWorktree`/`resumeBranch` for that package.
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
