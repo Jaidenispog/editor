@@ -142,6 +142,22 @@ History of the background runs:
         must build on.
     - **G5 running** (run `wf_57df34d0-732`): WP6b (`square_changes`) ∥ WP9 (`business_profile`, docs
       email-and-reviews + website-local-search).
+14. G5 merged, reviewed and pushed (1bd3e49; 1,398 unit tests, integration 12/12, Stage A 51/51, Stage B 77/77):
+    - WP6b Square Tier 1 (booking changes and self-test) in `0011_square_changes`, **shipped switched off**
+      (`SQUARE_TIER1_AVAILABLE = false` in `packages/core/src/square.ts`). Switch it on only after the sandbox write
+      checks in square design §11.3 are recorded and `mapSquareError` is updated; the `square.test.ts` assertion that
+      it is false changes with it.
+    - WP9 Google Business Profile reviews and Performance (read-only) in `0012_business_profile`.
+    - Review (run `wf_11274755-1c0`): 1 blocker (a Business Profile job running during a disconnect could switch the
+      row back on and write deleted data back) and 15 more, all fixed and re-checked (971f20c). The lead then bound
+      Performance answers to the location asked about and stopped the Settings card asking to "Press Check again"
+      while a check runs (1c21e3b, 1bd3e49, after an independent read).
+    - **WP10 Zernio not built:** docs.zernio.com and zernio.com are unreachable from this environment (proxy refusal,
+      DNS failure); the plan forbids building it on unconfirmed API details. The owner can allow those hosts.
+    - **Stage C acceptance running** (run `wf_27afe9cd-b85`): two browser tests in worktrees
+      (`run-stage-c-bookings.sh` on port 3800 / `studio_e2e_c1`; `run-stage-c-website.sh` on 3900 /
+      `studio_e2e_c2`), each re-run twice and reviewed independently, then fixed up. Merge each only after the full
+      suite plus all four browser tests pass on the merged result.
       **WP10 Zernio stays blocked:** the plan requires docs.zernio.com to be read first; this environment's proxy
       refuses docs.zernio.com and zernio.com (CONNECT 403) and WebFetch cannot resolve them. Needs the owner to
       allow those hosts (a network change) before WP10 can start.
