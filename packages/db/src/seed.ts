@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eq, sql } from 'drizzle-orm';
@@ -6,6 +5,7 @@ import { hash } from '@node-rs/argon2';
 import { DEFAULT_SETTINGS, newId } from '@studio/core';
 import { createDatabase } from './client.js';
 import * as schema from './schema.js';
+import { loadRootEnvFile } from './env-file.js';
 
 export interface SeedOptions {
   ownerEmail?: string | undefined;
@@ -50,6 +50,7 @@ export async function seed(connectionString: string, options: SeedOptions): Prom
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isDirectRun) {
+  loadRootEnvFile();
   const url = process.env.DATABASE_URL;
   if (!url) {
     console.error('DATABASE_URL is not set');
