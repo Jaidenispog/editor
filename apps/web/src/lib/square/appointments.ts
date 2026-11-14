@@ -20,6 +20,7 @@ import {
   newId,
   parseSquareConfig,
   reviewRequestBadgeLabel,
+  sentBeforeBookingChanged,
   type Attendance,
   type OwnerAttendance,
   type PaymentMatch,
@@ -139,7 +140,9 @@ async function toBookingDtos(db: Database, rows: BookingRow[], config: SquareCon
       attendanceMark: { allowed: mark.allowed, reason: mark.reason, current: (r.ownerAttendance ?? null) as 'attended' | 'not_attended' | null },
       reviewRequest: (() => {
         const q = byBookingRequest.get(r.id);
-        return q ? { status: q.status, label: reviewRequestBadgeLabel(q.status, q.skipReason) } : null;
+        if (!q) return null;
+        const bookingChanged = sentBeforeBookingChanged(q.status, r);
+        return { status: bookingChanged ? 'booking_changed' : q.status, label: reviewRequestBadgeLabel(q.status, q.skipReason, { bookingChanged }) };
       })(),
     };
   });

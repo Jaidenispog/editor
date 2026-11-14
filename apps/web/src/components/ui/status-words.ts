@@ -32,6 +32,7 @@ const TONES: Record<string, BadgeTone> = {
   approved: 'neutral',
   scheduled: 'neutral',
   skipped: 'neutral',
+  booking_changed: 'neutral',
   proposed: 'neutral',
   upcoming: 'neutral',
   pending: 'neutral',
@@ -137,6 +138,7 @@ const LABELS: Record<string, string> = {
   pending_approval: 'Waiting for approval',
   complained: 'Spam complaint',
   suppressed: 'Not sent',
+  booking_changed: 'Sent before the booking changed',
   // Square
   upcoming: 'Upcoming',
   awaiting_payment: 'Waiting for a payment',

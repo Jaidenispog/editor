@@ -1,10 +1,10 @@
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { AppError, evaluateSendPolicy, isCommercial, lintEmail, senderDomain, streamFor, type JobPayload, type MessageClass, type SendDecision } from '@studio/core';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import { writeWorkerAudit } from '../lib/audit.js';
 import { recordConnectionCheck } from '../lib/connections.js';
-import { redactEmails } from '../lib/http.js';
+import { hashEmail, redactEmails } from '../lib/http.js';
 import { enqueueTracked } from '../lib/jobs.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { composeMessage, fromHeader, loadMessageSubject, replyToFor } from '../lib/email/compose.js';
@@ -17,6 +17,14 @@ type MessageRow = typeof schema.emailMessages.$inferSelect;
 
 /** Shown when a send may or may not have reached Postmark and its search could not find it. */
 export const CHECK_BEFORE_RETRY_MESSAGE = "We couldn't confirm whether this email went out. Check the client's inbox or Postmark Activity before sending again.";
+
+/**
+ * Shown when Postmark refuses a marketing email (406) to an address the app itself put on Postmark's Broadcast
+ * suppression list when the client unsubscribed, and the client has since given permission again. The app never
+ * removes addresses from Postmark's list (design §8.1.4), so the owner does it in Postmark.
+ */
+export const PROVIDER_STILL_SUPPRESSED_MESSAGE =
+  "Not sent: Postmark still blocks marketing emails to this address because the app added it to Postmark's unsubscribe list when the client unsubscribed. The client has since given permission again, so remove the address from your Broadcast stream's suppression list in Postmark, then write the email again.";
 
 /** A transient provider failure: the queue retries the job. */
 export class TransientSendError extends Error {
@@ -208,7 +216,9 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
   const pm = postmarkSettings(ctx.env);
   if (!pm) throw new AppError('INTEGRATION_NOT_CONFIGURED', 'Email sending is not set up on the server.');
 
-  // 4. Claim (the non-repeatable call marker), with the rendered copy and the hashed personal tokens.
+  // 4. Claim (the non-repeatable call marker), with the rendered copy and the hashed personal tokens. A cancel that
+  // arrived during the gate stops here, before anything is claimed.
+  run.checkCancelled();
   const commercial = isCommercial(messageClass);
   const unsubToken = commercial ? newLinkToken() : null;
   const clickToken = messageClass === 'review_request' ? newLinkToken() : null;
@@ -227,6 +237,26 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
     if (msg.campaignId) {
       const [camp] = await tx.select({ status: schema.emailCampaigns.status }).from(schema.emailCampaigns).where(eq(schema.emailCampaigns.id, msg.campaignId)).for('share');
       if (!camp || !SENDABLE_CAMPAIGN_STATUSES.includes(camp.status)) return false;
+    }
+    // "Send again" after an unknown outcome claims the message a second time with new tokens. The first attempt may
+    // have reached the client, so its link tokens are kept (moved to email_link_tokens) and keep working.
+    const [current] = await tx
+      .select({ status: schema.emailMessages.status, submittedAt: schema.emailMessages.submittedAt, unsubscribeTokenHash: schema.emailMessages.unsubscribeTokenHash })
+      .from(schema.emailMessages)
+      .where(eq(schema.emailMessages.id, msg.id))
+      .for('update');
+    if (!current || (current.status !== 'approved' && current.status !== 'queued') || current.submittedAt) return false;
+    if (current.unsubscribeTokenHash) {
+      await tx.insert(schema.emailLinkTokens).values({ tokenHash: current.unsubscribeTokenHash, kind: 'unsubscribe', emailMessageId: msg.id }).onConflictDoNothing();
+    }
+    if (clickToken) {
+      const earlier = await tx
+        .select({ id: schema.reviewRequests.id, clickTokenHash: schema.reviewRequests.clickTokenHash })
+        .from(schema.reviewRequests)
+        .where(and(eq(schema.reviewRequests.emailMessageId, msg.id), isNotNull(schema.reviewRequests.clickTokenHash)));
+      for (const r of earlier) {
+        await tx.insert(schema.emailLinkTokens).values({ tokenHash: r.clickTokenHash!, kind: 'review_click', emailMessageId: msg.id, reviewRequestId: r.id }).onConflictDoNothing();
+      }
     }
     const rows = await tx
       .update(schema.emailMessages)
@@ -257,8 +287,14 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
     return;
   }
 
-  // 5. Last point where a cancel applies, then the one external call.
-  run.checkCancelled();
+  // 5. Last point where a cancel applies, then the one external call. Postmark has certainly not been called yet,
+  // so a cancel here releases the claim instead of leaving an "unknown outcome" for the owner to check.
+  try {
+    run.checkCancelled();
+  } catch (err) {
+    await setMessage(ctx, msg.id, ['sending'], { status: 'approved', submittedAt: null, statusMessage: '' });
+    throw err;
+  }
   const result = await provider.send(
     {
       emailMessageId: msg.id,
@@ -295,6 +331,14 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
       // Keep `submitted_at`: the retry looks the message up before doing anything else.
       throw new TransientSendError('Postmark did not confirm the send; checking before trying again');
     case 'inactive_recipient': {
+      if (stream === 'broadcast' && (await refusedBecauseOfOwnUnsubscribePush(ctx, msg.toEmail))) {
+        // The 406 is the app's own unsubscribe push, not a bounce or a report: say so, and add no block of our own
+        // (it would keep blocking after the owner removes the address from Postmark's list).
+        await setMessage(ctx, msg.id, ['sending'], { status: 'suppressed', error: verbatim, statusMessage: PROVIDER_STILL_SUPPRESSED_MESSAGE });
+        await updateLinkedReviewRequest(ctx.db, msg.id, { status: 'skipped', skipReason: 'suppressed' });
+        await writeWorkerAudit(ctx.db, { userId: null, action: 'email.provider_still_suppressed', entityType: 'email_address', entityId: hashEmail(msg.toEmail), data: { emailMessageId: msg.id } }, ctx.logger);
+        break;
+      }
       const scope = stream === 'broadcast' ? 'marketing' : 'all';
       await setMessage(ctx, msg.id, ['sending'], { status: 'suppressed', error: verbatim, statusMessage: 'Postmark has stopped sending to this address (it bounced or was reported before).' });
       const suppressionId = await addSuppression(ctx.db, { email: msg.toEmail, scope, reason: 'provider_inactive', source: 'send_error', stream, emailMessageId: msg.id });
@@ -325,6 +369,23 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
       await updateLinkedReviewRequest(ctx.db, msg.id, { status: 'failed' });
   }
   await run.progress(1, `Not sent: ${result.kind}`);
+}
+
+/**
+ * True when the address has no active block in the app, but an unsubscribe the app pushed to Postmark was later
+ * reversed by new express permission: Postmark's Broadcast list (which the app never edits back) still has it.
+ */
+async function refusedBecauseOfOwnUnsubscribePush(ctx: WorkerContext, toEmail: string): Promise<boolean> {
+  const s = schema.emailSuppressions;
+  const emailLower = toEmail.trim().toLowerCase();
+  const active = await ctx.db.select({ id: s.id }).from(s).where(and(eq(s.emailLower, emailLower), isNull(s.liftedAt))).limit(1);
+  if (active.length) return false;
+  const pushedThenLifted = await ctx.db
+    .select({ id: s.id })
+    .from(s)
+    .where(and(eq(s.emailLower, emailLower), eq(s.reason, 'unsubscribe'), isNotNull(s.pushedToProviderAt), isNotNull(s.liftedAt)))
+    .limit(1);
+  return pushedThenLifted.length > 0;
 }
 
 /** Clears a stored "pending approval" once a live send outside the sender's own domain was accepted (design §3.1). */

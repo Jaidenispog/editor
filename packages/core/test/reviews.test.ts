@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REVIEW_ELIGIBILITY_INPUT_KEYS, reviewEligibility, reviewRequestBadgeLabel, validateReviewLink, type ReviewEligibilityInput } from '../src/reviews.js';
+import { REVIEW_ELIGIBILITY_INPUT_KEYS, reviewEligibility, reviewRequestBadgeLabel, sentBeforeBookingChanged, validateReviewLink, type ReviewEligibilityInput } from '../src/reviews.js';
 import { DEFAULT_SETTINGS } from '../src/settings.js';
 
 const NOW = new Date('2026-11-16T00:00:00Z');
@@ -89,5 +89,17 @@ describe('reviewRequestBadgeLabel (Appointments badge)', () => {
     expect(reviewRequestBadgeLabel('sent', null)).toBe('Review request: Sent');
     expect(reviewRequestBadgeLabel('skipped', 'no_consent')).toBe('Review request: Skipped — no email permission recorded');
     expect(reviewRequestBadgeLabel('cancelled', 'booking_cancelled')).toBe('Review request: Cancelled');
+  });
+
+  it('says "Sent before the booking changed" when a sent request’s booking stopped counting as a visit (design §4.3 step 6)', () => {
+    const done = { status: 'ACCEPTED', completionSource: 'payment', completedAt: new Date(NOW.getTime() - DAY), squareEnvironment: 'production' };
+    expect(sentBeforeBookingChanged('sent', done)).toBe(false);
+    expect(sentBeforeBookingChanged('sent', { ...done, status: 'CANCELLED_BY_CUSTOMER' })).toBe(true);
+    expect(sentBeforeBookingChanged('sent', { ...done, status: 'NO_SHOW' })).toBe(true);
+    expect(sentBeforeBookingChanged('sent', { ...done, completionSource: 'none', completedAt: null })).toBe(true);
+    expect(sentBeforeBookingChanged('scheduled', { ...done, status: 'NO_SHOW' })).toBe(false);
+    expect(sentBeforeBookingChanged('sent', null)).toBe(false);
+    expect(reviewRequestBadgeLabel('sent', null, { bookingChanged: true })).toBe('Review request: Sent before the booking changed');
+    expect(reviewRequestBadgeLabel('cancelled', null, { bookingChanged: true })).toBe('Review request: Cancelled');
   });
 });

@@ -69,6 +69,14 @@ export interface SquareStatusDto {
   canManage: boolean;
   /** Owner-only technical details (Settings disclosure). Never tokens. */
   details: { merchantId: string | null; scopes: string[]; tokenExpiresLabel: string | null } | null;
+  /** After a disconnect: whether Square confirmed that the app's access was revoked (design §6), or null. */
+  revoke: SquareRevokeDto | null;
+}
+
+/** The outcome of the `square.revoke` job after the latest disconnect. */
+export interface SquareRevokeDto {
+  state: 'pending' | 'revoked' | 'failed';
+  message: string;
 }
 
 /** One booking in a list. */

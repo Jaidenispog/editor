@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import { schema } from '@studio/db';
 import { handlePublicApi } from '@/lib/api';
 import { getDb } from '@/lib/db';
@@ -39,11 +39,13 @@ export const POST = handlePublicApi(
       return NextResponse.json({ error: { code: 'VALIDATION', message: 'event_id, type and merchant_id are required.' } }, { status: 400 });
     }
     const stored = await storeWebhookEvent({ provider: 'square', externalEventId: event.event_id, eventType: event.type, payload: squareWebhookEnvelope(event), signatureValid: true });
+    // "Updates arrive instantly" on the Square card reads this: only a delivery for the connected seller counts, and
+    // nothing counts after a disconnect (a correctly signed delivery for another merchant is still stored and ignored).
     const t = schema.integrationConnections;
     await getDb()
       .update(t)
       .set({ config: sql`${t.config} || ${JSON.stringify({ lastWebhookAt: new Date().toISOString() })}::jsonb` })
-      .where(eq(t.provider, 'square'));
+      .where(and(eq(t.provider, 'square'), eq(t.externalAccountId, event.merchant_id), ne(t.status, 'disconnected')));
     return { ok: true, duplicate: !stored.stored };
   },
   { csrf: false },

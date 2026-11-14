@@ -69,6 +69,13 @@ describe('loadEnv', () => {
     expect(() => loadEnv({ ...base, META_GRAPH_VERSION: '26' })).toThrow(/META_GRAPH_VERSION/);
   });
 
+  it('refuses a short Postmark webhook password, or only one of the two webhook credentials', () => {
+    expect(() => loadEnv({ ...base, POSTMARK_WEBHOOK_USERNAME: 'hook', POSTMARK_WEBHOOK_PASSWORD: 'short-password' })).toThrow(/at least 32 characters/);
+    expect(() => loadEnv({ ...base, POSTMARK_WEBHOOK_PASSWORD: 'x'.repeat(40) })).toThrow(/both POSTMARK_WEBHOOK_USERNAME/);
+    expect(loadEnv({ ...base, POSTMARK_WEBHOOK_USERNAME: 'hook', POSTMARK_WEBHOOK_PASSWORD: 'x'.repeat(32) }).POSTMARK_WEBHOOK_PASSWORD).toHaveLength(32);
+    expect(loadEnv({ ...base, POSTMARK_WEBHOOK_USERNAME: '', POSTMARK_WEBHOOK_PASSWORD: '' }).POSTMARK_WEBHOOK_PASSWORD).toBe('');
+  });
+
   it('honours test-only base URLs only under NODE_ENV=test', () => {
     expect(testOnlyBaseUrl({ NODE_ENV: 'test' }, 'http://127.0.0.1:4010/')).toBe('http://127.0.0.1:4010');
     expect(testOnlyBaseUrl({ NODE_ENV: 'production' }, 'http://127.0.0.1:4010')).toBeNull();

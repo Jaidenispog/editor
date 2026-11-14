@@ -150,11 +150,24 @@ export const ReviewLinkSchema = z.object({ url: z.string().trim().max(500) });
 export const PlaceIdSchema = z.object({ placeId: z.string().regex(/^[A-Za-z0-9_-]{10,300}$/, 'That Place ID looks wrong. Copy it from Google’s Place ID Finder.') });
 export const ConfirmPlaceSchema = z.object({ confirm: z.boolean() });
 
+/** Shown for a request that was already sent when its booking was cancelled, marked a no-show or "Didn't happen". */
+export const SENT_BEFORE_BOOKING_CHANGED = 'Sent before the booking changed';
+
+/**
+ * Design §4.3 step 6: a sent request whose booking no longer counts as a completed visit (Square cancelled it or
+ * marked it a no-show, or the owner pressed "Didn't happen" afterwards). Nothing else happens: the email has gone.
+ * A manual request (no booking) never changes.
+ */
+export function sentBeforeBookingChanged(requestStatus: string, booking: Parameters<typeof isGenuinelyCompleted>[0] | null): boolean {
+  return requestStatus === 'sent' && booking !== null && !isGenuinelyCompleted(booking);
+}
+
 /**
  * The badge on a past booking (design §9.1): "Review request: Waiting for approval", "Review request: Sent",
  * "Review request: Skipped — no email permission recorded", "Review request: Cancelled" and so on.
  */
-export function reviewRequestBadgeLabel(status: string, skipReason: string | null): string {
+export function reviewRequestBadgeLabel(status: string, skipReason: string | null, opts: { bookingChanged?: boolean } = {}): string {
+  if (status === 'sent' && opts.bookingChanged) return `Review request: ${SENT_BEFORE_BOOKING_CHANGED}`;
   const word = (REVIEW_REQUEST_STATUS_WORDS as Record<string, string>)[status] ?? status;
   const reason = status === 'skipped' && skipReason ? (REVIEW_SKIP_LABELS as Record<string, string>)[skipReason] : undefined;
   return `Review request: ${word}${reason ? ` — ${reason.charAt(0).toLowerCase()}${reason.slice(1)}` : ''}`;

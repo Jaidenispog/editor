@@ -1159,10 +1159,15 @@ Places: one Place Details call on the owner's Place ID (read-only). Business Pro
 3. In Postmark, add your domain and add the DKIM and Return-Path records it shows you to your DNS. Add a DMARC record
    (`v=DMARC1; p=none; rua=mailto:you@yourstudio.com.au`) if you don't have one.
 4. Request account approval in Postmark (until then you can only email addresses at your own domain).
-5. Make sure the server has a **Transactional** stream and add a **Broadcast** stream. Note their IDs.
+5. Make sure the server has a **Transactional** stream and add a **Broadcast** stream. Note their IDs. In the
+   Broadcast stream's settings, leave unsubscribe handling to Postmark (Postmark-managed), so its `{{{ pm:unsubscribe }}}`
+   link and one-click headers are added. *(Build note, round-two review: the read-only check cannot confirm this
+   setting, because no API field for it is recorded in this design or the research memo; the app also sets no
+   `List-Unsubscribe` header of its own, so its RFC 8058 endpoint is reached only through the `/u/{token}` page. This
+   checklist line stands in until the field is confirmed in the smoke test.)*
 6. In each stream, add a webhook to `https://<your app address>/api/webhooks/postmark` with a username and password
-   (ask your developer to generate long random values), and tick Delivery, Bounce, Spam complaint and Subscription
-   change. Leave Open and Click off.
+   (ask your developer to generate random values; the password must be at least 32 characters or the app will not
+   start), and tick Delivery, Bounce, Spam complaint and Subscription change. Leave Open and Click off.
 7. Give your developer, for the server settings: `EMAIL_PROVIDER=postmark`, the server API token, the two stream IDs,
    the webhook username and password, and the "from" address (e.g. `"Your Studio" <hello@yourstudio.com.au>`).
 8. Fill in Settings → Business: street address, phone and email. Every email shows these.

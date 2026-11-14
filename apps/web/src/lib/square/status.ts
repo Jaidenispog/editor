@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import {
   AppError,
   BUSINESS_TIMEZONE,
@@ -26,7 +26,7 @@ import { getEnv } from '../env.js';
 import { formatRelative } from '../format.js';
 import { createTrackedJob } from '../jobs.js';
 import { missingEnv } from '../integrations/types.js';
-import type { SquareServiceDto, SquareStatusDto, Tier1LineDto } from '../shared/square-dto.js';
+import type { SquareRevokeDto, SquareServiceDto, SquareStatusDto, Tier1LineDto } from '../shared/square-dto.js';
 
 /** The stored `square` connection row, or null. */
 export async function loadSquareConnection(db: Database = getDb()) {
@@ -95,6 +95,42 @@ function stateMessage(r: ReturnType<typeof squareIntegrationState>, lastError: s
   return null;
 }
 
+const REVOKE_OUTCOMES = ['integration.square.revoked', 'integration.square.revoke_failed', 'integration.square.revoke_skipped'] as const;
+
+/** What the owner is told when Square did not confirm the revoke (design §6). The page's address is not linked. */
+export function revokeFailedMessage(environment: 'sandbox' | 'production', reason: string | null): string {
+  const account = environment === 'production' ? 'your Square account' : 'your Square sandbox (test) account';
+  const why =
+    reason === 'environment_changed'
+      ? `Studio Assistant has since been switched to the other Square environment, so it could not ask Square to remove its access to ${account}.`
+      : reason === 'not_configured'
+        ? `Square is not set up on the server any more, so Studio Assistant could not ask Square to remove its access to ${account}.`
+        : `Square did not confirm that Studio Assistant's access to ${account} was removed.`;
+  return `${why} To be sure, open the App integrations page in ${account}'s Square Dashboard and remove Studio Assistant.`;
+}
+
+/** The revoke outcome after the latest disconnect: from its audit entry, or from the job while it is still running. */
+export async function squareRevokeOutcome(db: Database, conn: { id: string; status: string; config: unknown } | null): Promise<SquareRevokeDto | null> {
+  if (!conn || conn.status !== 'disconnected') return null;
+  const a = schema.auditLog;
+  const disconnected = (await db.select().from(a).where(and(eq(a.action, 'integration.square.disconnected'), eq(a.entityId, conn.id))).orderBy(desc(a.createdAt)).limit(1))[0];
+  if (!disconnected) return null;
+  const environment = parseSquareConfig(conn.config).environment;
+  const outcome = (await db.select().from(a).where(and(inArray(a.action, [...REVOKE_OUTCOMES]), gte(a.createdAt, disconnected.createdAt))).orderBy(desc(a.createdAt)).limit(1))[0];
+  if (outcome?.action === 'integration.square.revoked') return { state: 'revoked', message: 'Square confirmed that Studio Assistant no longer has access to your Square account.' };
+  if (outcome?.action === 'integration.square.revoke_failed') {
+    const reason = typeof outcome.data['reason'] === 'string' ? (outcome.data['reason'] as string) : null;
+    return { state: 'failed', message: revokeFailedMessage(environment, reason) };
+  }
+  if (outcome) return null;
+  const j = schema.jobs;
+  const job = (await db.select({ status: j.status }).from(j).where(and(eq(j.type, 'square.revoke'), gte(j.createdAt, disconnected.createdAt))).orderBy(desc(j.createdAt)).limit(1))[0];
+  if (!job) return null;
+  if (job.status === 'queued' || job.status === 'running') return { state: 'pending', message: 'Asking Square to remove Studio Assistant’s access…' };
+  if (job.status === 'failed' || job.status === 'cancelled') return { state: 'failed', message: revokeFailedMessage(environment, null) };
+  return null;
+}
+
 /** Everything the Square card and the Appointments header show (never tokens or secrets). */
 export async function getSquareStatus(user: SessionUser, db: Database = getDb(), now: Date = new Date()): Promise<SquareStatusDto> {
   const env = getEnv();
@@ -150,6 +186,7 @@ export async function getSquareStatus(user: SessionUser, db: Database = getDb(),
     sync: job ? { jobId: job.id, status: job.status, progress: job.progress, message: job.message } : null,
     canManage: owner,
     details: owner && conn ? { merchantId: conn.externalAccountId, scopes: conn.scopes, tokenExpiresLabel: conn.tokenExpiresAt ? formatDate(conn.tokenExpiresAt) : null } : null,
+    revoke: owner ? await squareRevokeOutcome(db, conn) : null,
   };
 }
 

@@ -5,16 +5,18 @@
  *
  * Uses the Square connection stored by Settings → Integrations → Connect Square on the database in DATABASE_URL and
  * refuses to run unless SQUARE_ENVIRONMENT=sandbox and that connection is a sandbox one. It reads, through the same
- * client the worker uses: token status and permissions, the business snapshot, a 31-day bookings window, the first
- * page of customers, and an availability search over a 23-hour daylight-saving day (widened to Square's 24-hour
- * minimum). It never writes to Square and sends nothing. Paste the printed summary into
+ * client the worker uses: token status and permissions, the business snapshot, a 31-day bookings window, every page
+ * of customers (the count), and an availability search over tomorrow (one Melbourne day, at least Square's 24-hour
+ * minimum). The 23-hour daylight-saving day cannot be checked live once its date has passed, so the summary says so;
+ * the widening is covered by the unit and fake-Square tests (`availabilityRange`). It never writes to Square and
+ * sends nothing. Paste the printed summary into
  * docs/research/square-sandbox-results.md. The write checks (no-show set-ups, Tier 1) belong to WP6b.
  */
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import pino from 'pino';
 import { loadEnv } from '@studio/config';
-import { availabilityRange, effectiveLocationId, errorMessage, hasSquareReadScopes } from '@studio/core';
+import { addDaysToDate, availabilityRange, effectiveLocationId, errorMessage, hasSquareReadScopes, melbourneDateOf } from '@studio/core';
 import { createDatabase } from '@studio/db';
 import { repoRoot, type WorkerContext } from '../src/context.js';
 import { openSquare } from '../src/square/client.js';
@@ -49,16 +51,19 @@ try {
   const start = new Date();
   const bookings = await s.api.listBookings({ locationId, startAtMin: start.toISOString(), startAtMax: new Date(start.getTime() + 31 * 24 * 3600_000).toISOString() });
   out['bookings'] = { count: bookings.length, statuses: [...new Set(bookings.map((b) => b.status))] };
-  out['customers'] = { firstPage: (await s.api.listCustomers()).length };
+  // listCustomers reads every page (100 a page), as the sync does.
+  out['customers'] = { allPages: (await s.api.listCustomers()).length };
   const service = services.find((v) => v.availableForBooking && !v.archived);
   if (service && locationId) {
-    // 4 October 2026 is a 23-hour day in Melbourne; Square needs at least 24 hours per search.
-    const range = availabilityRange('2026-10-04', 1);
+    // Square searches only future times, so a past date proves nothing: search tomorrow (Melbourne), one day.
+    const tomorrow = addDaysToDate(melbourneDateOf(new Date()), 1);
+    const range = availabilityRange(tomorrow, 1);
     const slots = await s.api.searchAvailability({ startAt: range.start.toISOString(), endAt: range.end.toISOString(), locationId, serviceVariationId: service.variationId, teamMemberId: null });
-    out['availabilityDstDay'] = { requestedHours: (range.end.getTime() - range.start.getTime()) / 3600_000, slots: slots.length };
+    out['availabilityOneDay'] = { date: tomorrow, requestedHours: (range.end.getTime() - range.start.getTime()) / 3600_000, slots: slots.length };
   } else {
-    out['availabilityDstDay'] = 'skipped: no bookable service or no single location';
+    out['availabilityOneDay'] = 'skipped: no bookable service or no single location';
   }
+  out['availabilityDstDay'] = 'not verifiable live (the next 23-hour day is months away); covered by unit and fake-Square tests';
   console.log(JSON.stringify(out, null, 2));
 } catch (err) {
   console.error(`Smoke test stopped: ${errorMessage(err)}`);

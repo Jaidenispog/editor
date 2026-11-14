@@ -5,6 +5,7 @@
  * daily caps in Melbourne time, dispatch, campaigns (expand twice, auto-pause), Postmark webhooks, the provider check
  * and the Places snapshot. Nothing is ever sent anywhere. Skipped unless TEST_DATABASE_URL is set.
  */
+import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import pino from 'pino';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
@@ -12,7 +13,7 @@ import { loadEnv } from '@studio/config';
 import { AppSettingsSchema, dedupeKeys, newId, type JobType } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
 import type { WorkerContext } from '../src/context.js';
-import { HOLD_RECHECK_MS, handleEmailSend } from '../src/handlers/email-send.js';
+import { HOLD_RECHECK_MS, PROVIDER_STILL_SUPPRESSED_MESSAGE, handleEmailSend } from '../src/handlers/email-send.js';
 import { handleEmailDispatch } from '../src/handlers/email-dispatch.js';
 import { SWEEP_BATCH, handleEmailSweep } from '../src/handlers/email-sweep.js';
 import { handleEmailCampaignExpand } from '../src/handlers/email-campaign.js';
@@ -178,6 +179,68 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
       expect(fake.sends).toHaveLength(2);
     });
 
+    it('"Send again" after an owner check keeps the first attempt’s unsubscribe and review links working', async () => {
+      const c = await customer();
+      await consent(c);
+      const id = await message({ toEmail: c.email!, customerId: c.id, messageClass: 'review_request', purpose: 'review_request', subject: 'A quick favour', bodyMarkdown: 'Hi {{first_name}}. [Leave a Google review]({{review_link}})' });
+      const rr = newId();
+      await handle.db.insert(schema.reviewRequests).values({ id: rr, customerId: c.id, channel: 'email', emailMessageId: id, status: 'scheduled', origin: 'manual', completionEvidence: 'owner_attested', dedupeKey: `review:manual:${c.id}:t` });
+      fake.sendResults.push({ ok: false, kind: 'unknown_outcome', code: 'network', message: 'timeout' });
+      await expect(send(id)).rejects.toThrow();
+      await send(id);
+      expect(await get(id)).toMatchObject({ status: 'failed', ownerAction: 'check_before_retry' });
+      const firstHtml = fake.sends[0]!.html;
+      const token = (re: RegExp) => re.exec(firstHtml)?.[1] ?? '';
+      const firstUnsub = token(/studio\.example\/u\/([A-Za-z0-9_-]{43})/);
+      const firstClick = token(/studio\.example\/r\/([A-Za-z0-9_-]{43})/);
+      expect(firstUnsub).not.toBe('');
+      expect(firstClick).not.toBe('');
+      // The web app's "Send again" (sendAgain in apps/web/src/lib/email.ts).
+      await handle.db.update(m()).set({ status: 'approved', submittedAt: null, ownerAction: null, statusMessage: '' }).where(eq(m().id, id));
+      await send(id);
+      expect(await get(id)).toMatchObject({ status: 'sent' });
+      expect(fake.sends).toHaveLength(2);
+      const row = await get(id);
+      const req = await handle.db.query.reviewRequests.findFirst({ where: eq(schema.reviewRequests.id, rr) });
+      const hash = (t: string) => createHash('sha256').update(t).digest('hex');
+      // The second copy has new tokens; the first copy's tokens are kept, hashed, for the public pages to resolve.
+      expect(row.unsubscribeTokenHash).not.toBe(hash(firstUnsub));
+      expect(req?.clickTokenHash).not.toBe(hash(firstClick));
+      const kept = await handle.db.select().from(schema.emailLinkTokens).where(eq(schema.emailLinkTokens.emailMessageId, id));
+      expect(kept).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ tokenHash: hash(firstUnsub), kind: 'unsubscribe', emailMessageId: id }),
+          expect.objectContaining({ tokenHash: hash(firstClick), kind: 'review_click', reviewRequestId: rr }),
+        ]),
+      );
+      expect(JSON.stringify(kept)).not.toContain(firstUnsub);
+    });
+
+    it('a cancel that arrives after the claim releases it: Postmark is not called and no owner check is asked for', async () => {
+      const c = await customer();
+      const id = await message({ toEmail: c.email!, customerId: c.id });
+      const run = fakeRun({ willRetry: true });
+      let claims = 0;
+      const db = new Proxy(handle.db, {
+        get(target, prop, receiver) {
+          if (prop !== 'transaction') return Reflect.get(target, prop, receiver);
+          return async (...args: Parameters<typeof target.transaction>) => {
+            const out = await target.transaction(...args);
+            if (++claims === 1) run.abort();
+            return out;
+          };
+        },
+      });
+      await expect(handleEmailSend({ ...ctx, db }, run, { emailMessageId: id }, deps)).rejects.toThrow(/Cancelled/);
+      expect(fake.sends).toHaveLength(0);
+      expect(await get(id)).toMatchObject({ status: 'approved', submittedAt: null, ownerAction: null });
+      // The retry sends it normally, without looking it up first.
+      await send(id);
+      expect(fake.finds).toHaveLength(0);
+      expect(fake.sends).toHaveLength(1);
+      expect((await get(id)).status).toBe('sent');
+    });
+
     it('re-queues on 429 and sends on the retry', async () => {
       const c = await customer();
       const id = await message({ toEmail: c.email!, customerId: c.id });
@@ -210,6 +273,26 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
       expect((await get(pending)).status).toBe('failed');
       const conn = await handle.db.query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'postmark') });
       expect(conn?.capabilities['approved']).toBe(false);
+    });
+
+    it('a 406 caused by the app’s own earlier unsubscribe push (client re-consented) says so and adds no block', async () => {
+      const c = await customer();
+      const lower = c.email!.toLowerCase();
+      // The client unsubscribed (pushed to Postmark's Broadcast list), then gave permission again in the studio.
+      await handle.db.insert(schema.emailSuppressions).values({ id: newId(), emailLower: lower, scope: 'marketing', reason: 'unsubscribe', source: 'unsubscribe_page', pushedToProviderAt: new Date(NOW.getTime() - 10 * 24 * HOUR), liftedAt: new Date(NOW.getTime() - 2 * 24 * HOUR), liftNote: 'New express permission recorded' });
+      await consent(c, new Date(NOW.getTime() - 2 * 24 * HOUR));
+      const id = await message({ toEmail: c.email!, customerId: c.id, messageClass: 'campaign', bodyMarkdown: 'Hi {{first_name}}, new hours.' });
+      fake.sendResults.push({ ok: false, kind: 'inactive_recipient', code: '406', message: 'Inactive recipient' });
+      await send(id);
+      const row = await get(id);
+      expect(row.status).toBe('suppressed');
+      expect(row.statusMessage).toBe(PROVIDER_STILL_SUPPRESSED_MESSAGE);
+      expect(row.statusMessage).not.toMatch(/bounced or was reported/);
+      const active = await handle.db.select().from(schema.emailSuppressions).where(and(eq(schema.emailSuppressions.emailLower, lower), isNull(schema.emailSuppressions.liftedAt)));
+      expect(active).toHaveLength(0);
+      const audit = await handle.db.query.auditLog.findFirst({ where: and(eq(schema.auditLog.action, 'email.provider_still_suppressed'), eq(schema.auditLog.entityType, 'email_address')) });
+      expect(audit?.entityId).toMatch(/^email:[0-9a-f]{12}$/);
+      expect(JSON.stringify(audit)).not.toContain(lower);
     });
 
     it('a live send outside the sender’s domain after a 412 clears "Postmark is still reviewing your account"', async () => {

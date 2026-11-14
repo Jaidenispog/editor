@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderEmail, type RenderEmailInput } from '../src/email.js';
+import { missingIdentityFields, renderEmail, type RenderEmailInput } from '../src/email.js';
 
 const base: RenderEmailInput = {
   messageClass: 'transactional_factual',
@@ -56,5 +56,26 @@ describe('renderEmail', () => {
     expect(r.storedText).not.toContain('UNSUBTOKEN');
     expect(r.storedHtml).toContain('[review link]');
     expect(r.storedText).toContain('[unsubscribe link]');
+  });
+
+  it('renders {{booking_link}} as a link only when the saved booking link is https', () => {
+    for (const bad of ['http://book.example/studio', 'javascript:alert(1)', 'book.example/studio', 'data:text/html,hi']) {
+      const r = renderEmail({ ...base, messageClass: 'campaign', bodyMarkdown: '[Book again]({{booking_link}})', vars: { ...base.vars, bookingLink: bad } });
+      expect(r.html).not.toContain('href="' + bad);
+      expect(r.html).not.toMatch(/<a href="(?!\{\{\{ pm:unsubscribe)/);
+      expect(r.html).toContain('Book again');
+      expect(r.text).toContain('Book again');
+      expect(r.text).not.toContain(`(${bad})`);
+    }
+    const ok = renderEmail({ ...base, messageClass: 'campaign', bodyMarkdown: '[Book again]({{booking_link}})' });
+    expect(ok.html).toContain('href="https://book.example/studio"');
+  });
+});
+
+describe('missingIdentityFields', () => {
+  it('needs the full street address, including the state', () => {
+    expect(missingIdentityFields(base.identity)).toEqual([]);
+    expect(missingIdentityFields({ ...base.identity, state: ' ' })).toEqual(['street address']);
+    expect(missingIdentityFields({ ...base.identity, suburb: '' })).toEqual(['street address']);
   });
 });

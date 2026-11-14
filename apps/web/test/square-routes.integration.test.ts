@@ -187,7 +187,20 @@ suite('Square routes (database-backed)', () => {
     expect(JSON.stringify(events[0]?.payload)).not.toMatch(/lavender|0400/);
     expect(await d.select().from(s.jobs).where(eq(s.jobs.type, 'webhook.process'))).toHaveLength(1);
     const conn = (await d.select().from(s.integrationConnections).where(eq(s.integrationConnections.provider, 'square')))[0]!;
-    expect((conn.config as { lastWebhookAt?: string }).lastWebhookAt).toBeTruthy();
+    const seen = (conn.config as { lastWebhookAt?: string }).lastWebhookAt;
+    expect(seen).toBeTruthy();
+
+    // A correctly signed delivery for another merchant (or after a disconnect) does not count as "updates arriving".
+    const lastSeen = async () => ((await d.select().from(s.integrationConnections).where(eq(s.integrationConnections.provider, 'square')))[0]!.config as { lastWebhookAt?: string }).lastWebhookAt;
+    const other = JSON.stringify({ merchant_id: 'SOMEONE_ELSE', type: 'booking.updated', event_id: 'evt-other', created_at: new Date().toISOString(), data: { type: 'booking', id: 'BK_9' } });
+    await new Promise((r) => setTimeout(r, 5));
+    expect((await send(other, squareSignature(HOOK_KEY, `${ORIGIN}/api/webhooks/square`, other))).status).toBe(200);
+    expect(await lastSeen()).toBe(seen);
+    await d.update(s.integrationConnections).set({ status: 'disconnected' }).where(eq(s.integrationConnections.provider, 'square'));
+    const later = JSON.stringify({ merchant_id: 'MERCHANT_FAKE_1', type: 'booking.updated', event_id: 'evt-late', created_at: new Date().toISOString(), data: { type: 'booking', id: 'BK_1' } });
+    expect((await send(later, squareSignature(HOOK_KEY, `${ORIGIN}/api/webhooks/square`, later))).status).toBe(200);
+    expect(await lastSeen()).toBe(seen);
+    await d.update(s.integrationConnections).set({ status: 'connected' }).where(eq(s.integrationConnections.provider, 'square'));
   });
 
   it('lists bookings and lets owner and staff mark attendance, never over Square’s own NO_SHOW', async () => {
@@ -284,6 +297,10 @@ suite('Square routes (database-backed)', () => {
     const pastRow = past.json.bookings.find((b: { id: string }) => b.id === ids.past);
     expect(pastRow.reviewRequest).toEqual({ status: 'skipped', label: 'Review request: Skipped — no email permission recorded' });
     expect(past.json.bookings.find((b: { id: string }) => b.id === ids.noShow).reviewRequest).toBeNull();
+    // A request that went out before Square marked the booking a no-show (design §4.3 step 6).
+    await d.insert(s.reviewRequests).values({ id: randomUUID(), bookingId: ids.noShow, customerId: ids.customer, channel: 'email', status: 'sent', origin: 'automation', dedupeKey: `review:${ids.noShow}`, sentAt: new Date() });
+    const changed = (await call(list.GET, 'GET', '/api/appointments?view=past')).json.bookings.find((b: { id: string }) => b.id === ids.noShow);
+    expect(changed.reviewRequest).toEqual({ status: 'booking_changed', label: 'Review request: Sent before the booking changed' });
     expect((await call(list.GET, 'GET', '/api/appointments?view=upcoming')).json.bookings.find((b: { id: string }) => b.id === ids.future).reviewRequest).toBeNull();
 
     signIn(owner);
@@ -375,6 +392,20 @@ suite('Square routes (database-backed)', () => {
     expect(revoke.map((j) => j.payload)).toEqual([{ merchantId: 'MERCHANT_FAKE_1', environment: 'sandbox' }]);
     // Nothing was ever written to Square from the web app.
     expect(fake.callsTo('write')).toHaveLength(0);
+
+    // The owner sees the revoke outcome on the card (design §6): waiting, then Square's answer.
+    const card = async () => (await call(r.GET, 'GET', '/api/integrations/square')).json.revoke;
+    expect(await card()).toMatchObject({ state: 'pending' });
+    await d.insert(s.auditLog).values({ id: randomUUID(), action: 'integration.square.revoke_failed', entityType: 'integration_connection', data: { merchantId: 'MERCHANT_FAKE_1', environment: 'sandbox', reason: 'environment_changed' } });
+    const failed = await card();
+    expect(failed.state).toBe('failed');
+    expect(failed.message).toMatch(/App integrations page/);
+    expect(failed.message).toMatch(/sandbox \(test\) account/);
+    await d.insert(s.auditLog).values({ id: randomUUID(), action: 'integration.square.revoked', entityType: 'integration_connection', data: {}, createdAt: new Date(Date.now() + 1000) });
+    expect(await card()).toMatchObject({ state: 'revoked' });
+    signIn(staff);
+    expect(await card()).toBeNull();
+    signIn(owner);
   });
 
   it('reconnecting in the other environment purges that environment’s copied data first', async () => {

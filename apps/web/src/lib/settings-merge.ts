@@ -1,4 +1,4 @@
-import { AppSettingsSchema, LEARNABLE_FIELDS, SERVER_ONLY_WEBSITE_FIELDS, declaredValue, parseStoredSettings, type AppSettings, type LearnableField } from '@studio/core';
+import { AppSettingsSchema, LEARNABLE_FIELDS, SERVER_ONLY_WEBSITE_FIELDS, declaredValue, isHttpsUrl, parseStoredSettings, type AppSettings, type LearnableField } from '@studio/core';
 import { z } from 'zod';
 
 /** Preference fields only the server writes: learning state through the preferences routes, learned values by the recompute job. */
@@ -30,6 +30,11 @@ export const SettingsPatchSchema = z
         path: ['music'],
         message: 'The Spotify reference mode changes only in Settings → Music (PUT /api/music/references/mode), which checks the embed rules.',
       });
+    }
+    // The booking link goes into client emails as {{booking_link}}: only an https address is accepted (blank clears it).
+    const bookingLink = patch.business?.['bookingLink'];
+    if (typeof bookingLink === 'string' && bookingLink.trim() && !isHttpsUrl(bookingLink)) {
+      ctx.addIssue({ code: 'custom', path: ['business', 'bookingLink'], message: 'Use the full booking address starting with https://' });
     }
     for (const field of SERVER_OWNED_PREFERENCE_FIELDS) {
       if (patch.preferences && field in patch.preferences) {

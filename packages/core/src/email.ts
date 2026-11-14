@@ -112,7 +112,7 @@ export interface BusinessIdentity {
 export function missingIdentityFields(identity: BusinessIdentity): Array<'business name' | 'street address' | 'phone' | 'email'> {
   const out: Array<'business name' | 'street address' | 'phone' | 'email'> = [];
   if (!identity.businessName.trim()) out.push('business name');
-  if (!identity.addressLine.trim() || !identity.suburb.trim() || !identity.postcode.trim()) out.push('street address');
+  if (!identity.addressLine.trim() || !identity.suburb.trim() || !identity.state.trim() || !identity.postcode.trim()) out.push('street address');
   if (!identity.phone.trim()) out.push('phone');
   if (!identity.email.trim()) out.push('email');
   return out;
@@ -189,6 +189,16 @@ function variableValue(name: string, vars: EmailVariableValues, links: { review:
   }
 }
 
+/** True for an absolute `https:` URL with a host (the only kind of owner-supplied link an email may carry). */
+export function isHttpsUrl(value: string): boolean {
+  try {
+    const u = new URL(value.trim());
+    return u.protocol === 'https:' && Boolean(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 interface InlineOut {
   html: string;
   text: string;
@@ -223,8 +233,12 @@ function renderInline(line: string, vars: EmailVariableValues, links: { review: 
     const target = m[2] ?? '';
     let href: string | null = null;
     const varMatch = /^\{\{\s*([a-z_]+)\s*\}\}$/.exec(target);
-    if (varMatch && (LINK_VARIABLES as readonly string[]).includes(varMatch[1] ?? '')) href = variableValue(varMatch[1] ?? '', vars, links);
-    else if (isAllowedLinkTarget(target)) href = target;
+    if (varMatch && (LINK_VARIABLES as readonly string[]).includes(varMatch[1] ?? '')) {
+      // The booking link comes from Settings, not the template: it becomes a link only when it is https (otherwise
+      // the label stays plain text). The review and unsubscribe links are the app's own (or the stored markers).
+      const value = variableValue(varMatch[1] ?? '', vars, links);
+      href = varMatch[1] === 'booking_link' ? (value && isHttpsUrl(value) ? value : null) : value;
+    } else if (isAllowedLinkTarget(target)) href = target;
     if (href) {
       html += `<a href="${escapeHtml(href)}" style="color:${accent};font-weight:600;text-decoration:underline">${label.html || escapeHtml(href)}</a>`;
       text += label.text ? `${label.text} (${href})` : href;

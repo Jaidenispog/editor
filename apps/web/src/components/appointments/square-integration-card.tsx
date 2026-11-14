@@ -120,6 +120,12 @@ export function SquareIntegrationCard() {
               </p>
             ) : null}
 
+            {s.revoke ? (
+              <Alert tone={s.revoke.state === 'failed' ? 'warning' : s.revoke.state === 'revoked' ? 'success' : 'info'} title={s.revoke.state === 'failed' ? 'Remove Studio Assistant in Square' : undefined}>
+                {s.revoke.message}
+              </Alert>
+            ) : null}
+
             {s.state === 'not_connected' ? (s.canManage ? <div className="flex flex-wrap items-center gap-3">{connectLink('Connect Square')}<span className="text-xs text-charcoal-500">Read-only permissions: bookings, clients, services, payments and business settings.</span></div> : <p>Ask the owner to connect Square.</p>) : null}
 
             {s.state === 'needs_reauth' || s.state === 'error' ? (

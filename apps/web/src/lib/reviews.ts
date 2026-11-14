@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, or, sql } from 'drizzle-orm';
 import {
   AppError,
   DEFAULT_AUTOMATION_TEMPLATE_IDS,
@@ -11,6 +11,7 @@ import {
   melbourneLocalToUtc,
   newId,
   reviewEligibility,
+  sentBeforeBookingChanged,
   validateReviewLink,
   type ReviewSkipReason,
 } from '@studio/core';
@@ -64,6 +65,7 @@ export async function listReviewRequests(status?: string): Promise<{ items: Revi
     customerName: customerName(customer),
     appointment: booking ? appointmentWords(booking.serviceName, booking.startAt) : req.attestedVisitDate ? `Visit on ${req.attestedVisitDate} (you confirmed it)` : 'Appointment',
     status: req.status,
+    bookingChanged: sentBeforeBookingChanged(req.status, booking),
     skipReason: req.skipReason,
     skipLabel: req.skipReason ? (REVIEW_SKIP_LABELS[req.skipReason as ReviewSkipReason] ?? req.skipReason) : null,
     origin: req.origin,
@@ -250,7 +252,19 @@ export async function recordReviewClick(token: string): Promise<{ url: string | 
     await getDb()
       .update(schema.reviewRequests)
       .set({ clickCount: sql`${schema.reviewRequests.clickCount} + 1`, firstClickedAt: sql`coalesce(${schema.reviewRequests.firstClickedAt}, ${now})`, updatedAt: now })
-      .where(eq(schema.reviewRequests.clickTokenHash, hashLinkToken(token)));
+      .where(
+        or(
+          eq(schema.reviewRequests.clickTokenHash, hashLinkToken(token)),
+          // A token from an earlier attempt of a request that was sent again still counts for its request.
+          inArray(
+            schema.reviewRequests.id,
+            getDb()
+              .select({ id: schema.emailLinkTokens.reviewRequestId })
+              .from(schema.emailLinkTokens)
+              .where(and(eq(schema.emailLinkTokens.tokenHash, hashLinkToken(token)), eq(schema.emailLinkTokens.kind, 'review_click'))),
+          ),
+        ),
+      );
   }
   const link = settings.business.googleReviewLink;
   return { url: validateReviewLink(link).valid ? link : null, businessName: settings.brand.businessName };

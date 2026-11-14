@@ -1,5 +1,5 @@
 import { SquareClient, SquareEnvironment, SquareError, SquareTimeoutError, type Square } from 'square';
-import { CancelledError, mapSquareError, noShowFeeFrom, type MatchPayment, type SquareBusinessProfileSnapshot, type SquareErrorEntry, type SquareErrorKind, type SquareServiceSnapshot } from '@studio/core';
+import { CancelledError, isRfc3339Instant, mapSquareError, noShowFeeFrom, type MatchPayment, type SquareBusinessProfileSnapshot, type SquareErrorEntry, type SquareErrorKind, type SquareServiceSnapshot } from '@studio/core';
 
 /**
  * The narrow, read-only view of Square this module uses (design §7.2), so handlers never touch the SDK directly and
@@ -113,9 +113,17 @@ function segmentsOf(list: Square.AppointmentSegment[] | null | undefined): Squar
   }));
 }
 
-/** Normalises an SDK booking; null when Square left out the fields every booking has. */
-export function bookingFromSdk(b: Square.Booking): SquareBookingData | null {
+/**
+ * Normalises an SDK booking; null when Square left out the fields every booking has, or when its start time is not
+ * an RFC 3339 instant (design §4.8: check the format before parsing; never parse a local time). `onSkip` hears the
+ * booking id of a skipped booking so the caller can log it.
+ */
+export function bookingFromSdk(b: Square.Booking, onSkip?: (bookingId: string, reason: string) => void): SquareBookingData | null {
   if (!b.id || !b.startAt || !b.status) return null;
+  if (!isRfc3339Instant(b.startAt)) {
+    onSkip?.(b.id, 'start_at is not an RFC 3339 instant');
+    return null;
+  }
   return {
     id: b.id,
     version: typeof b.version === 'number' ? b.version : 0,
@@ -228,6 +236,8 @@ export interface SdkSquareApiOptions {
   baseUrl: string | null;
   signal: AbortSignal;
   fetch?: typeof fetch | undefined;
+  /** Hears each booking or slot skipped because Square sent a malformed time (for the log; ids only). */
+  onSkip?: ((objectId: string, reason: string) => void) | undefined;
 }
 
 /** The {@link SquareApi} backed by the official `square@46.0.0` SDK. */
@@ -304,13 +314,13 @@ export function createSdkSquareApi(options: SdkSquareApiOptions): SquareApi {
     listBookings: ({ locationId, startAtMin, startAtMax }) =>
       call(async () =>
         (await all(client.bookings.list({ startAtMin, startAtMax, limit: 100, ...(locationId ? { locationId } : {}) }, ro)))
-          .map(bookingFromSdk)
+          .map((b) => bookingFromSdk(b, options.onSkip))
           .filter((b): b is SquareBookingData => b !== null),
       ),
     getBooking: (bookingId) =>
       orNull(async () => {
         const b = (await client.bookings.get({ bookingId }, ro)).booking;
-        return b ? bookingFromSdk(b) : null;
+        return b ? bookingFromSdk(b, options.onSkip) : null;
       }),
     searchAvailability: (f) =>
       call(async () => {
@@ -326,7 +336,7 @@ export function createSdkSquareApi(options: SdkSquareApiOptions): SquareApi {
           },
           ro,
         );
-        return (r.availabilities ?? []).filter((a) => a.startAt).map((a) => ({ startAt: a.startAt as string, locationId: a.locationId ?? f.locationId, segments: segmentsOf(a.appointmentSegments) }));
+        return (r.availabilities ?? []).filter((a) => isRfc3339Instant(a.startAt)).map((a) => ({ startAt: a.startAt as string, locationId: a.locationId ?? f.locationId, segments: segmentsOf(a.appointmentSegments) }));
       }),
     listCustomers: () => call(async () => (await all(client.customers.list({ limit: 100 }, ro))).map(customerFromSdk).filter((c): c is SquareCustomerData => c !== null)),
     searchCustomersUpdatedSince: (sinceIso) =>

@@ -2,7 +2,7 @@
 
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useState } from 'react';
-import { REVIEW_REQUEST_STATUS_WORDS, addDaysToDate, formatDateTime, melbourneDateOf } from '@studio/core';
+import { REVIEW_REQUEST_STATUS_WORDS, SENT_BEFORE_BOOKING_CHANGED, addDaysToDate, formatDateTime, melbourneDateOf } from '@studio/core';
 import { AutomationCard } from '@/components/email/automation-card';
 import { MessageDialog } from '@/components/email/message-views';
 import type { AutomationDto, ClientDto, EmailTemplateDto, ReviewRequestDto } from '@/components/email/types';
@@ -177,8 +177,8 @@ export function ReviewsWorkspace({ data, canEdit }: { data: ReviewsData; canEdit
               </div>
               <div className="flex shrink-0 flex-wrap items-center gap-2">
                 <StatusPill
-                  status={r.isSandbox && r.status === 'sent' ? 'skipped' : r.status}
-                  label={r.isSandbox && r.status === 'sent' ? 'Test — not delivered' : r.skipLabel ? `${STATUS_WORDS[r.status] ?? r.status} — ${r.skipLabel}` : (STATUS_WORDS[r.status] ?? r.status)}
+                  status={r.isSandbox && r.status === 'sent' ? 'skipped' : r.bookingChanged ? 'booking_changed' : r.status}
+                  label={r.isSandbox && r.status === 'sent' ? 'Test — not delivered' : r.bookingChanged ? SENT_BEFORE_BOOKING_CHANGED : r.skipLabel ? `${STATUS_WORDS[r.status] ?? r.status} — ${r.skipLabel}` : (STATUS_WORDS[r.status] ?? r.status)}
                 />
                 {canEdit && r.emailMessageId ? (
                   <Button variant="ghost" size="sm" className="min-h-9" onClick={() => setOpenMessage(r.emailMessageId)}>
