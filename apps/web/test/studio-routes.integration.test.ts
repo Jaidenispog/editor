@@ -297,8 +297,10 @@ suite('Video Studio routes (database-backed)', () => {
     expect(fav.json).toEqual({ isFavourite: true });
     const feedback = await db.query.feedbackEvents.findMany({ where: and(eq(schema.feedbackEvents.editId, edit.id), eq(schema.feedbackEvents.type, 'favourite')) });
     expect(feedback).toHaveLength(1);
+    // Style affinity is written by the debounced preferences.recompute job (WP2), never in the request.
     const { getSettings } = await import('../src/lib/settings');
-    expect((await getSettings()).preferences.styleAffinity['beat_montage']).toBe(1);
+    expect((await getSettings()).preferences.styleAffinity['beat_montage']).toBeUndefined();
+    expect((await db.query.jobs.findMany({ where: eq(schema.jobs.type, 'preferences.recompute') })).length).toBeGreaterThanOrEqual(1);
 
     const notReady = await call(downloadRoute.GET, 'GET', `/api/edit-versions/${v1}/download`, { id: v1 });
     expect(notReady.status).toBe(409);

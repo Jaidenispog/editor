@@ -29,6 +29,7 @@ import { INTERRUPTED_MESSAGE, stopOutcome, type TrackedRun } from '../lib/job-tr
 import { createJobTempDir, removeTempDir } from '../lib/temp.js';
 import { applyManualLabels } from '@studio/core';
 import { recordAiUsage } from '../lib/plan-context.js';
+import { ingestReferenceAsset } from './reference.js';
 
 const MAX_TRANSCRIPTION_SECONDS = 20 * 60;
 
@@ -42,6 +43,8 @@ export async function handleIngestAsset(ctx: WorkerContext, run: TrackedRun, pay
   if (!asset) throw new AppError('NOT_FOUND', 'This clip was removed before it could be processed');
   const project = await ctx.db.query.projects.findFirst({ where: eq(schema.projects.id, payload.projectId) });
   if (!project) throw new AppError('NOT_FOUND', 'The project no longer exists');
+  // Reference videos are measured for style only: no labelling, no transcription, never footage.
+  if (asset.kind === 'reference_video') return ingestReferenceAsset(ctx, run, asset, project);
 
   const setAsset = (values: Partial<typeof schema.mediaAssets.$inferInsert>) =>
     ctx.db.update(schema.mediaAssets).set({ ...values, updatedAt: new Date() }).where(eq(schema.mediaAssets.id, asset.id));

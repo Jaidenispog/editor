@@ -16,6 +16,7 @@ import { ClipList } from './clip-list';
 import { EditGrid } from './edit-grid';
 import type { MusicUploadRequest } from './music-upload-dialog';
 import { ProjectHeader } from './project-header';
+import { ReferenceStrip } from './reference-strip';
 import { StyleControls } from './style-controls';
 import { UploadZone } from './upload-zone';
 import { useStudioStatus } from './use-studio-status';
@@ -49,16 +50,30 @@ export function StudioWorkspace({ initialStatus }: { initialStatus: StudioStatus
   const [uploader] = useState(() => new ChunkedUploader({ onFinished }));
   useEffect(() => () => uploader.dispose(), [uploader]);
   const uploads = useSyncExternalStore(uploader.subscribe, uploader.getSnapshot, () => EMPTY_UPLOADS);
+  // Reference videos use their own uploader so they never show up among the clips.
+  const onReferenceFinished = useCallback(() => void refresh({ expectBusy: true }), [refresh]);
+  const [referenceUploader] = useState(() => new ChunkedUploader({ onFinished: onReferenceFinished, concurrency: 1 }));
+  useEffect(() => () => referenceUploader.dispose(), [referenceUploader]);
+  const referenceUploads = useSyncExternalStore(referenceUploader.subscribe, referenceUploader.getSnapshot, () => EMPTY_UPLOADS);
+  const [showHidden, setShowHidden] = useState(false);
 
   useEffect(() => {
-    const busy = uploads.some((u) => u.state === 'uploading' || u.state === 'finishing' || u.state === 'queued');
+    const busy = [...uploads, ...referenceUploads].some((u) => u.state === 'uploading' || u.state === 'finishing' || u.state === 'queued');
     if (!busy) return;
     const warn = (e: BeforeUnloadEvent) => {
       e.preventDefault();
     };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
-  }, [uploads]);
+  }, [uploads, referenceUploads]);
+
+  const addReference = (file: File, useVision: boolean) =>
+    referenceUploader.add([file], {
+      projectId: `${projectId}:reference`,
+      kind: 'video',
+      maxBytes: status.limits.maxUploadBytes,
+      createPath: `/api/references/uploads?projectId=${encodeURIComponent(projectId)}${useVision ? '&useVision=1' : ''}`,
+    });
 
   const addVideos = (files: File[]) => uploader.add(files, { projectId, kind: 'video', maxBytes: status.limits.maxUploadBytes });
   const addMusic = (request: MusicUploadRequest) =>
@@ -70,6 +85,9 @@ export function StudioWorkspace({ initialStatus }: { initialStatus: StudioStatus
   const generations = status.generations;
   const shown = useMemo(() => generations.find((g) => g.id === selectedGenerationId) ?? generations[0] ?? null, [generations, selectedGenerationId]);
   const ttl = status.limits.mediaLinkTtlSeconds;
+  // "Hide this edit": hidden cards collapse into one row under the grid (nothing is deleted).
+  const hiddenCount = shown ? shown.edits.filter((e) => e.dismissed).length : 0;
+  const visible = useMemo(() => (shown && !showHidden ? { ...shown, edits: shown.edits.filter((e) => !e.dismissed) } : shown), [shown, showHidden]);
 
   return (
     <div className="space-y-8">
@@ -92,6 +110,17 @@ export function StudioWorkspace({ initialStatus }: { initialStatus: StudioStatus
       />
 
       <ClipList projectId={projectId} assets={status.assets} ttlSeconds={ttl} onChanged={changed} onStyles={onStyles} />
+
+      <ReferenceStrip
+        references={status.references ?? []}
+        uploads={referenceUploads}
+        onFile={addReference}
+        onChanged={() => changed({ expectBusy: true })}
+        onPause={(k) => referenceUploader.pause(k)}
+        onResume={(k) => referenceUploader.resume(k)}
+        onCancel={(k) => void referenceUploader.cancel(k)}
+        onDismiss={(k) => referenceUploader.dismiss(k)}
+      />
 
       {status.assets.length > 0 ? <StyleControls key={status.project.id} status={status} onGenerated={() => changed({ expectBusy: true })} onUploadMusic={addMusic} /> : null}
 
@@ -123,7 +152,18 @@ export function StudioWorkspace({ initialStatus }: { initialStatus: StudioStatus
             {shown.statusMessage && (shown.status === 'failed' || shown.status === 'partial' || shown.status === 'cancelled') ? (
               <Alert tone={shown.status === 'failed' ? 'danger' : 'warning'}>{shown.statusMessage}</Alert>
             ) : null}
-            <EditGrid generation={shown} ttlSeconds={ttl} onChanged={changed} />
+            {visible && visible.edits.length ? <EditGrid generation={visible} ttlSeconds={ttl} onChanged={changed} /> : null}
+            {hiddenCount ? (
+              <div className="flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-dashed border-charcoal-300 px-4 py-2 text-sm text-charcoal-600">
+                <span>
+                  {hiddenCount} hidden edit{hiddenCount === 1 ? '' : 's'}
+                </span>
+                <span aria-hidden="true">·</span>
+                <button type="button" onClick={() => setShowHidden((v) => !v)} aria-expanded={showHidden} className="min-h-11 font-medium text-charcoal-800 underline underline-offset-4">
+                  {showHidden ? 'Hide them again' : 'Show'}
+                </button>
+              </div>
+            ) : null}
           </>
         ) : (
           <EmptyState

@@ -8,3 +8,4 @@ export * from './ass.js';
 export * from './verify.js';
 export * from './command.js';
 export * from './render.js';
+export * from './logo.js';

@@ -1,4 +1,4 @@
-import type { GenerationSettings, LicenceState, MusicClearance, MusicLicence, SpotifyItemType, StyleId } from '@studio/core';
+import type { GenerationSettings, LicenceState, MusicClearance, MusicLicence, ReferenceStyleProfile, SpotifyItemType, StyleId } from '@studio/core';
 import type { JobDto } from './dto.js';
 import type { EnergyCurve } from './music-curve.js';
 
@@ -22,7 +22,20 @@ export interface StudioStatusDto {
   music: MusicOptionDto[];
   generations: GenerationDto[];
   jobs: JobDto[];
-  defaults: { durationSec: number; keepOriginalSound: 'auto' | 'always' | 'never'; captions: 'auto' | 'never'; preferredStyles: StyleId[] };
+  /**
+   * Form defaults from the effective editing preferences (pinned, learned or declared). `styleOrder` is the order
+   * cards appear in for a new generation; it never hides a style.
+   */
+  defaults: {
+    durationSec: number;
+    keepOriginalSound: 'auto' | 'always' | 'never';
+    captions: 'auto' | 'never';
+    preferredStyles: StyleId[];
+    styleOrder: StyleId[];
+    musicVolume: number;
+  };
+  /** Reference videos of this project (style only, never footage), newest first. */
+  references: ReferenceDto[];
   limits: { maxUploadBytes: number; partSize: number; mediaLinkTtlSeconds: number };
   /** True while anything is queued or working, so the page polls faster. */
   busy: boolean;
@@ -77,6 +90,20 @@ export interface MusicOptionDto {
   genres?: string[];
   /** Moods the owner tagged (filled where the status payload provides them). */
   moods?: string[];
+  /** Licence state from core's `licenceStateOf` (filled where the status payload provides it). */
+  licenceState?: LicenceState;
+}
+
+/** One reference video in the Studio's "Reference videos" strip and in Settings → Editing preferences. */
+export interface ReferenceDto {
+  id: string;
+  filename: string;
+  status: 'uploaded' | 'processing' | 'ready' | 'failed';
+  statusMessage: string;
+  thumbnailUrl: string | null;
+  /** Measurements and suggestions once measured; null while processing or after a failure. */
+  profile: ReferenceStyleProfile | null;
+  createdAt: string;
 }
 
 /** One track in GET /api/music/suggestions ("Suggested for you" in the Studio form). */
@@ -219,6 +246,8 @@ export interface EditDto {
   styleDescription: string;
   slot: number;
   isFavourite: boolean;
+  /** "Hide this edit": hidden from the five cards (nothing deleted). */
+  dismissed: boolean;
   currentVersionId: string | null;
   /** Every version, newest first; nothing is ever deleted when switching or revising. */
   versions: VersionDto[];

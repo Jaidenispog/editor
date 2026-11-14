@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { BrandConfigSchema } from './brand.js';
+import { DEFAULT_LEARNING_STATE, EMPTY_LEARNED, LearnedPreferencesSchema, LearningStateSchema, pinOwnerSetFields } from './preference-learning.js';
 import { StyleIdSchema } from './styles.js';
 import { BUSINESS_PROFILE_SETTINGS_SECTIONS } from './settings/business_profile.js';
 import { EMAIL_SETTINGS_SECTIONS } from './settings/email.js';
@@ -51,6 +52,16 @@ export const EditingPreferencesSchema = z.object({
   styleAffinity: z.record(z.string(), z.number()).default({}),
   /** Free-text notes the owner wants every edit to respect. */
   standingInstructions: z.string().max(1000).default(''),
+  /** Declared order of styles for new generations; empty = the standard order. Learning may suggest another. */
+  styleOrder: z.array(StyleIdSchema).max(5).default([]),
+  /** Music genres the owner likes (guides "Suggested for you" in the music picker). */
+  musicGenres: z.array(z.string().max(40)).max(12).default([]),
+  /** Artists the owner likes (guides "Suggested for you"; never used to fetch or play anything). */
+  musicArtists: z.array(z.string().max(80)).max(12).default([]),
+  /** Learning switch, reset point and pinned fields. Changed only through the preferences routes. */
+  learning: LearningStateSchema.default(DEFAULT_LEARNING_STATE),
+  /** What the editor learned from feedback. Written only by the `preferences.recompute` job. */
+  learned: LearnedPreferencesSchema.default(EMPTY_LEARNED),
 });
 export type EditingPreferences = z.infer<typeof EditingPreferencesSchema>;
 
@@ -75,6 +86,20 @@ export const AppSettingsSchema = z.object({
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
 
 export const DEFAULT_SETTINGS: AppSettings = AppSettingsSchema.parse({});
+
+/**
+ * Parses stored settings JSON. Settings saved before preference learning existed have no `preferences.learning`:
+ * every learnable field the owner had changed from its default is then pinned (`by: 'owner'`), so learning never
+ * overrides a choice the owner made by hand. Returns null when the stored copy does not parse.
+ */
+export function parseStoredSettings(raw: unknown, now: Date = new Date()): AppSettings | null {
+  const parsed = AppSettingsSchema.safeParse(raw ?? {});
+  if (!parsed.success) return null;
+  const rawPrefs = raw && typeof raw === 'object' ? (raw as Record<string, unknown>)['preferences'] : undefined;
+  const hasLearning = Boolean(rawPrefs && typeof rawPrefs === 'object' && 'learning' in (rawPrefs as Record<string, unknown>));
+  if (hasLearning || rawPrefs === undefined) return parsed.data;
+  return { ...parsed.data, preferences: pinOwnerSetFields(parsed.data.preferences, DEFAULT_SETTINGS.preferences, now.toISOString()) };
+}
 
 /**
  * Public URLs of the legal pages for other services (Meta app settings, Google consent screen, Spotify embed

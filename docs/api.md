@@ -115,6 +115,44 @@ marked failed with the reason and the job ends without a retry. A successful sta
 
 ## Preferences (Stage B, WP2)
 
+Learned editing preferences, "Hide this edit", reference videos and the logo in videos. Learning is deterministic
+(no model training): favourites, downloads, publishes, revisions, regenerations and hidden edits are recorded in
+`feedback_events` with a plan-facts snapshot, and the `preferences.recompute` job (debounced 10 s after feedback,
+nightly at 3:17 am Melbourne time) writes only `preferences.learned` and `preferences.styleAffinity` with `jsonb_set`.
+Effective value per field: pinned → declared; else learned (when learning is on); else declared.
+
+| Method | Route | Notes |
+| --- | --- | --- |
+| GET | `/api/preferences` | Signed in (staff read-only, `canEdit: false`). `{ declared, effective, learned, learning, fields: [{ field, label, value, source: 'learned'\|'owner'\|'reference'\|'default', explanation, suggestion, pin, notEnoughEvidence }], recent: [{ id, type, text, when, at }], canEdit }`; `recent` is the last 20 choices in plain words with Melbourne times |
+| POST | `/api/preferences/pin` | Owner. `{ field, pinned, value? }`. Pinning without a value pins the value in use; a value is validated per field (400). Audit `preferences.pinned` / `preferences.unpinned` |
+| POST | `/api/preferences/learning` | Owner. `{ enabled }` ("Learn from my choices"). Audit `preferences.learning_toggled` |
+| POST | `/api/preferences/reset` | Owner. `{ confirm: true }` (400 without it). Sets `learning.resetAt` to now, clears `learned` and `styleAffinity`, keeps the owner's settings and pins, queues a recompute. Audit `preferences.learning_reset` |
+| POST | `/api/preferences/recompute` | Owner. "Try again" after `learned.error` was set. `{ queued: true }` |
+| PUT | `/api/settings` (changed) | `preferences.learned`, `.learning` and `.styleAffinity` are refused (400 "Use the preferences controls…"); a `music` section is refused with a 400 naming `PUT /api/music/references/mode`. Every learnable field the patch changes is pinned `by: 'owner'`. The write happens under a row lock and keeps the stored `learned` and `styleAffinity`. Changing `brand.logoPlacement` adds audit `settings.logo_placement_changed` |
+| POST | `/api/edits/[id]/dismiss` | Studio access. `{ value }`: "Hide this edit" / "Show again" (`edits.dismissed_at`; nothing is deleted); records a `dismiss` feedback event with plan facts and queues the recompute |
+| POST | `/api/references/uploads?projectId=…[&useVision=1]` | Studio access to the project. Body as `POST /api/projects/[id]/uploads` (video file rules; `kind` ignored). Starts a `reference_video` upload; `useVision=1` stores the owner's tick for the on-screen text estimate (`driverState.referenceOptions`). Parts and `POST /api/uploads/[id]/complete` work as for clips; completion returns `kind: 'reference_video'`, queues `ingest.asset` (reference branch) and writes audit `reference.uploaded`; the project status is not changed |
+| GET | `/api/references` | Owner. `{ references: [{ id, filename, status, statusMessage, thumbnailUrl, profile, createdAt, projectId, projectTitle }] }` across projects that still exist |
+| POST | `/api/references/[assetId]/decide` | Owner. `{ accept: SuggestionField[], dismiss: SuggestionField[] }` (`defaultDurationSec`, `pacing`, `colour`, `textDensity`; 400 for a field the reference did not suggest or one in both lists). Accepting sets the value and pins it `by: 'reference'` with the file name. `{ profile, preferences }`; audit `reference.suggestions_decided` |
+| DELETE | `/api/assets/[id]` (existing) | Also removes a reference video; accepted preferences stay pinned |
+
+`GET /api/projects/[id]/status` (changed): edits gain `dismissed`; `defaults` come from the effective preferences and
+gain `styleOrder` and `musicVolume`; `references: ReferenceDto[]` (reference videos are never in `assets`); music
+options carry `genres`, `moods` and `licenceState`. New generations order their cards by the effective style order.
+
+Feedback written by the web app: `favourite`/`unfavourite` and `dismiss` (`planFacts` of the current version),
+`download` (`planFacts`; the music-free file counts without music), `revise` (`instruction`, parsed `hints`,
+`audioPatch`, `parentPlanFacts`) and `regenerate` (`parentVersionId`, `parentPlanFacts`). Favouriting no longer
+changes `styleAffinity` in the request.
+
+Worker side: `ingest.asset` for `kind = 'reference_video'` makes the proxy, thumbnail and shot list (no vision
+labelling, no transcription), samples 8 frames only with the owner's tick and a configured AI provider, then queues
+`reference.analyse` (singleton `reference:<assetId>`). That job measures the look (`signalstats`), optionally asks
+the vision model whether added text is visible (≤ 8 frames, `oversized_image: 'error'`, never identifies people;
+usage recorded as `reference:text`), stores `media_assets.reference_profile` and deletes the original, proxy and
+frames (keeps the thumbnail). `render.preview` stores the brand it used in `edit_versions.render_brand` (logo copied
+to `brand/render-logos/<sha256>.<ext>`); `render.export` reuses that snapshot so the export matches its preview. A
+missing logo renders without it ("Logo not found — rendered without it").
+
 ## Trends (Stage B, WP3 and WP5)
 
 Settings → Trends shows three groups that are never mixed: **live signals** (official APIs only; each item has its

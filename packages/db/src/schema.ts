@@ -19,6 +19,8 @@ import type {
   GenerationSettings,
   MusicLicence,
   PlanIssue,
+  ReferenceStyleProfile,
+  RenderBrandSnapshot,
   StyleSupport,
 } from '@studio/core';
 import { timestamps } from './schema/common.js';
@@ -194,6 +196,8 @@ export const mediaAssets = pgTable(
     manualLabels: jsonb('manual_labels').$type<Record<string, string>>().notNull().default({}),
     /** Owner can tag a whole clip (applied to all its shots). */
     clipLabel: text('clip_label'),
+    /** Measurements and suggestion decisions of a reference video (kind `reference_video` only). */
+    referenceProfile: jsonb('reference_profile').$type<ReferenceStyleProfile | null>(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     ...timestamps,
   },
@@ -267,6 +271,8 @@ export const edits = pgTable(
     slot: integer('slot').notNull(),
     isFavourite: boolean('is_favourite').notNull().default(false),
     currentVersionId: text('current_version_id'),
+    /** "Hide this edit": hidden from the five cards without deleting anything. */
+    dismissedAt: timestamp('dismissed_at', { withTimezone: true }),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     ...timestamps,
   },
@@ -301,6 +307,8 @@ export const editVersions = pgTable(
     exportMessage: text('export_message').notNull().default(''),
     /** Extra export files of this version, e.g. the music-free `no_music` render (same cuts, music removed). */
     variantExports: jsonb('variant_exports').$type<VariantExports>().notNull().default({}),
+    /** The brand the preview was rendered with; the export reuses it so it matches the preview. */
+    renderBrand: jsonb('render_brand').$type<RenderBrandSnapshot | null>(),
     ...timestamps,
   },
   (t) => [uniqueIndex('edit_versions_edit_no_idx').on(t.editId, t.versionNo), index('edit_versions_status_idx').on(t.status)],
@@ -320,7 +328,7 @@ export const feedbackEvents = pgTable(
     data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('feedback_events_style_idx').on(t.styleId, t.type)],
+  (t) => [index('feedback_events_style_idx').on(t.styleId, t.type), index('feedback_events_created_idx').on(t.createdAt)],
 );
 
 /** Mirror of queue jobs for the UI: progress, messages and cooperative cancellation. */

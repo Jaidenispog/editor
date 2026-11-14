@@ -103,6 +103,11 @@ export interface AssTextBox {
   /** The ASS font size used (`\fs`). */
   fontSize: number;
   lines: string[];
+  /** When the text is on screen (seconds on the output timeline). */
+  startSec: number;
+  endSec: number;
+  /** Which edge of its region the text is anchored to (top text and a top handle share the logo's corner band). */
+  anchor: 'top' | 'centre' | 'bottom';
 }
 
 /** The ASS document plus the layout it encodes. */
@@ -465,7 +470,7 @@ export function layoutAssDocument(plan: EditPlan, timeline: Timeline, output: Ou
     });
     if (!placed) throw tooLong(caption.text);
     captionPlacements.push({ start, end, placed });
-    boxes.push({ kind: 'caption', ref: `caption-${index}`, region: 'subtitle', box: placed.box, fontSize: placed.size, lines: placed.lines });
+    boxes.push({ kind: 'caption', ref: `caption-${index}`, region: 'subtitle', box: placed.box, fontSize: placed.size, lines: placed.lines, startSec: start, endSec: end, anchor: 'bottom' });
     const sizeTag = placed.size !== captionStyle.size ? `{\\fs${placed.size}}` : '';
     captionEvents.push(dialogue(0, start, end, 'Caption', `{\\an2\\pos(${placed.x},${placed.y})\\fad(60,60)}${sizeTag}${joinLines(placed.lines)}`));
   });
@@ -494,7 +499,7 @@ export function layoutAssDocument(plan: EditPlan, timeline: Timeline, output: Ou
     }
     if (!placed) throw tooLong(overlay.text);
 
-    boxes.push({ kind: 'overlay', ref: overlay.id, region, box: placed.box, fontSize: placed.size, lines: placed.lines });
+    boxes.push({ kind: 'overlay', ref: overlay.id, region, box: placed.box, fontSize: placed.size, lines: placed.lines, startSec: start, endSec: end, anchor: overlay.placement === 'top' ? 'top' : overlay.placement === 'centre' ? 'centre' : 'bottom' });
     const sizeTag = placed.size !== style.size ? `{\\fs${placed.size}}` : '';
     const tags = animationTags(overlay.animation, placed.x, placed.y, alignment, placed.y + risePx);
     events.push(dialogue(1, start, end, styleName, `${tags}${sizeTag}${joinLines(placed.lines)}`));
@@ -517,7 +522,7 @@ export function layoutAssDocument(plan: EditPlan, timeline: Timeline, output: Ou
         const alignment = where === 'bottom' ? 2 : 8;
         const placed = fitStyled(handle, handleStyle, alignment, 'fade', strict, where, { maxLines: 2 });
         if (placed) {
-          boxes.push({ kind: 'handle', ref: 'handle', region: 'strict', box: placed.box, fontSize: placed.size, lines: placed.lines });
+          boxes.push({ kind: 'handle', ref: 'handle', region: 'strict', box: placed.box, fontSize: placed.size, lines: placed.lines, startSec: start, endSec: total, anchor: where });
           const sizeTag = placed.size !== handleStyle.size ? `{\\fs${placed.size}}` : '';
           events.push(dialogue(1, start, total, 'Handle', `${animationTags('fade', placed.x, placed.y, alignment, placed.y)}${sizeTag}${joinLines(placed.lines)}`));
         }

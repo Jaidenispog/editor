@@ -1,6 +1,7 @@
 import {
   STYLES,
   computeTimeline,
+  effectivePreferences,
   parseRevisionInstruction,
   type ColourPreset,
   type EditPlan,
@@ -97,7 +98,8 @@ function applyHints(s: EffectiveSettings, h: RevisionHints): void {
  */
 export function effectiveSettings(input: PlannerInput): EffectiveSettings {
   const style = STYLES[input.styleId];
-  const prefs = input.preferences;
+  // Learned values apply unless the owner pinned the field (idempotent, so already-resolved input is unchanged).
+  const prefs = effectivePreferences(input.preferences);
   const hints = revisionHintsFor(input);
   const revising = Boolean(input.previousPlan && input.previousPlan.styleId === input.styleId && hints);
   const s: EffectiveSettings = {
@@ -106,7 +108,8 @@ export function effectiveSettings(input: PlannerInput): EffectiveSettings {
     attempt: Math.max(0, Math.floor(input.attempt)),
     transitions: prefs.transitions === 'restrained' ? 'calm' : 'style',
     pacing: prefs.pacing === 'slow' ? 1.2 : prefs.pacing === 'fast' ? 0.8 : 1,
-    text: prefs.textDensity === 'none' ? 'none' : 'normal',
+    // Light text is the style's normal amount; medium asks for more lines (none switches text off).
+    text: prefs.textDensity === 'none' ? 'none' : prefs.textDensity === 'medium' ? 'more' : 'normal',
     musicOn: true,
     musicVolume: clamp(prefs.musicVolume, 0.05, 1),
     originalSound: input.keepOriginalSound === 'never' ? 'off' : input.keepOriginalSound === 'always' ? 'on' : 'auto',

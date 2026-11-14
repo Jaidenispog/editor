@@ -28,10 +28,16 @@ interface DriverState {
   [key: string]: unknown;
 }
 
+/** What an upload becomes: a clip, a library music track, or a reference video (measured for style only). */
+export type UploadTargetKind = 'video' | 'audio' | 'reference_video';
+
+/** A new upload request (the route's body, with the kind it is for). */
+export type UploadRequest = Omit<CreateUploadInput, 'kind'> & { kind: UploadTargetKind };
+
 /** Response of POST /api/projects/[id]/uploads and GET /api/uploads/[id]. */
 export interface UploadSessionDto {
   uploadId: string;
-  kind: 'video' | 'audio';
+  kind: UploadTargetKind;
   filename: string;
   size: number;
   partSize: number;
@@ -48,7 +54,7 @@ const STALE_COMPLETION_MS = 5 * 60 * 1000;
 function toDto(row: UploadSession): UploadSessionDto {
   return {
     uploadId: row.id,
-    kind: row.kind === 'audio' ? 'audio' : 'video',
+    kind: targetKindOf(row),
     filename: row.originalFilename,
     size: row.totalBytes,
     partSize: row.partSizeBytes,
@@ -57,6 +63,10 @@ function toDto(row: UploadSession): UploadSessionDto {
     status: row.status,
     assetId: row.assetId,
   };
+}
+
+function targetKindOf(row: Pick<UploadSession, 'kind'>): UploadTargetKind {
+  return row.kind === 'audio' ? 'audio' : row.kind === 'reference_video' ? 'reference_video' : 'video';
 }
 
 function driverStateOf(row: UploadSession): DriverState {
@@ -89,11 +99,17 @@ function assertOpen(row: UploadSession): void {
 
 /**
  * Starts a chunked upload: checks the file type and size, opens a multipart upload in storage and records an
- * upload_sessions row. The browser then sends 8 MiB parts and calls complete.
+ * upload_sessions row. The browser then sends 8 MiB parts and calls complete. A reference video follows the video
+ * file rules; `referenceOptions` (the owner's text-estimate tick) is kept in driverState for the worker.
  */
-export async function createUpload(projectId: string, user: SessionUser, input: CreateUploadInput): Promise<UploadSessionDto> {
+export async function createUpload(
+  projectId: string,
+  user: SessionUser,
+  input: UploadRequest,
+  extra: { referenceOptions?: { useVision: boolean } } = {},
+): Promise<UploadSessionDto> {
   const project = await getAccessibleProject(projectId, user);
-  const check = checkUploadFile({ filename: input.filename, mimeType: input.mimeType, kind: input.kind });
+  const check = checkUploadFile({ filename: input.filename, mimeType: input.mimeType, kind: input.kind === 'audio' ? 'audio' : 'video' });
   if (!check.ok) throw new AppError('VALIDATION', check.reason, { details: [{ path: 'filename', message: check.reason }] });
   const max = getEnv().MAX_UPLOAD_BYTES;
   if (input.size > max) {
@@ -105,7 +121,7 @@ export async function createUpload(projectId: string, user: SessionUser, input: 
   if (partCount > 10_000) throw new AppError('VALIDATION', 'This file is too large to upload in one go.');
   const id = newId();
   const plannedId = newId();
-  const targetKey = input.kind === 'video' ? storageKeys.assetOriginal(project.id, plannedId, check.extension) : storageKeys.musicOriginal(plannedId, check.extension);
+  const targetKey = input.kind === 'audio' ? storageKeys.musicOriginal(plannedId, check.extension) : storageKeys.assetOriginal(project.id, plannedId, check.extension);
   const store = getBlobStore();
   let upload: MultipartUpload;
   try {
@@ -114,7 +130,13 @@ export async function createUpload(projectId: string, user: SessionUser, input: 
     getLogger().error({ err, projectId }, 'could not start multipart upload');
     throw new AppError('INTERNAL', 'Storage is not reachable right now, so the upload could not start. Please try again shortly.', { cause: err });
   }
-  const driverState: DriverState = { uploadId: upload.uploadId, key: upload.key, plannedId, parts: {} };
+  const driverState: DriverState = {
+    uploadId: upload.uploadId,
+    key: upload.key,
+    plannedId,
+    parts: {},
+    ...(input.kind === 'reference_video' ? { referenceOptions: { useVision: extra.referenceOptions?.useVision === true } } : {}),
+  };
   const inserted = await getDb()
     .insert(schema.uploadSessions)
     .values({
@@ -260,9 +282,9 @@ function titleFromFilename(filename: string): string {
  * ingest.asset) or the library music track (and queues music.analyse). Safe to call twice: a completed
  * session returns the same id.
  */
-export async function completeUpload(uploadId: string, user: SessionUser, input: CompleteUploadInput): Promise<{ assetId: string; kind: 'video' | 'audio' }> {
+export async function completeUpload(uploadId: string, user: SessionUser, input: CompleteUploadInput): Promise<{ assetId: string; kind: UploadTargetKind }> {
   const row = await getAccessibleUpload(uploadId, user);
-  const kind = row.kind === 'audio' ? 'audio' : 'video';
+  const kind = targetKindOf(row);
   if (row.status === 'completed' && row.assetId) return { assetId: row.assetId, kind };
   assertOpen(row);
   const missing = missingParts(row.partCount, row.receivedParts);
@@ -283,10 +305,11 @@ export async function completeUpload(uploadId: string, user: SessionUser, input:
   const state = driverStateOf(row);
   try {
     await assembleFile(row, state);
-    const assetId = kind === 'video' ? await finishVideo(row, state) : await finishAudio(row, user, input);
+    const assetId = kind === 'audio' ? await finishAudio(row, user, input) : await finishVideo(row, state, kind);
     await markCompleted(row.id, assetId);
-    if (kind === 'video') await queueIngest(assetId, row.projectId);
-    await writeAudit({ userId: user.id, action: kind === 'video' ? 'asset.uploaded' : 'music.uploaded', entityType: kind === 'video' ? 'media_asset' : 'music_track', entityId: assetId, data: { bytes: row.totalBytes } });
+    if (kind !== 'audio') await queueIngest(assetId, row.projectId);
+    const action = kind === 'video' ? 'asset.uploaded' : kind === 'reference_video' ? 'reference.uploaded' : 'music.uploaded';
+    await writeAudit({ userId: user.id, action, entityType: kind === 'audio' ? 'music_track' : 'media_asset', entityId: assetId, data: { bytes: row.totalBytes } });
     return { assetId, kind };
   } catch (err) {
     await releaseCompletion(row.id).catch((e: unknown) => getLogger().warn({ err: e, uploadId }, 'could not release upload claim'));
@@ -294,7 +317,7 @@ export async function completeUpload(uploadId: string, user: SessionUser, input:
   }
 }
 
-async function finishVideo(row: UploadSession, state: DriverState): Promise<string> {
+async function finishVideo(row: UploadSession, state: DriverState, kind: 'video' | 'reference_video'): Promise<string> {
   const db = getDb();
   const existing = await db.query.mediaAssets.findFirst({ columns: { id: true }, where: eq(schema.mediaAssets.id, state.plannedId) });
   if (existing) return existing.id;
@@ -309,15 +332,17 @@ async function finishVideo(row: UploadSession, state: DriverState): Promise<stri
     await tx.insert(schema.mediaAssets).values({
       id: state.plannedId,
       projectId: row.projectId,
-      kind: 'video',
+      kind,
       originalFilename: row.originalFilename,
       mimeType: row.mimeType,
       byteSize: row.totalBytes,
       sortOrder,
       originalKey: row.targetKey,
       status: 'uploaded',
-      statusMessage: 'Waiting to be analysed',
+      statusMessage: kind === 'reference_video' ? 'Waiting to be measured' : 'Waiting to be analysed',
     });
+    // A reference video is never footage, so it does not move the project into "analysing".
+    if (kind === 'reference_video') return;
     await tx
       .update(schema.projects)
       .set({ status: sql`case when ${schema.projects.status} in ('draft', 'ready') then 'analysing' else ${schema.projects.status} end`, updatedAt: new Date() })
@@ -355,6 +380,7 @@ async function finishAudio(row: UploadSession, user: SessionUser, input: Complet
     licence: input.licence,
     confirmLicence: true,
     moods: input.moods ?? [],
+    genres: input.genres ?? [],
   });
   return track.id;
 }

@@ -25,6 +25,7 @@ import { createJobTempDir, removeTempDir } from '../lib/temp.js';
 import { loadSettings } from '../lib/plan-context.js';
 import { runExportReadyHooks } from '../modules/index.js';
 import { writeWorkerAudit } from '../lib/audit.js';
+import { brandForExport, brandForPreview } from '../modules/preferences/brand.js';
 
 /** The plain message an export blocked by its music licence shows on the card. */
 export function musicBlockedMessage(clearance: MusicClearance): string {
@@ -135,6 +136,10 @@ export async function handleRender(
     const transcripts: Record<string, { startSec: number; endSec: number; text: string }[]> = {};
     for (const row of rows) if (row.analysis?.transcript?.segments.length) transcripts[row.id] = row.analysis.transcript.segments;
 
+    // Brand: previews use the current settings and keep a snapshot; exports reuse their preview's snapshot.
+    const prepared = quality === 'preview' ? await brandForPreview(ctx, settings, tmp) : await brandForExport(ctx, version.renderBrand, settings, tmp);
+    const brandNote = prepared.note ? ` · ${prepared.note}` : '';
+
     const outputPath = path.join(tmp, `${quality}.mp4`);
     await run.progress(0.16, quality === 'preview' ? 'Rendering preview' : 'Rendering full-quality video');
     const result = await renderEditPlan(
@@ -145,13 +150,7 @@ export async function handleRender(
         transcripts,
         quality,
         output: quality === 'preview' ? VERTICAL_PREVIEW : VERTICAL_1080,
-        brand: {
-          accentColour: settings.brand.accentColour,
-          videoTextStyle: settings.brand.videoTextStyle,
-          fontHeadline: settings.brand.fontHeadline,
-          fontBody: settings.brand.fontBody,
-          socialHandle: settings.brand.socialHandle,
-        },
+        brand: prepared.brand,
         fontsDir: ctx.fontsDir,
         tmpDir: tmp,
         ffmpegPath: ctx.env.FFMPEG_PATH,
@@ -171,10 +170,10 @@ export async function handleRender(
           : storageKeys.editExport(payload.projectId, edit.id, version.versionNo);
     await ctx.store.putFile(key, outputPath, { contentType: 'video/mp4' });
     if (quality === 'preview') {
-      await setVersion({ status: 'preview_ready', statusMessage: 'Preview ready', previewKey: key, previewDurationSec: result.durationSec });
+      await setVersion({ status: 'preview_ready', statusMessage: `Preview ready${brandNote}`, previewKey: key, previewDurationSec: result.durationSec, renderBrand: prepared.snapshot });
       await refreshGenerationStatus(ctx, edit.generationId, payload.projectId);
     } else {
-      await setExport('ready', 'Ready to download', { key, byteSize: result.byteSize });
+      await setExport('ready', `Ready to download${brandNote}`, { key, byteSize: result.byteSize });
       if (clearance && licencedTrack && clearance.state !== 'no_music') {
         // Usage ledger (memo §2): one row per version for its export, with the licence as it was. A second export
         // of the same version adds nothing.

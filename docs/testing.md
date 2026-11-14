@@ -173,3 +173,29 @@ No real YouTube call is made by any test (an injected fake `fetch`):
 
 The first real fetch needs `YOUTUBE_API_KEY` (1 quota unit): Settings → Trends → **Show the chart** is that smoke test.
 Record its result and date in `docs/HANDOVER.md`.
+
+## Saved preferences, reference video and brand (Stage B, WP2)
+
+No AI service is called by any test (a fake Anthropic client and a fake text estimator):
+
+- Unit: `packages/core/test/preference-learning.test.ts` (no events, 20 s from three favourites, unfavourite cancels,
+  downloads once per version, `resetAt` and the 180-day window, 60-day half-life, favourite + download = 5, style
+  order and regenerations, colour only across two styles, thresholds, relative length requests, determinism,
+  `effectivePreferences` precedence, the pin-on-upgrade normaliser), `packages/core/test/reference.test.ts` (pacing
+  1.0/2.2 s boundaries, colour rules, duration rounding and limits, text density unmeasured, brand snapshot),
+  `packages/ai/test/text-estimate.test.ts` (≤ 8 frames with `oversized_image: 'error'`, refusal / max tokens / bad
+  answer → not measured, `medium` text → more overlays than `light`, learned values unless pinned),
+  `packages/media/test/{look,logo}.test.ts` (signalstats parser; logo rectangles inside R_head at 1080×1920 and 540×960,
+  corner `enable` windows, end card skipped on overlap, overlay chain before `ass`, font fallback; with ffmpeg: logo
+  pixels only inside the expected rectangles at both sizes, and real preview and export renders that leave every
+  forbidden area untouched), `apps/web/test/preferences.test.ts` (patch refusals, auto-pin, field view).
+- Database + ffmpeg (`TEST_DATABASE_URL`): `apps/worker/test/preferences-db.test.ts` (reference ingest and measuring:
+  profile stored, original/proxy/frames deleted, thumbnail kept, never in footage, style support or planner input,
+  retry is a no-op, under-3-second refusal; recompute keeps an owner save made meanwhile and honours a reset made
+  meanwhile; the export uses its preview's brand snapshot and logo after the branding changed, and a missing logo
+  renders without it) and `apps/web/test/preferences-routes.integration.test.ts` (owner-only routes, CSRF, favourite
+  and hide feedback with plan facts and the recompute job, Settings pins and refusals, the learned subtree surviving an
+  owner save, reset, reference upload → asset of kind `reference_video` that never becomes a clip, suggestion
+  decisions pinning fields).
+- Only with the owner's real use: whether learned defaults feel right after a few weeks, logo legibility on the real
+  logo, and colour, pacing and text estimates on real reference videos.

@@ -1,4 +1,5 @@
 import type { AssetProbe, EditPlan, OutputFormat, TranscriptSegment } from '@studio/core';
+import type { LogoLayout } from './logo.js';
 import type { ExportCheck } from './verify.js';
 
 /** Preview renders are fast and small (540x960); exports are full quality (1080x1920). */
@@ -29,6 +30,19 @@ export interface RenderBrand {
   fontBody: string;
   /** Optional handle shown briefly at the end of the video. Empty or missing = not shown. */
   socialHandle?: string;
+  /** Logo end card and/or corner mark (already downloaded next to the clips). Null or missing = no logo. */
+  logo?: RenderLogo | null;
+}
+
+/** A logo image to draw, with its pixel size (PNG, JPEG or WebP; transparency is kept). */
+export interface RenderLogo {
+  path: string;
+  width: number;
+  height: number;
+  placement: 'end_card' | 'corner' | 'both';
+  corner: 'top_left' | 'top_right';
+  /** Corner mark opacity, 0.6–1 (the end card is always opaque). */
+  opacity: number;
 }
 
 export interface RenderInputs {
@@ -67,6 +81,8 @@ export interface RenderResult {
   assPath: string | null;
   /** The ffprobe check of an export (always passing, or the render would have failed); null for previews. */
   exportCheck: ExportCheck | null;
+  /** Where the logo was drawn, or null without a logo. */
+  logoLayout: LogoLayout | null;
 }
 
 /** The pure, inspectable output of buildRenderCommand. */

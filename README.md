@@ -93,3 +93,16 @@ ledger, the music-free export of any version, the Sound panel (volume, fades, or
 options), "Suggested for you" from the owner's own library, and private Spotify references (link-only by default).
 No music library API is connected (none is built in Phase 1); tracks are downloaded from a business-eligible library
 and uploaded with their licence details.
+
+## Saved preferences, reference video and brand (Stage B, WP2)
+
+Built and tested on synthetic footage with database-backed tests: the editor learns default length, style order,
+pacing, on-screen text, transitions, colour and music volume from favourites, downloads, revisions, regenerations and
+hidden edits (deterministic, no model training), and Settings → Editing preferences shows every value with its source
+and evidence, with pin / "Let it learn" and "Reset what it learned". "Hide this edit" keeps the edit and collapses it
+under the previews. Reference videos are measured for pace, length and colour (and, with the owner's tick and AI set
+up, on-screen text), suggest preferences the owner accepts one by one, and are deleted once measured. The logo can
+appear as an end card and/or a corner mark inside the area both apps keep clear, and exports always use their
+preview's branding. Not yet checked with real use: whether learned defaults feel right after a few weeks, logo
+legibility on the real logo, and the estimates on real reference videos. The on-screen text estimate has only run
+against a fake (it needs the Anthropic key).
