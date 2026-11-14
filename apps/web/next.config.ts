@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { NextConfig } from 'next';
 
 /**
@@ -7,6 +9,14 @@ import type { NextConfig } from 'next';
  */
 const nextConfig: NextConfig = {
   output: 'standalone',
+  // Monorepo root, so the standalone output traces the workspace packages correctly.
+  outputFileTracingRoot: path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..'),
+  experimental: {
+    // Workspace packages use ESM-style ".js" suffixes on relative imports of ".ts" files (TypeScript's
+    // recommended style). Webpack maps them back to the TypeScript sources; Turbopack has no equivalent
+    // option yet, so dev and build run with --webpack.
+    extensionAlias: { '.js': ['.ts', '.tsx', '.js'] },
+  },
   reactStrictMode: true,
   poweredByHeader: false,
   transpilePackages: ['@studio/core', '@studio/db', '@studio/storage', '@studio/queue', '@studio/config', '@studio/ai', '@studio/media'],

@@ -31,6 +31,10 @@ export interface Draft {
   weight: number;
   /** Which part of the window matters most when trimming or extending. */
   keep: 'start' | 'end' | 'centre';
+  /** Structural position in the style ('open', 'body', 'final', 'before', 'bridge', 'reveal', 'hold2'). */
+  slot: string;
+  /** True when the style decides this draft's incoming transition (false keeps a revised plan's choice). */
+  autoTransition: boolean;
 }
 
 /** Output (play) duration of a draft. */

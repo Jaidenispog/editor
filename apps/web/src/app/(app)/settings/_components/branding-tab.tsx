@@ -3,7 +3,7 @@
 /* eslint-disable @next/next/no-img-element -- logo comes from an expiring signed link */
 import { ImageUp, Trash2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useRef, useState, type FormEvent } from 'react';
+import { useRef, useState, type CSSProperties, type FormEvent } from 'react';
 import type { BrandConfig } from '@studio/core';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
@@ -92,7 +92,7 @@ export function BrandingTab({ brand, logoUrl, disabled }: { brand: BrandConfig; 
                   className="h-10 w-14 cursor-pointer rounded-[var(--radius-control)] border border-charcoal-200 bg-white p-1"
                 />
                 <Input label="Hex value" hideLabel value={values.accentColour} onChange={(e) => set('accentColour', e.target.value)} maxLength={7} disabled={disabled} className="w-32 font-mono" error={errors['accentColour'] ?? null} />
-                <div style={previewVars} className="flex items-center gap-2 rounded-[var(--radius-control)] border border-charcoal-200 bg-white px-3 py-2" aria-label="Accent preview">
+                <div style={previewVars as CSSProperties} className="flex items-center gap-2 rounded-[var(--radius-control)] border border-charcoal-200 bg-white px-3 py-2" aria-label="Accent preview">
                   <span className="rounded-md px-3 py-1 text-sm font-medium" style={{ background: 'var(--accent)', color: 'var(--accent-foreground)' }}>
                     Button
                   </span>

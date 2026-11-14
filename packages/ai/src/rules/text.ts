@@ -10,9 +10,12 @@ const MAX_CAPTION_CHARS = 120;
 /** A piece of text tied to a moment of the edit rather than to fixed times. */
 export interface TextIntent {
   text: string;
-  /** 'start' = opening seconds, 'end' = closing seconds, 'during' = while a given draft plays. */
+  /** 'start' = opening seconds, 'end' = closing seconds, 'during' = while the draft in `slot` plays. */
   at: 'start' | 'end' | 'during';
-  draftId?: string;
+  /** Structural slot of the draft the text belongs to (the first draft with that slot). */
+  slot?: string;
+  /** For 'during': keep the text up until the end of the edit instead of the end of that draft. */
+  untilEnd?: boolean;
   placement: TextOverlay['placement'];
   style: TextOverlay['style'];
   animation: TextOverlay['animation'];
@@ -45,14 +48,14 @@ export function resolveText(intents: TextIntent[], drafts: readonly Draft[]): Te
       e = total - 0.2;
       s = Math.max(0.2, e - (intent.maxDurSec ?? 2.2));
     } else {
-      const idx = drafts.findIndex((d) => d.id === intent.draftId);
+      const idx = drafts.findIndex((d) => d.slot === intent.slot);
       if (idx < 0) continue;
       const d = drafts[idx]!;
       const segStart = starts[idx] ?? 0;
       const tIn = idx > 0 ? (d.transitionIn?.durationSec ?? 0) : 0;
       const next = drafts[idx + 1];
       s = idx === 0 ? 0.3 : segStart + tIn + 0.15;
-      e = next ? segStart + play(d) - (next.transitionIn?.durationSec ?? 0) - 0.1 : total - 0.2;
+      e = next && !intent.untilEnd ? segStart + play(d) - (next.transitionIn?.durationSec ?? 0) - 0.1 : total - 0.2;
       if (intent.maxDurSec) e = Math.min(e, s + intent.maxDurSec);
     }
     s = round(Math.max(0, s), 2);
