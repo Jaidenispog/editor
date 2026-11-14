@@ -15,10 +15,28 @@ export function showsLicenceEnd(licence: Pick<MusicLicence, 'kind' | 'expiresAt'
 }
 
 /**
- * The pill of a library track. A track that is uploaded or being analysed reads "Analysing" with the busy colour
- * (it cannot be used until the beat analysis finishes); "Uploaded" alone suggests it is done.
+ * The status message a library track keeps when its beat analysis was cancelled (set by the web app's cancel and by
+ * the worker's `music.analyse` handler). The track stays "uploaded", but nothing is running or queued for it.
  */
-export function trackStatusPill(status: 'uploaded' | 'processing' | 'ready' | 'failed'): { status: string; label: string } {
+export const MUSIC_ANALYSIS_CANCELLED_MESSAGE = 'Analysis cancelled';
+
+/** Whether a library track's analysis was cancelled: it is not ready and no work is queued or running for it. */
+export function isAnalysisCancelled(track: { status: string; statusMessage: string | null | undefined }): boolean {
+  return track.status === 'uploaded' && (track.statusMessage ?? '').trim().startsWith(MUSIC_ANALYSIS_CANCELLED_MESSAGE);
+}
+
+/** Whether analysis of a library track is really queued or running (the "once this finishes" line). */
+export function isTrackAnalysing(track: { status: string; statusMessage: string | null | undefined }): boolean {
+  return (track.status === 'uploaded' || track.status === 'processing') && !isAnalysisCancelled(track);
+}
+
+/**
+ * The pill of a library track. A track that is uploaded or being analysed reads "Analysing" with the busy colour
+ * (it cannot be used until the beat analysis finishes); "Uploaded" alone suggests it is done. A cancelled analysis
+ * is not busy: it reads "Analysis stopped".
+ */
+export function trackStatusPill(status: 'uploaded' | 'processing' | 'ready' | 'failed', statusMessage?: string | null): { status: string; label: string } {
+  if (isAnalysisCancelled({ status, statusMessage })) return { status: 'cancelled', label: 'Analysis stopped' };
   switch (status) {
     case 'uploaded':
     case 'processing':

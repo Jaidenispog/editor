@@ -46,8 +46,6 @@ const TONES: Record<string, BadgeTone> = {
   live: 'neutral',
   low: 'neutral',
   info: 'neutral',
-  // A fact, not a to-do: nothing the owner can set up changes it (e.g. a feature that does not exist).
-  unavailable: 'neutral',
   // Working
   running: 'info',
   processing: 'info',
@@ -71,6 +69,9 @@ const TONES: Record<string, BadgeTone> = {
   check_before_retry: 'warning',
   awaiting_approval: 'warning',
   pending_approval: 'warning',
+  // A capability check that failed (e.g. a chart fetch that did not work). A card for which "Not available" is a
+  // plain fact sets its own neutral `pillStatus` instead.
+  unavailable: 'warning',
   quota: 'warning',
   paused: 'warning',
   suppressed: 'warning',

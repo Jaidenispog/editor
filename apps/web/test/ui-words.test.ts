@@ -3,11 +3,12 @@ import { countNeedingSetup, integrationPill } from '../src/components/app/integr
 import { toneForStatus } from '../src/components/ui/status-words';
 import { buildIntegrationStatuses } from '../src/lib/integrations';
 import { musicStatusEntries } from '../src/lib/integrations/music';
+import { youTubeChartStatus } from '../src/lib/integrations/trends';
 import { clipStatusLine, shotSummary } from '../src/lib/shared/clip-summary';
 import { integrationStateOf } from '../src/lib/shared/integration-types';
-import { LIBRARY_LICENCE_KINDS, finishedUploadsShownAsTracks, showsLicenceEnd, trackStatusPill } from '../src/lib/shared/music-display';
+import { LIBRARY_LICENCE_KINDS, finishedUploadsShownAsTracks, isAnalysisCancelled, isTrackAnalysing, showsLicenceEnd, trackStatusPill } from '../src/lib/shared/music-display';
 import { PROJECT_STATUS_LABELS, projectStatusPill } from '../src/lib/shared/project-status';
-import { originalSoundChoices, withTrack, type SoundState } from '../src/lib/shared/studio-schemas';
+import { buildAudioPatch, originalSoundChoices, withTrack, type SoundState } from '../src/lib/shared/studio-schemas';
 import { revealTabScrollLeft, stripFadeMask, stripOverflow } from '../src/lib/shared/tab-scroll';
 import { WORDING_CASES } from './integration-wording-cases';
 
@@ -69,9 +70,26 @@ describe('sound panel choices', () => {
   it('falls back to "Original sound only" when the music is taken away', () => {
     expect(withTrack(state, 'none', state)).toMatchObject({ track: 'none', start: 0, original: 'only' });
     expect(withTrack({ ...state, original: 'off' }, 'none', state)).toMatchObject({ original: 'off' });
-    expect(withTrack({ ...state, track: 'none', original: 'only' }, 't1', state)).toMatchObject({ track: 't1', start: 12, original: 'only' });
     expect(withTrack(state, 't2', state)).toMatchObject({ track: 't2', start: 0, original: 'under_music' });
     expect(withTrack(state, 't2', null).start).toBe(0);
+  });
+
+  it('undoes the automatic "Original sound only" when a track is chosen again', () => {
+    // No music, then the same track again: nothing changed, so there is nothing to apply.
+    const back = withTrack(withTrack(state, 'none', state), 't1', state);
+    expect(back).toEqual(state);
+    expect(buildAudioPatch(state, back, false)).toEqual({});
+    // No music, then another track: only the track changes.
+    const other = withTrack(withTrack(state, 'none', state), 't2', state);
+    expect(other.original).toBe('under_music');
+    expect(buildAudioPatch(state, other, false)).not.toHaveProperty('originalSound');
+    // A choice the owner made stays: "Off" is kept, and a saved "Original sound only" is not changed.
+    expect(withTrack(withTrack({ ...state, original: 'off' }, 'none', state), 't1', state).original).toBe('off');
+    const savedOnly = { ...state, original: 'only' as const };
+    expect(withTrack(withTrack(savedOnly, 'none', savedOnly), 't1', savedOnly).original).toBe('only');
+    // A version saved without music keeps its original sound when a track is first chosen.
+    const savedNone = { ...state, track: 'none', original: 'only' as const };
+    expect(withTrack(savedNone, 't1', savedNone).original).toBe('only');
   });
 });
 
@@ -110,6 +128,19 @@ describe('music track cards', () => {
     expect(showsLicenceEnd({ kind: 'owner_upload', expiresAt: '2027-01-01T00:00:00.000Z' })).toBe(true);
   });
 
+  it('reads "Analysis stopped" (not busy) when the analysis was cancelled', () => {
+    expect(trackStatusPill('uploaded', 'Analysis cancelled')).toEqual({ status: 'cancelled', label: 'Analysis stopped' });
+    expect(toneForStatus(trackStatusPill('uploaded', 'Analysis cancelled').status)).not.toBe('info');
+    expect(isAnalysisCancelled({ status: 'uploaded', statusMessage: 'Analysis cancelled' })).toBe(true);
+    expect(isTrackAnalysing({ status: 'uploaded', statusMessage: 'Analysis cancelled' })).toBe(false);
+    // Still waiting or running: busy.
+    expect(trackStatusPill('uploaded', 'Waiting to be analysed')).toEqual({ status: 'analysing', label: 'Analysing' });
+    expect(isTrackAnalysing({ status: 'uploaded', statusMessage: 'Waiting to be analysed' })).toBe(true);
+    expect(isTrackAnalysing({ status: 'processing', statusMessage: 'Finding the beat' })).toBe(true);
+    expect(isTrackAnalysing({ status: 'ready', statusMessage: 'Ready · 120 BPM' })).toBe(false);
+    expect(trackStatusPill('ready', 'Analysis cancelled')).toEqual({ status: 'ready', label: 'Ready' });
+  });
+
   it('reads "Analysing" (busy) until the track is ready', () => {
     expect(trackStatusPill('uploaded')).toEqual({ status: 'analysing', label: 'Analysing' });
     expect(trackStatusPill('processing')).toEqual({ status: 'analysing', label: 'Analysing' });
@@ -137,7 +168,7 @@ describe('integration pills', () => {
   it('come from the real state and never say a bare "Ready"', () => {
     for (const s of all) {
       const pill = integrationPill(s);
-      expect(pill.status).toBe(integrationStateOf(s));
+      expect(pill.status).toBe(s.pillStatus ?? integrationStateOf(s));
       expect(pill.label, s.id).not.toBe('Ready');
       expect(pill.label.length, s.id).toBeGreaterThan(0);
     }
@@ -159,15 +190,25 @@ describe('integration pills', () => {
 
   it('are honest for the two music cards everywhere they appear', () => {
     const [spotify, library] = musicStatusEntries();
-    expect(integrationPill(spotify!)).toEqual({ status: 'not_connected', label: 'Links only · no account needed', icon: 'idle' });
+    expect(integrationPill(spotify!)).toEqual({ status: 'not_connected', label: 'Links only', icon: 'idle' });
     expect(toneForStatus(integrationPill(spotify!).status)).toBe('neutral');
-    expect(integrationPill(library!)).toEqual({ status: 'unavailable', label: 'Not available', icon: 'idle' });
-    expect(toneForStatus('unavailable')).toBe('neutral');
+    // The library card is "unavailable" as a plain fact: neutral pill, "Not available", and still counted by its state.
+    expect(integrationStateOf(library!)).toBe('unavailable');
+    expect(integrationPill(library!)).toEqual({ status: 'not_connected', label: 'Not available', icon: 'idle' });
+    expect(toneForStatus(integrationPill(library!).status)).toBe('neutral');
     // The same entries are in the shared list (dashboard, Settings → Integrations).
     for (const id of ['spotify_reference', 'music_catalogue']) {
       const shared = all.find((s) => s.id === id);
       expect(shared && integrationPill(shared)).toEqual(integrationPill(id === 'spotify_reference' ? spotify! : library!));
     }
+  });
+
+  it('keep "unavailable" a warning for a failed check such as the YouTube chart fetch', () => {
+    expect(toneForStatus('unavailable')).toBe('warning');
+    const youtube = youTubeChartStatus({ YOUTUBE_API_KEY: 'k' }, [{ provider: 'youtube_chart', enabled: true, status: 'unavailable', statusMessage: '', lastSuccessAt: null }]);
+    expect(youtube.state).toBe('unavailable');
+    expect(integrationPill(youtube)).toEqual({ status: 'unavailable', label: 'Not available', icon: 'idle' });
+    expect(toneForStatus(integrationPill(youtube).status)).toBe('warning');
   });
 
   it('count only cards missing a server setting as needing setup', () => {

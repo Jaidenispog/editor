@@ -99,7 +99,7 @@ export default async function DashboardPage() {
                 {integrations.map((i) => {
                   const pill = integrationPill(i);
                   return (
-                    <li key={i.id} className="flex items-center justify-between gap-3 text-sm">
+                    <li key={i.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-sm">
                       <span className="flex min-w-0 items-center gap-2 text-charcoal-800">
                         <PlugZap className="size-4 shrink-0 text-charcoal-400" aria-hidden="true" />
                         <span className="min-w-0 truncate" title={i.name}>

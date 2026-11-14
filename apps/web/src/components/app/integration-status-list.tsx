@@ -8,7 +8,8 @@ import { integrationPill } from './integration-pill';
 /**
  * Status cards for integrations: what is connected, what is configured but not yet connected, and what needs
  * setup — with the plain-language next step and the names (never values) of missing server settings. The pill
- * comes from each card's real state ({@link integrationPill}).
+ * comes from each card's real state ({@link integrationPill}); when the name and pill do not fit on one line the pill
+ * drops below the name, so the name is never squeezed.
  */
 export function IntegrationStatusList({ integrations, showEnv = false, className }: { integrations: IntegrationStatus[]; showEnv?: boolean; className?: string }) {
   return (
@@ -18,7 +19,7 @@ export function IntegrationStatusList({ integrations, showEnv = false, className
         const Icon = pill.icon === 'connected' ? CheckCircle2 : pill.icon === 'ready' ? PlugZap : CircleDashed;
         return (
           <li key={i.id} className="rounded-xl border border-charcoal-200 bg-white p-4">
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1.5">
               <div className="flex min-w-0 items-center gap-2.5">
                 <Icon className={cn('size-5 shrink-0', pill.icon === 'connected' ? 'text-emerald-600' : pill.icon === 'ready' ? 'text-sky-600' : 'text-charcoal-400')} aria-hidden="true" />
                 <h3 className="truncate text-sm font-semibold text-charcoal-900">{i.name}</h3>

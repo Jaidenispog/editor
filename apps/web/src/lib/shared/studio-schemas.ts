@@ -130,11 +130,14 @@ export function originalSoundChoices(track: string, selected?: SoundState['origi
 /**
  * The panel state after choosing a track ('none' for no music). The song section restarts at 0 for a new track
  * (or returns to the saved one for the current track), and "Under the music" becomes "Original sound only" when the
- * music is taken away, which is what the owner hears in that case.
+ * music is taken away, which is what the owner hears in that case. Choosing a track again undoes that automatic
+ * change, so "No music" and back never changes the original sound without the owner choosing it.
  */
 export function withTrack(state: SoundState, track: string, from: SoundState | null): SoundState {
   const start = from && track === from.track ? from.start : 0;
-  const original = track === 'none' && state.original === 'under_music' ? 'only' : state.original;
+  let original = state.original;
+  if (track === 'none' && state.original === 'under_music') original = 'only';
+  else if (track !== 'none' && state.track === 'none' && state.original === 'only' && from?.original === 'under_music') original = 'under_music';
   return { ...state, track, start, original };
 }
 

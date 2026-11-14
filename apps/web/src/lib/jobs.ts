@@ -8,6 +8,7 @@ import { getDb } from './db.js';
 import { getLogger } from './logger.js';
 import { getQueue } from './queue.js';
 import type { JobDto } from './shared/dto.js';
+import { MUSIC_ANALYSIS_CANCELLED_MESSAGE } from './shared/music-display.js';
 import { businessProfileRefId } from './jobs/business_profile.js';
 import { emailRefId } from './jobs/email.js';
 import { musicRefId } from './jobs/music.js';
@@ -223,7 +224,7 @@ export async function settleCancelledQueuedJob(job: Pick<JobRow, 'type' | 'paylo
     case 'music.analyse':
       await db
         .update(schema.musicTracks)
-        .set({ status: 'uploaded', statusMessage: 'Analysis cancelled', updatedAt: now })
+        .set({ status: 'uploaded', statusMessage: MUSIC_ANALYSIS_CANCELLED_MESSAGE, updatedAt: now })
         .where(and(eq(schema.musicTracks.id, String(payload['trackId'])), inArray(schema.musicTracks.status, ['uploaded', 'processing'])));
       return;
     default:

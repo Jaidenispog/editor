@@ -15,7 +15,7 @@ describe('music integration cards', () => {
     const entries = musicStatusEntries();
     expect(entries.map((e) => e.id)).toEqual(['spotify_reference', 'music_catalogue']);
     expect(entries.every((e) => e.connected === false && e.verified === false && e.liveMode === null && e.missingEnv.length === 0)).toBe(true);
-    expect(entries.find((e) => e.id === 'spotify_reference')).toMatchObject({ state: 'not_connected', stateLabel: 'Links only · no account needed' });
+    expect(entries.find((e) => e.id === 'spotify_reference')).toMatchObject({ state: 'not_connected', stateLabel: 'Links only' });
     expect(entries.find((e) => e.id === 'spotify_reference')?.message).toMatch(/not licensed for playing in the shop or in your videos/);
     // Not a setup step the server could fix: a neutral "Not available" whose text starts with the manual route.
     expect(entries.find((e) => e.id === 'music_catalogue')).toMatchObject({ state: 'unavailable' });

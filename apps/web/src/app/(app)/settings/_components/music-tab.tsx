@@ -18,7 +18,7 @@ import { apiRequest } from '@/lib/client/api-client';
 import { ChunkedUploader, type UploadItem } from '@/lib/client/uploader';
 import { formatBytes, formatDate, formatSeconds } from '@/lib/format';
 import type { MusicTrackSummary } from '@/lib/music';
-import { finishedUploadsShownAsTracks, showsLicenceEnd, trackStatusPill } from '@/lib/shared/music-display';
+import { finishedUploadsShownAsTracks, isAnalysisCancelled, isTrackAnalysing, showsLicenceEnd, trackStatusPill } from '@/lib/shared/music-display';
 import {
   LICENCE_PLACES,
   LicencePassportForm,
@@ -260,8 +260,9 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
               const state = t.licenceState;
               const info = LICENCE_STATE_TEXT[state];
               const places = LICENCE_PLACES.filter(([key]) => key !== 'promotionalUse' && t.licence.permitted[key]).map(([, label]) => label);
-              const pill = trackStatusPill(t.status);
-              const busy = t.status === 'uploaded' || t.status === 'processing';
+              const pill = trackStatusPill(t.status, t.statusMessage);
+              const busy = isTrackAnalysing(t);
+              const stopped = isAnalysisCancelled(t);
               return (
                 <li key={t.id} className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start">
                   <div className="min-w-0 flex-1">
@@ -274,6 +275,7 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
                     </p>
                     {t.status === 'failed' && t.statusMessage ? <p className="mt-1 text-sm text-red-600">{t.statusMessage}</p> : null}
                     {busy ? <p className="mt-1 text-sm text-charcoal-600">{`${(t.statusMessage || 'Finding the beat').replace(/[.\s]+$/, '')}. It can be used in edits once this finishes.`}</p> : null}
+                    {stopped ? <p className="mt-1 text-sm text-charcoal-600">The beat analysis was stopped, so this track cannot be used in edits. Remove it and upload it again to analyse it.</p> : null}
                     <div className="mt-2 flex flex-wrap gap-1.5">
                       <Badge tone={info.tone}>{LICENCE_STATE_LABELS[state]}</Badge>
                       <Badge>{licenceKindLabel(t.licence.kind)}</Badge>

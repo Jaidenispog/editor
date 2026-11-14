@@ -253,7 +253,7 @@ export function LicencePassportForm({ draft, onChange, step, disabled = false }:
         {library ? (
           <div className="grid gap-4 sm:grid-cols-2">
             <Input label="Account holder" hint="Should be the business name." value={draft.accountHolder} disabled={disabled} onChange={(e) => set('accountHolder', e.target.value)} maxLength={120} />
-            <Input label="Track link or ID at the library (optional)" value={draft.providerTrackRef} disabled={disabled} onChange={(e) => set('providerTrackRef', e.target.value)} maxLength={300} />
+            <Input label="Track link or ID (optional)" hint="The track’s page or ID at the library." value={draft.providerTrackRef} disabled={disabled} onChange={(e) => set('providerTrackRef', e.target.value)} maxLength={300} />
             <Input label="Download date (optional)" type="date" value={draft.downloadedOn} disabled={disabled} onChange={(e) => set('downloadedOn', e.target.value)} />
             <Input label="Licence end date (optional)" type="date" value={draft.expiresOn} disabled={disabled} onChange={(e) => set('expiresOn', e.target.value)} />
           </div>

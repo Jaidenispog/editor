@@ -183,11 +183,11 @@ export function SoundPanel({ editId, editName, versionId, open, onClose, onDone 
             hint={
               otherTracks.length === 0 ? (
                 <>
-                  {music.track && music.sound.hasMusic ? 'No other licensed tracks to choose from yet.' : 'No licensed tracks to choose from yet.'} Add one with Upload licensed track on the project page or in{' '}
+                  {music.track && music.sound.hasMusic ? 'No other track fits this edit yet.' : 'No track fits this edit yet.'} Add one with “Upload licensed track” on this page or in{' '}
                   <Link href="/settings?tab=music" className="font-medium text-charcoal-800 underline decoration-[var(--accent)] decoration-2 underline-offset-4">
                     Settings → Music library
                   </Link>
-                  . It needs a confirmed licence and must be at least as long as this edit.
+                  . A track needs a confirmed licence, must have finished analysing and must be at least as long as this edit.
                 </>
               ) : undefined
             }

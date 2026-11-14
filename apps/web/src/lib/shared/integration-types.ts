@@ -31,10 +31,16 @@ export interface IntegrationStatus {
   verified?: boolean;
   /**
    * Words for the status pill when the state word alone would mislead, for example a links-only card that has no
-   * account to connect ("Links only · no account needed" rather than "Ready to connect"). The pill keeps the state's
+   * account to connect ("Links only" rather than "Ready to connect"). The pill keeps the state's
    * colour. Leave unset to use the shared words for the state.
    */
   stateLabel?: string;
+  /**
+   * The status word that sets the pill's colour when the state's own colour would mislead, for example a card that is
+   * "unavailable" as a plain fact (no music library API exists) rather than because a check failed, which shows a
+   * neutral pill. The state, its words and the counts are unchanged. Leave unset to colour the pill by the state.
+   */
+  pillStatus?: string;
 }
 
 /** The state word for a card: the explicit `state`, or one derived from the older booleans. */

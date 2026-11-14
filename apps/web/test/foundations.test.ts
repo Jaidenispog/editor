@@ -220,7 +220,7 @@ describe('webhook bodies, ref ids and status words', () => {
       ['low', 'neutral', 'Minor'],
       ['not_configured', 'warning', 'Needs setup'],
       ['not_connected', 'neutral', 'Not connected'],
-      ['unavailable', 'neutral', 'Not available'],
+      ['unavailable', 'warning', 'Not available'],
       ['disconnected', 'neutral', 'Disconnected'],
       ['CANCELLED_BY_CUSTOMER', 'warning', 'Cancelled by client'],
       ['NO_SHOW', 'danger', 'No-show'],
