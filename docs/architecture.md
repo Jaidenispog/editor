@@ -40,6 +40,68 @@ packages/config Typed environment (Zod). Secrets never leave the server.
 - OAuth tokens for integrations encrypted at rest (AES-256-GCM, key derived from `APP_SECRET` unless `APP_ENCRYPTION_KEY` is set).
 - Webhooks (Square) verified by signature before processing; events stored idempotently.
 
+## Integrations framework (Stage B/C foundations, WP0)
+
+Built once so every Stage B/C module integrates the same way and parallel work packages edit only their own files
+(`docs/design/stage-bc-plan.md` §2).
+
+- **Registries (one file per module).** Modules: `music`, `preferences`, `trends`, `publishing`, `square`, `email`,
+  `website`, `business_profile`. Each aggregator imports every module file in a fixed order:
+  - job types and payload schemas: `packages/core/src/jobs.ts` ← `src/jobs/<module>.ts` (Stage A in `jobs/studio.ts`,
+    `webhook.process` and `google.disconnect` in `jobs/shared.ts`). A later module may extend an earlier payload only
+    backwards-compatibly.
+  - queue settings: `packages/queue/src/index.ts` ← `src/settings/<module>.ts` (retries, expiry, heartbeat, `policy`).
+    The queue refuses to start when a registered job type has no settings.
+  - worker: `apps/worker/src/modules/index.ts` ← `src/modules/<module>/index.ts` (`handlers`, keyed `crons`,
+    `webhookHandlers`, `cleanupTasks`, `exportReadyHooks`, `refIdFor`). The worker refuses to start unless every
+    registered job type has exactly one handler.
+  - web: `src/lib/integrations.ts` ← `src/lib/integrations/<module>.ts` (pure status builders),
+    `src/lib/jobs.ts` ← `src/lib/jobs/<module>.ts` (ref ids), Settings → Integrations cards
+    (`settings/_components/integrations/<module>.tsx`), Studio card slots (`components/studio/extensions/<module>.tsx`:
+    badges, banner, menu items).
+  - settings: `packages/core/src/settings.ts` ← `src/settings/<module>.ts` (new top-level sections, each with a full
+    default); database tables: `packages/db/src/schema.ts` re-exports `src/schema/<module>.ts` (drizzle-kit reads both).
+- **Integration states.** One contract (`packages/core/src/integrations.ts`, `IntegrationStatus` in
+  `apps/web/src/lib/shared/integration-types.ts`): `state` (`not_configured`, `not_connected`, `connected`,
+  `awaiting_approval`, `unavailable`, `needs_reauth`, `error`), `liveMode` (`live`, `development_live`, `sandbox`,
+  `staging`, `read_only`) and `verified` (only an explicit owner verification sets it). Status words and tones for
+  every module live in `components/ui/status-words.ts`.
+- **Connections.** One `integration_connections` row per provider (`meta`, `zernio`, `postmark`, `google_places`,
+  `square`, `google_business_profile`, `google_search_console`, `website`, …; status adds `disconnected`).
+  Credentials are AES-256-GCM encrypted, decrypted only in the worker (`lib/credentials.ts`) and once in an OAuth
+  callback for the code exchange; never in payloads, logs, the audit log or DTOs.
+  `withConnectionLock` (`SELECT … FOR UPDATE`) serialises token refreshes; `refreshIfExpiring` stores new tokens;
+  `recordConnectionCheck` records the outcome of a read-only capability check (merging `capabilities`).
+- **OAuth.** `apps/web/src/lib/oauth-state.ts`: an encrypted, HttpOnly, SameSite=Lax, 10-minute cookie holding
+  `sha256(state)`, the session id, the PKCE verifier and small extras; the callback checks it in constant time and
+  always clears it. Google (`/api/integrations/google/{connect,callback}`) uses a product table:
+  `business_profile` → `business.manage` → row `google_business_profile` → `reviews.gbp.sync`;
+  `search_console` → `webmasters.readonly` → row `google_search_console` → `website.connection_check`. A follow-up job
+  is queued only once its module registers it. Worker: `lib/google/oauth.ts` refreshes on demand (`invalid_grant` →
+  `needs_reauth`); `google.disconnect` revokes and wipes tokens, never touching a connection the owner reconnected.
+- **Webhooks.** Web: `readRawBody` (256 KiB) → provider verification in the module's route → `storeWebhookEvent`
+  (`ON CONFLICT DO NOTHING`; one `webhook.process` job only for a new row). Worker: `webhook.process` hands the stored
+  event to the handler its provider's module registered; unknown providers are marked processed with an error;
+  handler failures are recorded and retried. Payloads are hints: handlers re-fetch or apply only restrictive effects.
+- **Worker helpers.** `lib/http.ts` (`fetch` through the injectable `ctx.fetch`, tied to the run's AbortSignal, 30 s
+  default limit, redacted logging of tokens, codes, secrets and hashed email addresses; test-only base URLs via
+  `testOnlyBaseUrl`, honoured only under `NODE_ENV=test`), `lib/audit.ts` (trimmed, redacted audit data),
+  `lib/feedback.ts` / web `lib/feedback.ts` (`recordFeedback` inside the caller's transaction with a plan-facts
+  snapshot from `computePlanFacts`).
+- **Scheduling.** `JobQueue` adds per-type `policy` (`stately` allows one queued and one active job per
+  `singletonKey`), `startAfter: Date` and keyed cron schedules in Melbourne time. On pg-boss 12.38.1 a `singletonKey`
+  on a `standard` queue does **not** prevent a second queued job (pinned by a test), so every design's conditional
+  database update stays the authoritative duplicate guard. Melbourne wall-clock helpers (`melbourneLocalToUtc` with
+  nonexistent/ambiguous DST times, `melbourneDayRange`, `melbourneDateOf`, `melbourneZoneLabel`, `nextSendSlot`) are
+  in `packages/core/src/time.ts`.
+- **Hooks.** After an export is stored the render handler calls each module's export-ready hook; a failing hook is
+  logged and never fails the export. `maintenance.cleanup` runs each module's cleanup task after the Stage A cleanup.
+- **Legal pages.** `/privacy`, `/terms`, `/data-deletion` show only text the owner published (Settings → Business →
+  Legal pages, stored in `settings.legal`); the suggested starting text is marked "Review before publishing".
+- **Shared rules.** `isGenuinelyCompleted` (`packages/core/src/completion.ts`) checks stored booking columns only
+  (`ACCEPTED` and a `payment` or `owner_marked` source with `completed_at`); `customers.square_email_unsubscribed`
+  exists from migration `0001_foundations`.
+
 ## Stages
 
 - **A** (this milestone): upload, analysis, five previews, revise/regenerate with history, full-quality export.

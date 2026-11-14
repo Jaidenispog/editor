@@ -23,7 +23,7 @@ Content Library apply the same rule.
 ## Settings and integrations
 | Method | Route | Notes |
 | --- | --- | --- |
-| GET / PUT | `/api/settings` | `AppSettings` (brand, business, preferences); PUT accepts a partial object |
+| GET / PUT | `/api/settings` | `AppSettings` (brand, business, preferences, legal and module sections); PUT accepts a partial object and keeps sections it does not mention |
 | POST | `/api/settings/logo` | multipart logo upload → stored at `brand/logo.<ext>` |
 | GET | `/api/integrations/status` | per integration: `{ configured, connected, message }` |
 | GET / POST / PUT / DELETE | `/api/trends` | curated or live trend references |
@@ -69,3 +69,36 @@ Content Library apply the same rule.
 ## Media
 `GET /api/media/[token]` streams a file for the local storage driver after verifying the HMAC token (supports HTTP
 Range for video seeking). With the S3 driver, links are presigned by the bucket instead.
+
+## Stage B/C shared routes (foundations, WP0)
+
+**Public paths** (no session; listed once in `apps/web/src/lib/public-routes.ts`): `/privacy`, `/terms`,
+`/data-deletion`, `/api/webhooks/*`, `/api/public/*`, `/r/*`, `/u/*`, plus the Stage A ones. Each protects itself
+(signatures, Basic credentials or unguessable tokens; legal pages answer 404 until published).
+
+| Method | Route | Notes |
+| --- | --- | --- |
+| GET / PUT | `/api/settings` | Also `legal: { privacy \| terms \| dataDeletion: { draft, published, publishedAt } }` (owner) and `business.termsUrl` / `business.privacyUrl`. Sections the request does not mention are kept |
+| GET | `/privacy`, `/terms`, `/data-deletion` | Public pages with the text the owner published in Settings → Business → Legal pages; 404 until published. Blank `business.privacyUrl` / `termsUrl` mean these pages |
+| GET | `/api/integrations/google/connect` | Owner. `?product=business_profile\|search_console` (anything else 400). 302 to Google with that product's scope only, `access_type=offline`, `prompt=consent`, PKCE S256; sets the 10-minute HttpOnly state cookie `sa_oauth_google` (path `/api/integrations/google`). 422 when `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are missing |
+| GET | `/api/integrations/google/callback` | Owner, same session. Checks the state cookie (missing, tampered, expired, other session or mismatched state are refused), exchanges the code once (10 s, no retry), stores encrypted tokens in the product's own row (`google_business_profile` or `google_search_console`), audits, queues the product's read-only check when its module has registered it, clears the cookie and returns 302 to `/settings?tab=integrations&connected=…` (or `checking=…`, or `google_error=<plain message>`) |
+| GET | `/api/integrations/status` | Each entry also has `state` (`not_configured`, `not_connected`, `connected`, `awaiting_approval`, `unavailable`, `needs_reauth`, `error`), `liveMode` (`live`, `development_live`, `sandbox`, `staging`, `read_only` or null) and `verified` |
+
+Webhook routes call `readRawBody` (256 KiB limit, 413 above it), verify, then `storeWebhookEvent`: one row per
+(provider, external event id) and one `webhook.process` job only when the row is new.
+
+## Music (Stage B, WP1)
+
+## Preferences (Stage B, WP2)
+
+## Trends (Stage B, WP3 and WP5)
+
+## Publishing (Stage B, WP4 and WP10)
+
+## Square appointments (Stage C, WP6 and WP6b)
+
+## Email and reviews (Stage C, WP7)
+
+## Website and local search (Stage C, WP8)
+
+## Google Business Profile (Stage C, WP9)

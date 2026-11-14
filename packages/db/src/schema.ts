@@ -21,11 +21,18 @@ import type {
   PlanIssue,
   StyleSupport,
 } from '@studio/core';
+import { timestamps } from './schema/common.js';
 
-const timestamps = {
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-};
+// New Stage B/C tables live in one file per module (./schema/<module>.ts) and are re-exported here, so the app,
+// the worker and drizzle-kit all see them while parallel work packages edit only their own file.
+export * from './schema/music.js';
+export * from './schema/preferences.js';
+export * from './schema/trends.js';
+export * from './schema/publishing.js';
+export * from './schema/square.js';
+export * from './schema/email.js';
+export * from './schema/website.js';
+export * from './schema/business_profile.js';
 
 // ---------------------------------------------------------------------------------------------
 // Identity & access
@@ -447,8 +454,12 @@ export const integrationConnections = pgTable(
   'integration_connections',
   {
     id: text('id').primaryKey(),
-    provider: text('provider', { enum: ['square', 'resend', 'google_business_profile', 'google_search_console', 'website'] }).notNull(),
-    status: text('status', { enum: ['not_configured', 'connected', 'needs_reauth', 'error'] }).notNull().default('not_configured'),
+    /** One row per provider; same list as CONNECTION_PROVIDERS in @studio/core (text enum, no CHECK constraint). */
+    provider: text('provider', {
+      enum: ['square', 'resend', 'google_business_profile', 'google_search_console', 'website', 'meta', 'zernio', 'postmark', 'google_places'],
+    }).notNull(),
+    /** Same list as CONNECTION_STATUSES in @studio/core. `disconnected` keeps the row (and its history) without a credential. */
+    status: text('status', { enum: ['not_configured', 'connected', 'needs_reauth', 'error', 'disconnected'] }).notNull().default('not_configured'),
     externalAccountId: text('external_account_id'),
     displayName: text('display_name').notNull().default(''),
     accessTokenEncrypted: text('access_token_encrypted'),
@@ -456,8 +467,11 @@ export const integrationConnections = pgTable(
     tokenExpiresAt: timestamp('token_expires_at', { withTimezone: true }),
     scopes: jsonb('scopes').$type<string[]>().notNull().default([]),
     config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
-    /** Capabilities verified against the live account (e.g. bookings write allowed). */
-    capabilities: jsonb('capabilities').$type<Record<string, boolean | string>>().notNull().default({}),
+    /**
+     * Capabilities verified against the live account by read-only checks (e.g. bookings write allowed), plus
+     * verification markers written only by explicit owner actions.
+     */
+    capabilities: jsonb('capabilities').$type<Record<string, boolean | string | number | null>>().notNull().default({}),
     lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
     lastError: text('last_error'),
     ...timestamps,
@@ -480,6 +494,11 @@ export const customers = pgTable(
     marketingConsentAt: timestamp('marketing_consent_at', { withTimezone: true }),
     unsubscribedAt: timestamp('unsubscribed_at', { withTimezone: true }),
     reviewRequestsOptOut: boolean('review_requests_opt_out').notNull().default(false),
+    /**
+     * Square's read-only `preferences.email_unsubscribed`, filled by the Square sync (null = not known). The email
+     * module treats `true` as a block on marketing email and records its own consent-ledger event.
+     */
+    squareEmailUnsubscribed: boolean('square_email_unsubscribed'),
     notes: text('notes').notNull().default(''),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     ...timestamps,

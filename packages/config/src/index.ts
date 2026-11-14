@@ -73,19 +73,59 @@ export const EnvSchema = z.object({
   OPENAI_TRANSCRIPTION_MODEL: z.string().default('whisper-1'),
 
   // Stage B/C integrations (all optional; features show setup guidance when missing)
+  // --- Publishing (Instagram through a Meta app; TikTok is posted by hand unless Zernio is switched on)
   META_APP_ID: z.string().optional(),
   META_APP_SECRET: z.string().optional(),
+  /** Facebook Login for Business configuration id (the login dialog sends it instead of a scope list). */
+  META_LOGIN_CONFIG_ID: z.string().optional(),
+  /** Graph API version used for every Meta call; the connection check records the version that worked. */
+  META_GRAPH_VERSION: z.string().regex(/^v\d+\.\d+$/, 'Expected a version like v26.0').default('v26.0'),
+  /** Not used: TikTok has no direct posting here. Kept so older .env files still load. */
   TIKTOK_CLIENT_KEY: z.string().optional(),
   TIKTOK_CLIENT_SECRET: z.string().optional(),
+  /** `zernio` turns on the optional automatic TikTok posting through Zernio (Stage C); `none` keeps manual posting only. */
+  TIKTOK_PUBLISH_PROVIDER: z.enum(['none', 'zernio']).default('none'),
+  ZERNIO_API_BASE_URL: optionalUrl(),
+  ZERNIO_WEBHOOK_SECRET: z.string().optional(),
+  // --- Trends
+  YOUTUBE_API_KEY: z.string().optional(),
+  // --- Square appointments
   SQUARE_APPLICATION_ID: z.string().optional(),
   SQUARE_APPLICATION_SECRET: z.string().optional(),
   SQUARE_ENVIRONMENT: z.enum(['sandbox', 'production']).default('sandbox'),
   SQUARE_WEBHOOK_SIGNATURE_KEY: z.string().optional(),
+  /** The exact webhook address registered in Square, when it differs from APP_URL + /api/webhooks/square. */
+  SQUARE_WEBHOOK_NOTIFICATION_URL: optionalUrl(),
+  // --- Email and reviews
+  /** `postmark` sends email through Postmark; `none` keeps every email as a draft. */
+  EMAIL_PROVIDER: z.enum(['none', 'postmark']).default('none'),
+  POSTMARK_SERVER_TOKEN: z.string().optional(),
+  POSTMARK_TRANSACTIONAL_STREAM: z.string().min(1).default('outbound'),
+  POSTMARK_BROADCAST_STREAM: z.string().min(1).default('broadcast'),
+  POSTMARK_WEBHOOK_USERNAME: z.string().optional(),
+  POSTMARK_WEBHOOK_PASSWORD: z.string().optional(),
+  /** Not used: Postmark replaced Resend. Kept so older .env files still load. */
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().optional(),
+  /** Google Places key used only to show the studio's own rating and review count. */
+  GOOGLE_MAPS_API_KEY: z.string().optional(),
+  // --- Google sign-in (Business Profile and Search Console)
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
+  // --- Website
+  /** Model used only when the owner asks for AI wording of a website change. */
+  AI_WEBSITE_MODEL: z.string().min(1).default('claude-haiku-5-5'),
+
+  // Test only: local fake servers. Honoured only when NODE_ENV=test.
+  META_GRAPH_BASE_URL: optionalUrl(),
+  META_RUPLOAD_BASE_URL: optionalUrl(),
+  SQUARE_API_BASE_URL: optionalUrl(),
 });
+
+/** An optional absolute http(s) URL; an empty string counts as unset. */
+function optionalUrl() {
+  return z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), z.string().url().optional());
+}
 
 export type Env = z.infer<typeof EnvSchema>;
 
@@ -108,6 +148,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   if (env.TRANSCRIPTION_PROVIDER === 'deepgram' && !env.DEEPGRAM_API_KEY) {
     throw new Error('TRANSCRIPTION_PROVIDER=deepgram requires DEEPGRAM_API_KEY');
   }
+  if (env.EMAIL_PROVIDER === 'postmark' && (!env.POSTMARK_SERVER_TOKEN || !env.EMAIL_FROM)) {
+    throw new Error('EMAIL_PROVIDER=postmark requires POSTMARK_SERVER_TOKEN and EMAIL_FROM');
+  }
   if (source === process.env) cached = env;
   return env;
 }
@@ -127,12 +170,44 @@ export function describeCapabilities(env: Env) {
     },
     storage: { driver: env.STORAGE_DRIVER },
     integrations: {
-      instagram: Boolean(env.META_APP_ID && env.META_APP_SECRET),
-      tiktok: Boolean(env.TIKTOK_CLIENT_KEY && env.TIKTOK_CLIENT_SECRET),
+      instagram: Boolean(env.META_APP_ID && env.META_APP_SECRET && env.META_LOGIN_CONFIG_ID),
+      /** TikTok automatic posting (Zernio, Stage C). Manual posting is always available. */
+      tiktok: env.TIKTOK_PUBLISH_PROVIDER === 'zernio' && Boolean(env.ZERNIO_API_BASE_URL),
       square: Boolean(env.SQUARE_APPLICATION_ID && env.SQUARE_APPLICATION_SECRET),
-      email: Boolean(env.RESEND_API_KEY && env.EMAIL_FROM),
+      email: env.EMAIL_PROVIDER === 'postmark' && Boolean(env.POSTMARK_SERVER_TOKEN && env.EMAIL_FROM),
       google: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
+    },
+    /** Per module: which optional server settings are present (never their values). */
+    modules: {
+      publishing: {
+        instagramDirect: Boolean(env.META_APP_ID && env.META_APP_SECRET && env.META_LOGIN_CONFIG_ID),
+        graphVersion: env.META_GRAPH_VERSION,
+        tiktokProvider: env.TIKTOK_PUBLISH_PROVIDER,
+        zernioWebhookSigning: Boolean(env.ZERNIO_WEBHOOK_SECRET),
+      },
+      trends: { youtubeChart: Boolean(env.YOUTUBE_API_KEY) },
+      square: {
+        oauth: Boolean(env.SQUARE_APPLICATION_ID && env.SQUARE_APPLICATION_SECRET),
+        environment: env.SQUARE_ENVIRONMENT,
+        webhooks: Boolean(env.SQUARE_WEBHOOK_SIGNATURE_KEY),
+      },
+      email: {
+        provider: env.EMAIL_PROVIDER,
+        sending: env.EMAIL_PROVIDER === 'postmark' && Boolean(env.POSTMARK_SERVER_TOKEN && env.EMAIL_FROM),
+        webhooks: Boolean(env.POSTMARK_WEBHOOK_USERNAME && env.POSTMARK_WEBHOOK_PASSWORD),
+        placesRating: Boolean(env.GOOGLE_MAPS_API_KEY),
+      },
+      google: { oauth: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) },
+      website: { aiWordingModel: env.AI_PROVIDER === 'anthropic' ? env.AI_WEBSITE_MODEL : null },
     },
   };
 }
 export type CapabilitySummary = ReturnType<typeof describeCapabilities>;
+
+/**
+ * A test-only base URL (local fake server) for an external API. Returned only when NODE_ENV=test, so a stray
+ * setting can never point a real deployment at another host.
+ */
+export function testOnlyBaseUrl(env: Pick<Env, 'NODE_ENV'>, value: string | undefined): string | null {
+  return env.NODE_ENV === 'test' && value ? value.replace(/\/+$/, '') : null;
+}

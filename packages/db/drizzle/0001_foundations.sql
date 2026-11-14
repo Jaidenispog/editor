@@ -1,0 +1,1 @@
+ALTER TABLE "customers" ADD COLUMN "square_email_unsubscribed" boolean;

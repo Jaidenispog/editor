@@ -8,9 +8,21 @@ import { getDb } from './db.js';
 import { getLogger } from './logger.js';
 import { getQueue } from './queue.js';
 import type { JobDto } from './shared/dto.js';
+import { businessProfileRefId } from './jobs/business_profile.js';
+import { emailRefId } from './jobs/email.js';
+import { musicRefId } from './jobs/music.js';
+import { preferencesRefId } from './jobs/preferences.js';
+import { publishingRefId } from './jobs/publishing.js';
+import { squareRefId } from './jobs/square.js';
+import { trendsRefId } from './jobs/trends.js';
+import type { RefIdResolver } from './jobs/types.js';
+import { websiteRefId } from './jobs/website.js';
 
 /** Statuses that mean a job is still waiting or working. */
 export const ACTIVE_JOB_STATUSES = ['queued', 'running'] as const;
+
+/** Per-module ref-id resolvers, in registry order. Modules edit only their own `./jobs/<module>.ts`. */
+const MODULE_REF_IDS: readonly RefIdResolver[] = [musicRefId, preferencesRefId, trendsRefId, publishingRefId, squareRefId, emailRefId, websiteRefId, businessProfileRefId];
 
 /** The entity a job works on, matching the worker's convention so progress lands on the right card. */
 export function defaultRefId(type: JobType, payload: Record<string, unknown>): string | null {
@@ -28,7 +40,15 @@ export function defaultRefId(type: JobType, payload: Record<string, unknown>): s
       return pick('editVersionId');
     case 'music.analyse':
       return pick('trackId');
+    case 'webhook.process':
+      return pick('webhookEventId');
+    case 'google.disconnect':
+      return pick('connectionId');
     default:
+      for (const resolve of MODULE_REF_IDS) {
+        const ref = resolve(type, payload);
+        if (ref !== undefined) return ref;
+      }
       return null;
   }
 }
@@ -45,6 +65,10 @@ export async function createTrackedJob<T extends JobType>(input: {
   refId?: string | null;
   singletonKey?: string;
   priority?: number;
+  /** Run no earlier than this many seconds from now (debounces such as `preferences.recompute`). */
+  startAfterSeconds?: number;
+  /** Run no earlier than this instant (wins over `startAfterSeconds`). */
+  startAfter?: Date;
 }): Promise<JobRow> {
   const data = JOB_PAYLOAD_SCHEMAS[input.type].parse(input.payload) as JobPayload<T>;
   const db = getDb();
@@ -69,6 +93,8 @@ export async function createTrackedJob<T extends JobType>(input: {
       trackingJobId: id,
       ...(input.singletonKey ? { singletonKey: input.singletonKey } : {}),
       ...(input.priority !== undefined ? { priority: input.priority } : {}),
+      ...(input.startAfterSeconds !== undefined ? { startAfterSeconds: input.startAfterSeconds } : {}),
+      ...(input.startAfter !== undefined ? { startAfter: input.startAfter } : {}),
     });
     const updated = await db
       .update(schema.jobs)

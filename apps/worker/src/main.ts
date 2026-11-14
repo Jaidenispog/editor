@@ -17,8 +17,47 @@ import { handleGenerateEdits, handleReviseEdit } from './handlers/generate.js';
 import { handleRender } from './handlers/render.js';
 import { handleAnalyseMusic } from './handlers/music.js';
 import { handleCleanup } from './handlers/cleanup.js';
+import { handleGoogleDisconnect } from './handlers/google-disconnect.js';
+import { handleWebhookProcess } from './handlers/webhook-process.js';
+import { WORKER_MODULES, defineHandler, moduleCrons, moduleHandlers, type ModuleJobHandler, type WorkerModule } from './modules/index.js';
 
 type Handler<T extends JobType> = (ctx: WorkerContext, run: TrackedRun, payload: JobPayload<T>) => Promise<void>;
+
+/** Stage A handlers and the shared Stage B/C ones (webhook dispatch, Google disconnect). */
+export function coreHandlers(concurrency: number): ModuleJobHandler[] {
+  return [
+    defineHandler(JOB_TYPES.INGEST_ASSET, handleIngestAsset, concurrency),
+    defineHandler(JOB_TYPES.GENERATE_EDITS, handleGenerateEdits, 1),
+    defineHandler(JOB_TYPES.REVISE_EDIT, handleReviseEdit, 1),
+    defineHandler(JOB_TYPES.RENDER_PREVIEW, (cx, run, p) => handleRender(cx, run, p, 'preview'), concurrency),
+    defineHandler(JOB_TYPES.RENDER_EXPORT, (cx, run, p) => handleRender(cx, run, p, 'export'), 1),
+    defineHandler(JOB_TYPES.ANALYSE_MUSIC, handleAnalyseMusic, 1),
+    defineHandler(JOB_TYPES.CLEANUP, (cx, run, p) => handleCleanup(cx, run, p), 1),
+    defineHandler(JOB_TYPES.WEBHOOK_PROCESS, (cx, run, p) => handleWebhookProcess(cx, run, p), 2),
+    defineHandler(JOB_TYPES.GOOGLE_DISCONNECT, handleGoogleDisconnect, 1),
+  ];
+}
+
+/** Every handler the worker registers: the core ones, then each module's (see src/modules/index.ts). */
+export function allHandlers(concurrency: number, modules: readonly WorkerModule[] = WORKER_MODULES): ModuleJobHandler[] {
+  return [...coreHandlers(concurrency), ...moduleHandlers(modules)];
+}
+
+/**
+ * Throws unless every registered job type has exactly one handler and every handler is for a registered type.
+ * The worker calls this before it takes any work, so a module that registers a job type without its handler
+ * stops the worker from starting instead of leaving jobs queued for ever.
+ */
+export function assertHandlersCoverJobTypes(handlers: ModuleJobHandler[], jobTypes: readonly string[] = ALL_JOB_TYPES): void {
+  const counts = new Map<string, number>();
+  for (const h of handlers) counts.set(h.type, (counts.get(h.type) ?? 0) + 1);
+  const missing = jobTypes.filter((t) => !counts.has(t));
+  const doubled = [...counts].filter(([, n]) => n > 1).map(([t]) => t);
+  const unknown = [...counts.keys()].filter((t) => !jobTypes.includes(t));
+  if (missing.length) throw new Error(`No handler registered for: ${missing.join(', ')}`);
+  if (doubled.length) throw new Error(`More than one handler registered for: ${doubled.join(', ')}`);
+  if (unknown.length) throw new Error(`Handlers registered for unknown job types: ${unknown.join(', ')}`);
+}
 
 /** How often rows left "running" by a dead worker are looked for after start-up. */
 const STALE_SWEEP_MS = 30_000;
@@ -128,14 +167,12 @@ export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => P
   };
 
   const c = env.WORKER_CONCURRENCY;
-  await register(JOB_TYPES.INGEST_ASSET, handleIngestAsset, c);
-  await register(JOB_TYPES.GENERATE_EDITS, handleGenerateEdits, 1);
-  await register(JOB_TYPES.REVISE_EDIT, handleReviseEdit, 1);
-  await register(JOB_TYPES.RENDER_PREVIEW, (cx, run, p) => handleRender(cx, run, p, 'preview'), c);
-  await register(JOB_TYPES.RENDER_EXPORT, (cx, run, p) => handleRender(cx, run, p, 'export'), 1);
-  await register(JOB_TYPES.ANALYSE_MUSIC, handleAnalyseMusic, 1);
-  await register(JOB_TYPES.CLEANUP, handleCleanup, 1);
+  // Refuse to start (before taking any work) when a registered job type has no handler or two handlers.
+  const handlers = allHandlers(c);
+  assertHandlersCoverJobTypes(handlers);
+  for (const h of handlers) await register(h.type, h.handler as Handler<JobType>, h.concurrency ?? 1);
   await queue.schedule(JOB_TYPES.CLEANUP, '17 * * * *', { olderThanHours: 24 });
+  for (const cron of moduleCrons()) await queue.schedule(cron.type, cron.cron, cron.payload, { key: cron.key });
 
   const missing = ALL_JOB_TYPES.filter((type) => !registered.includes(type));
   if (missing.length) throw new Error(`No handler registered for: ${missing.join(', ')}`);

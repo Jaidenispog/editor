@@ -1,0 +1,742 @@
+[
+  {
+    "name": "nothing set up",
+    "statuses": [
+      {
+        "id": "ai",
+        "name": "AI edit planning and shot recognition",
+        "areas": [
+          "video"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "AI_PROVIDER",
+          "ANTHROPIC_API_KEY"
+        ],
+        "message": "Edits are planned by the built-in rules planner, which works without any account. To add AI planning, set AI_PROVIDER=anthropic and ANTHROPIC_API_KEY on the server. Until then, tag Before, Result and Reaction clips by hand to unlock those styles."
+      },
+      {
+        "id": "transcription",
+        "name": "Speech captions",
+        "areas": [
+          "video"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "TRANSCRIPTION_PROVIDER",
+          "DEEPGRAM_API_KEY"
+        ],
+        "message": "Captions are switched off because no transcription service is set up. Set TRANSCRIPTION_PROVIDER=deepgram and DEEPGRAM_API_KEY on the server to caption spoken words. Edits never show invented dialogue."
+      },
+      {
+        "id": "storage",
+        "name": "Local disk storage",
+        "areas": [
+          "storage"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Videos are stored on this server’s disk. Fine for one machine; switch to cloud storage (STORAGE_DRIVER=s3) before hosting in the cloud."
+      },
+      {
+        "id": "instagram",
+        "name": "Instagram",
+        "areas": [
+          "publishing"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "META_APP_ID",
+          "META_APP_SECRET"
+        ],
+        "message": "Needs setup: a Meta developer app is required. Add META_APP_ID and META_APP_SECRET to the server, then connect your Instagram professional account in Settings → Integrations."
+      },
+      {
+        "id": "tiktok",
+        "name": "TikTok",
+        "areas": [
+          "publishing"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "TIKTOK_CLIENT_KEY",
+          "TIKTOK_CLIENT_SECRET"
+        ],
+        "message": "Needs setup: a TikTok developer app is required. Add TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET to the server, then connect TikTok in Settings → Integrations. Until then, download the export and upload it in the TikTok app."
+      },
+      {
+        "id": "square",
+        "name": "Square Appointments",
+        "areas": [
+          "appointments",
+          "reviews",
+          "email"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "SQUARE_APPLICATION_ID",
+          "SQUARE_APPLICATION_SECRET",
+          "SQUARE_WEBHOOK_SIGNATURE_KEY"
+        ],
+        "message": "Needs setup: add SQUARE_APPLICATION_ID and SQUARE_APPLICATION_SECRET from your Square developer dashboard to the server, then connect Square in Settings → Integrations. No bookings are shown until then."
+      },
+      {
+        "id": "email",
+        "name": "Email sending (Resend)",
+        "areas": [
+          "email",
+          "reviews"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "RESEND_API_KEY",
+          "EMAIL_FROM"
+        ],
+        "message": "Needs setup: create a Resend account, verify your sending domain, then add RESEND_API_KEY and EMAIL_FROM to the server. Nothing is emailed until then."
+      },
+      {
+        "id": "google_business_profile",
+        "name": "Google Business Profile",
+        "areas": [
+          "reviews",
+          "website"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET"
+        ],
+        "message": "Needs setup: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET from a Google Cloud project to the server, then connect your Business Profile in Settings → Integrations. Review requests can still use your review link from Settings → Business."
+      },
+      {
+        "id": "google_search_console",
+        "name": "Google Search Console",
+        "areas": [
+          "website"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET"
+        ],
+        "message": "Needs setup: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to the server, then connect Search Console in Settings → Integrations. You also need your website verified in Search Console."
+      }
+    ]
+  },
+  {
+    "name": "openai transcription, s3 missing keys",
+    "statuses": [
+      {
+        "id": "ai",
+        "name": "AI edit planning and shot recognition",
+        "areas": [
+          "video"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "AI_PROVIDER",
+          "ANTHROPIC_API_KEY"
+        ],
+        "message": "Edits are planned by the built-in rules planner, which works without any account. To add AI planning, set AI_PROVIDER=anthropic and ANTHROPIC_API_KEY on the server. Until then, tag Before, Result and Reaction clips by hand to unlock those styles."
+      },
+      {
+        "id": "transcription",
+        "name": "Speech captions (OpenAI)",
+        "areas": [
+          "video"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "OPENAI_API_KEY"
+        ],
+        "message": "Captions are switched off because OPENAI_API_KEY is missing on the server. Edits never show invented dialogue."
+      },
+      {
+        "id": "storage",
+        "name": "Cloud storage (S3-compatible)",
+        "areas": [
+          "storage"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "S3_ACCESS_KEY_ID",
+          "S3_SECRET_ACCESS_KEY"
+        ],
+        "message": "Cloud storage is selected but S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY are missing."
+      },
+      {
+        "id": "instagram",
+        "name": "Instagram",
+        "areas": [
+          "publishing"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "META_APP_ID",
+          "META_APP_SECRET"
+        ],
+        "message": "Needs setup: a Meta developer app is required. Add META_APP_ID and META_APP_SECRET to the server, then connect your Instagram professional account in Settings → Integrations."
+      },
+      {
+        "id": "tiktok",
+        "name": "TikTok",
+        "areas": [
+          "publishing"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "TIKTOK_CLIENT_KEY",
+          "TIKTOK_CLIENT_SECRET"
+        ],
+        "message": "Needs setup: a TikTok developer app is required. Add TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET to the server, then connect TikTok in Settings → Integrations. Until then, download the export and upload it in the TikTok app."
+      },
+      {
+        "id": "square",
+        "name": "Square Appointments",
+        "areas": [
+          "appointments",
+          "reviews",
+          "email"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "SQUARE_APPLICATION_ID",
+          "SQUARE_APPLICATION_SECRET",
+          "SQUARE_WEBHOOK_SIGNATURE_KEY"
+        ],
+        "message": "Needs setup: add SQUARE_APPLICATION_ID and SQUARE_APPLICATION_SECRET from your Square developer dashboard to the server, then connect Square in Settings → Integrations. No bookings are shown until then."
+      },
+      {
+        "id": "email",
+        "name": "Email sending (Resend)",
+        "areas": [
+          "email",
+          "reviews"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "RESEND_API_KEY",
+          "EMAIL_FROM"
+        ],
+        "message": "Needs setup: create a Resend account, verify your sending domain, then add RESEND_API_KEY and EMAIL_FROM to the server. Nothing is emailed until then."
+      },
+      {
+        "id": "google_business_profile",
+        "name": "Google Business Profile",
+        "areas": [
+          "reviews",
+          "website"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET"
+        ],
+        "message": "Needs setup: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET from a Google Cloud project to the server, then connect your Business Profile in Settings → Integrations. Review requests can still use your review link from Settings → Business."
+      },
+      {
+        "id": "google_search_console",
+        "name": "Google Search Console",
+        "areas": [
+          "website"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET"
+        ],
+        "message": "Needs setup: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to the server, then connect Search Console in Settings → Integrations. You also need your website verified in Search Console."
+      }
+    ]
+  },
+  {
+    "name": "deepgram selected without key",
+    "statuses": [
+      {
+        "id": "ai",
+        "name": "AI edit planning and shot recognition",
+        "areas": [
+          "video"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "AI_PROVIDER",
+          "ANTHROPIC_API_KEY"
+        ],
+        "message": "Edits are planned by the built-in rules planner, which works without any account. To add AI planning, set AI_PROVIDER=anthropic and ANTHROPIC_API_KEY on the server. Until then, tag Before, Result and Reaction clips by hand to unlock those styles."
+      },
+      {
+        "id": "transcription",
+        "name": "Speech captions (Deepgram)",
+        "areas": [
+          "video"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "DEEPGRAM_API_KEY"
+        ],
+        "message": "Captions are switched off because DEEPGRAM_API_KEY is missing on the server. Edits never show invented dialogue."
+      },
+      {
+        "id": "storage",
+        "name": "Local disk storage",
+        "areas": [
+          "storage"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Videos are stored on this server’s disk. Fine for one machine; switch to cloud storage (STORAGE_DRIVER=s3) before hosting in the cloud."
+      },
+      {
+        "id": "instagram",
+        "name": "Instagram",
+        "areas": [
+          "publishing"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "META_APP_ID",
+          "META_APP_SECRET"
+        ],
+        "message": "Needs setup: a Meta developer app is required. Add META_APP_ID and META_APP_SECRET to the server, then connect your Instagram professional account in Settings → Integrations."
+      },
+      {
+        "id": "tiktok",
+        "name": "TikTok",
+        "areas": [
+          "publishing"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "TIKTOK_CLIENT_KEY",
+          "TIKTOK_CLIENT_SECRET"
+        ],
+        "message": "Needs setup: a TikTok developer app is required. Add TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET to the server, then connect TikTok in Settings → Integrations. Until then, download the export and upload it in the TikTok app."
+      },
+      {
+        "id": "square",
+        "name": "Square Appointments",
+        "areas": [
+          "appointments",
+          "reviews",
+          "email"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "SQUARE_APPLICATION_ID",
+          "SQUARE_APPLICATION_SECRET",
+          "SQUARE_WEBHOOK_SIGNATURE_KEY"
+        ],
+        "message": "Needs setup: add SQUARE_APPLICATION_ID and SQUARE_APPLICATION_SECRET from your Square developer dashboard to the server, then connect Square in Settings → Integrations. No bookings are shown until then."
+      },
+      {
+        "id": "email",
+        "name": "Email sending (Resend)",
+        "areas": [
+          "email",
+          "reviews"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "RESEND_API_KEY",
+          "EMAIL_FROM"
+        ],
+        "message": "Needs setup: create a Resend account, verify your sending domain, then add RESEND_API_KEY and EMAIL_FROM to the server. Nothing is emailed until then."
+      },
+      {
+        "id": "google_business_profile",
+        "name": "Google Business Profile",
+        "areas": [
+          "reviews",
+          "website"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET"
+        ],
+        "message": "Needs setup: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET from a Google Cloud project to the server, then connect your Business Profile in Settings → Integrations. Review requests can still use your review link from Settings → Business."
+      },
+      {
+        "id": "google_search_console",
+        "name": "Google Search Console",
+        "areas": [
+          "website"
+        ],
+        "configured": false,
+        "connected": false,
+        "missingEnv": [
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET"
+        ],
+        "message": "Needs setup: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to the server, then connect Search Console in Settings → Integrations. You also need your website verified in Search Console."
+      }
+    ]
+  },
+  {
+    "name": "everything configured, nothing connected",
+    "statuses": [
+      {
+        "id": "ai",
+        "name": "AI edit planning and shot recognition",
+        "areas": [
+          "video"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "AI planning is on. Clips are described by the vision model and edits are planned with it; every plan is still checked against your footage before rendering.",
+        "detail": "Planner: claude-opus-5-5 · Vision: claude-haiku-5-5"
+      },
+      {
+        "id": "transcription",
+        "name": "Speech captions (Deepgram)",
+        "areas": [
+          "video"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Speech in your clips is transcribed by Deepgram so captions use the exact words spoken, timed to when they were said.",
+        "detail": "Model: nova-3"
+      },
+      {
+        "id": "storage",
+        "name": "Cloud storage (S3-compatible)",
+        "areas": [
+          "storage"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Videos are stored in a private cloud bucket. Browsers only receive links that expire.",
+        "detail": "Endpoint: proj.storage.supabase.co"
+      },
+      {
+        "id": "instagram",
+        "name": "Instagram",
+        "areas": [
+          "publishing"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "The Meta app is configured. Connect your Instagram professional account in Settings → Integrations to publish Reels. Until then, download the export and post it from your phone."
+      },
+      {
+        "id": "tiktok",
+        "name": "TikTok",
+        "areas": [
+          "publishing"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "The TikTok app is configured. Connect your TikTok account in Settings → Integrations to send videos to your drafts."
+      },
+      {
+        "id": "square",
+        "name": "Square Appointments",
+        "areas": [
+          "appointments",
+          "reviews",
+          "email"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "Square credentials are configured. Connect Square in Settings → Integrations to sync bookings."
+      },
+      {
+        "id": "email",
+        "name": "Email sending (Resend)",
+        "areas": [
+          "email",
+          "reviews"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Email sending is set up. Every message still waits for your approval before it is sent.",
+        "detail": "From: Studio <hello@example.com.au>"
+      },
+      {
+        "id": "google_business_profile",
+        "name": "Google Business Profile",
+        "areas": [
+          "reviews",
+          "website"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "Google credentials are configured. Connect your Business Profile in Settings → Integrations to see reviews here."
+      },
+      {
+        "id": "google_search_console",
+        "name": "Google Search Console",
+        "areas": [
+          "website"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "Google credentials are configured. Connect Search Console in Settings → Integrations (your website must be verified there)."
+      }
+    ]
+  },
+  {
+    "name": "everything connected",
+    "statuses": [
+      {
+        "id": "ai",
+        "name": "AI edit planning and shot recognition",
+        "areas": [
+          "video"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "AI planning is on. Clips are described by the vision model and edits are planned with it; every plan is still checked against your footage before rendering.",
+        "detail": "Planner: claude-opus-5-5 · Vision: claude-haiku-5-5"
+      },
+      {
+        "id": "transcription",
+        "name": "Speech captions (Deepgram)",
+        "areas": [
+          "video"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Speech in your clips is transcribed by Deepgram so captions use the exact words spoken, timed to when they were said.",
+        "detail": "Model: nova-3"
+      },
+      {
+        "id": "storage",
+        "name": "Cloud storage (S3-compatible)",
+        "areas": [
+          "storage"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Videos are stored in a private cloud bucket. Browsers only receive links that expire.",
+        "detail": "Endpoint: proj.storage.supabase.co"
+      },
+      {
+        "id": "instagram",
+        "name": "Instagram",
+        "areas": [
+          "publishing"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Connected as @ivanhoecuts.",
+        "detail": "@ivanhoecuts"
+      },
+      {
+        "id": "tiktok",
+        "name": "TikTok",
+        "areas": [
+          "publishing"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Connected as @ivanhoecuts. Videos are sent to your TikTok drafts for you to finish in the app.",
+        "detail": "@ivanhoecuts"
+      },
+      {
+        "id": "square",
+        "name": "Square Appointments",
+        "areas": [
+          "appointments",
+          "reviews",
+          "email"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Connected to Ivanhoe Studio. Bookings sync from Square.",
+        "detail": "Ivanhoe Studio"
+      },
+      {
+        "id": "email",
+        "name": "Email sending (Resend)",
+        "areas": [
+          "email",
+          "reviews"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Email sending is set up. Every message still waits for your approval before it is sent.",
+        "detail": "From: Studio <hello@example.com.au>"
+      },
+      {
+        "id": "google_business_profile",
+        "name": "Google Business Profile",
+        "areas": [
+          "reviews",
+          "website"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Connected to Ivanhoe Studio (GBP).",
+        "detail": "Ivanhoe Studio (GBP)"
+      },
+      {
+        "id": "google_search_console",
+        "name": "Google Search Console",
+        "areas": [
+          "website"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Connected. Search performance for your website is available."
+      }
+    ]
+  },
+  {
+    "name": "square needs reauth",
+    "statuses": [
+      {
+        "id": "ai",
+        "name": "AI edit planning and shot recognition",
+        "areas": [
+          "video"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "AI planning is on. Clips are described by the vision model and edits are planned with it; every plan is still checked against your footage before rendering.",
+        "detail": "Planner: claude-opus-5-5 · Vision: claude-haiku-5-5"
+      },
+      {
+        "id": "transcription",
+        "name": "Speech captions (Deepgram)",
+        "areas": [
+          "video"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Speech in your clips is transcribed by Deepgram so captions use the exact words spoken, timed to when they were said.",
+        "detail": "Model: nova-3"
+      },
+      {
+        "id": "storage",
+        "name": "Cloud storage (S3-compatible)",
+        "areas": [
+          "storage"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Videos are stored in a private cloud bucket. Browsers only receive links that expire.",
+        "detail": "Endpoint: proj.storage.supabase.co"
+      },
+      {
+        "id": "instagram",
+        "name": "Instagram",
+        "areas": [
+          "publishing"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "The Meta app is configured. Connect your Instagram professional account in Settings → Integrations to publish Reels. Until then, download the export and post it from your phone."
+      },
+      {
+        "id": "tiktok",
+        "name": "TikTok",
+        "areas": [
+          "publishing"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "The TikTok app is configured. Connect your TikTok account in Settings → Integrations to send videos to your drafts."
+      },
+      {
+        "id": "square",
+        "name": "Square Appointments",
+        "areas": [
+          "appointments",
+          "reviews",
+          "email"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "Square needs you to sign in again. Reconnect Square in Settings → Integrations."
+      },
+      {
+        "id": "email",
+        "name": "Email sending (Resend)",
+        "areas": [
+          "email",
+          "reviews"
+        ],
+        "configured": true,
+        "connected": true,
+        "missingEnv": [],
+        "message": "Email sending is set up. Every message still waits for your approval before it is sent.",
+        "detail": "From: Studio <hello@example.com.au>"
+      },
+      {
+        "id": "google_business_profile",
+        "name": "Google Business Profile",
+        "areas": [
+          "reviews",
+          "website"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "Google credentials are configured. Connect your Business Profile in Settings → Integrations to see reviews here."
+      },
+      {
+        "id": "google_search_console",
+        "name": "Google Search Console",
+        "areas": [
+          "website"
+        ],
+        "configured": true,
+        "connected": false,
+        "missingEnv": [],
+        "message": "Google credentials are configured. Connect Search Console in Settings → Integrations (your website must be verified there)."
+      }
+    ]
+  }
+]

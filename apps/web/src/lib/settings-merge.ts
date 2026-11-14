@@ -10,6 +10,8 @@ export const SettingsPatchSchema = z
     brand: z.record(z.string(), z.unknown()).optional(),
     business: z.record(z.string(), z.unknown()).optional(),
     preferences: z.record(z.string(), z.unknown()).optional(),
+    /** Legal pages (Settings → Business → Legal pages); each page object is replaced whole. */
+    legal: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 export type SettingsPatch = z.infer<typeof SettingsPatchSchema>;
@@ -25,9 +27,12 @@ export function mergeSettings(current: AppSettings, patch: SettingsPatch): AppSe
   const brandPatch = { ...(patch.brand ?? {}) };
   for (const field of PROTECTED_BRAND_FIELDS) delete brandPatch[field];
   const merged = {
+    // Sections this route does not edit (module sections added in packages/core/src/settings/<module>.ts) are kept.
+    ...current,
     brand: { ...current.brand, ...brandPatch },
     business: { ...current.business, ...(patch.business ?? {}) },
     preferences: { ...current.preferences, ...(patch.preferences ?? {}) },
+    legal: { ...current.legal, ...(patch.legal ?? {}) },
   };
   return AppSettingsSchema.parse(merged);
 }
