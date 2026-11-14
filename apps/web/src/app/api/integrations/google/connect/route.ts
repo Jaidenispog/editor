@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { googleApiUrl } from '@studio/config';
 import { AppError, GOOGLE_OAUTH_PRODUCTS } from '@studio/core';
 import { handleApi, requireOwner } from '@/lib/api';
 import { writeAudit } from '@/lib/audit';
@@ -19,13 +20,14 @@ export const GET = handleApi(async ({ req, user, session }) => {
     throw new AppError('INTEGRATION_NOT_CONFIGURED', 'Google sign-in is not set up on the server yet: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are needed.');
   }
   const created = createOAuthState({ provider: 'google', sessionId: session.sessionId, cookiePath: GOOGLE_OAUTH_PATH, pkce: true, extra: { product } });
-  const target = buildGoogleAuthUrl({
+  // Google's consent screen; a local fake only under NODE_ENV=test with GOOGLE_API_BASE_URL (googleApiUrl).
+  const target = googleApiUrl(env, buildGoogleAuthUrl({
     clientId: env.GOOGLE_CLIENT_ID,
     redirectUri: googleRedirectUri(env.APP_URL),
     product,
     state: created.state,
     codeChallenge: created.codeChallenge ?? '',
-  });
+  }));
   const res = NextResponse.redirect(target, 302);
   res.cookies.set(created.cookie.name, created.cookie.value, created.cookie.options);
   await writeAudit({ userId: user.id, action: `integration.${GOOGLE_OAUTH_PRODUCTS[product].provider}.connect_started`, entityType: 'integration_connection', data: { product } });

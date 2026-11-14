@@ -76,11 +76,13 @@ export async function exchangeGoogleCode(input: {
   product: GoogleProduct;
   fetchImpl?: typeof fetch;
   now?: Date;
+  /** Google's token endpoint ({@link GOOGLE_TOKEN_URL}); the callback passes it through `googleApiUrl` (tests only). */
+  tokenUrl?: string;
 }): Promise<GoogleTokens> {
   const fetchImpl = input.fetchImpl ?? globalThis.fetch;
   let res: Response;
   try {
-    res = await fetchImpl(GOOGLE_TOKEN_URL, {
+    res = await fetchImpl(input.tokenUrl ?? GOOGLE_TOKEN_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: new URLSearchParams({

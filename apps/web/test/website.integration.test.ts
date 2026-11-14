@@ -165,10 +165,13 @@ suite('Website routes (database-backed)', () => {
     expect(noAdapter.status).toBe(422);
     expect(noAdapter.json.error.message).toMatch(/Connect WordPress/);
 
-    expect(
-      (await call(wordpress.POST, 'POST', '/api/integrations/website/wordpress', { baseUrl: 'http://insecure.example', username: 'u', applicationPassword: 'abcd efgh ijkl mnop' }))
-        .status,
-    ).toBe(400);
+    for (const baseUrl of ['http://insecure.example', 'ftp://files.example/', 'http://ivanhoe-studio.test']) {
+      const insecure = await call(wordpress.POST, 'POST', '/api/integrations/website/wordpress', { baseUrl, username: 'u', applicationPassword: 'abcd efgh ijkl mnop' });
+      expect(insecure.status, baseUrl).toBe(400);
+      expect(insecure.json.error.message, baseUrl).toMatch(/https:\/\//);
+    }
+    // Plain http for the browser test's fixture host (refused above) needs NODE_ENV=test *and* WEBSITE_FIXTURE_BASE_URL.
+    expect(process.env.WEBSITE_FIXTURE_BASE_URL).toBeUndefined();
     for (const baseUrl of ['https://10.0.0.5/', 'https://[::1]/', 'https://169.254.169.254/', 'https://localhost/', 'https://wordpress/', 'https://nas.local/']) {
       const refused = await call(wordpress.POST, 'POST', '/api/integrations/website/wordpress', { baseUrl, username: 'u', applicationPassword: 'abcd efgh ijkl mnop' });
       expect(refused.status, baseUrl).toBe(400);

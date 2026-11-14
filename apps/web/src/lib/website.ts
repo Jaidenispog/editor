@@ -1,6 +1,7 @@
 import 'server-only';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { and, desc, eq, gte, inArray, isNotNull, ne, sql } from 'drizzle-orm';
+import { testOnlyWebsiteFixture } from '@studio/config';
 import {
   AppError,
   AuditSummarySchema,
@@ -1322,11 +1323,15 @@ export async function saveWordPress(
   input: { baseUrl: string; username: string; applicationPassword: string },
 ): Promise<{ state: 'checking'; job: ReturnType<typeof toJobDto> }> {
   const base = new URL(input.baseUrl);
-  if (base.protocol !== 'https:') throw new AppError('VALIDATION', 'Use your site’s https:// address.');
+  // Tests only (NODE_ENV=test with WEBSITE_FIXTURE_BASE_URL): the browser test's local fixture site, which speaks plain
+  // http on 127.0.0.1. Exactly that host name, with no port in the address; the worker maps it the same way.
+  const fixture = testOnlyWebsiteFixture(getEnv());
+  const isFixture = Boolean(fixture) && base.protocol === 'http:' && !base.port && base.hostname.toLowerCase() === fixture?.host;
+  if (base.protocol !== 'https:' && !isFixture) throw new AppError('VALIDATION', 'Use your site’s https:// address.');
   if (base.username || base.password || (base.port && base.port !== '443')) throw new AppError('VALIDATION', 'Use your site’s plain https:// address.');
   // The worker refuses private addresses when it connects (with DNS, every time); refuse them here as well, also for a
   // name that resolves to one, so the owner hears at once instead of after the check runs.
-  const privateHost = await resolvedPrivateHostReason(base.hostname, async (host) => dnsLookup(host, { all: true, verbatim: true }));
+  const privateHost = isFixture ? null : await resolvedPrivateHostReason(base.hostname, async (host) => dnsLookup(host, { all: true, verbatim: true }));
   if (privateHost) throw new AppError('VALIDATION', `That address points to ${privateHost}, not a public website. Use your site’s public https:// address.`);
   const baseUrl = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
   const values = {
