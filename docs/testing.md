@@ -263,7 +263,8 @@ three detached processes: the local fake of Meta (`apps/web/e2e/fake-meta.ts`, o
 `META_APP_ID` / `META_APP_SECRET` / `META_LOGIN_CONFIG_ID`, and `META_GRAPH_BASE_URL`, `META_RUPLOAD_BASE_URL` and
 `META_DIALOG_BASE_URL` all pointing at the fake; no `YOUTUBE_API_KEY`. Everything is stopped and the database dropped
 afterwards (logs and downloads are kept on failure or with `E2E_KEEP=1`). Other settings: `E2E_PG_URL`, `E2E_DB`,
-`E2E_PORT`, `E2E_WORK_DIR`.
+`E2E_PORT`, `E2E_WORK_DIR`. A passing run prints `73 checks passed, 0 failed` after about five and a half minutes
+(plus the build); most of that is FFmpeg rendering and the worker's publishing run against the fake.
 
 **What the fake replaces.** One process plays the three Meta hosts the app talks to, using WP4's Graph model
 (`apps/worker/test/fakes/graph-server.ts`, shared with the worker's tests): the Unified Login dialog on
