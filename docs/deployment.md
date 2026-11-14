@@ -406,6 +406,9 @@ not allow it for this app setup, the card says "Not available" and everything el
 - AI wording uses `AI_WEBSITE_MODEL` (default `claude-haiku-5-5`) only when `AI_PROVIDER=anthropic`.
 - WordPress needs nothing on the server: the owner enters the site address and an Application Password in
   Settings → Integrations.
+- `GOOGLE_API_BASE_URL` and `WEBSITE_FIXTURE_BASE_URL` are for the Stage C website browser test only and are ignored
+  unless `NODE_ENV=test`: a deployment always calls Google itself, and the website check never reaches a loopback or
+  private address. Leave both unset.
 
 ## Google Business Profile (Stage C, WP9)
 

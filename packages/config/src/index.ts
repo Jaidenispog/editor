@@ -125,6 +125,16 @@ export const EnvSchema = z.object({
   SQUARE_API_BASE_URL: optionalUrl(),
   /** Postmark's API host (normally https://api.postmarkapp.com); a local fake in the Stage C browser test. */
   POSTMARK_API_BASE_URL: optionalUrl(),
+  /**
+   * One local fake standing in for every Google host (sign-in, Search Console, Business Profile); a request to
+   * `https://<google host>/<path>` goes to `<this>/<google host>/<path>` (Stage C website browser test).
+   */
+  GOOGLE_API_BASE_URL: optionalUrl(),
+  /**
+   * `http://<host>:<port>` of the local fixture website: the website check and the WordPress connection may reach that
+   * one host name, on 127.0.0.1 at that port, over plain http. Every other private address stays refused.
+   */
+  WEBSITE_FIXTURE_BASE_URL: optionalUrl(),
 });
 
 /** An optional absolute http(s) URL; an empty string counts as unset. */
@@ -222,4 +232,39 @@ export type CapabilitySummary = ReturnType<typeof describeCapabilities>;
  */
 export function testOnlyBaseUrl(env: Pick<Env, 'NODE_ENV'>, value: string | undefined): string | null {
   return env.NODE_ENV === 'test' && value ? value.replace(/\/+$/, '') : null;
+}
+
+/**
+ * A Google API address, or (tests only) the same path on the local fake that stands in for every Google host:
+ * `https://oauth2.googleapis.com/token` → `<GOOGLE_API_BASE_URL>/oauth2.googleapis.com/token`. Unchanged unless
+ * NODE_ENV=test and GOOGLE_API_BASE_URL is set, so a deployment always calls Google itself.
+ */
+export function googleApiUrl(env: Pick<Env, 'NODE_ENV' | 'GOOGLE_API_BASE_URL'> | undefined, url: string): string {
+  const fake = env ? testOnlyBaseUrl(env, env.GOOGLE_API_BASE_URL) : null;
+  if (!fake) return url;
+  const u = new URL(url);
+  return `${fake}/${u.host}${u.pathname}${u.search}`;
+}
+
+/**
+ * The local fixture website of the Stage C browser test: its exact host name (lower case) and the 127.0.0.1 port that
+ * serves it. Null unless NODE_ENV=test and WEBSITE_FIXTURE_BASE_URL is a plain `http://<name>:<port>` address with a
+ * dotted host name (never an IP literal or `localhost`), so a deployment never loosens the website check's
+ * private-address guard.
+ */
+export function testOnlyWebsiteFixture(env: Pick<Env, 'NODE_ENV' | 'WEBSITE_FIXTURE_BASE_URL'> | undefined): { host: string; port: number } | null {
+  const value = env ? testOnlyBaseUrl(env, env.WEBSITE_FIXTURE_BASE_URL) : null;
+  if (!value) return null;
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.toLowerCase();
+  const port = Number(u.port);
+  if (u.protocol !== 'http:' || !u.port || !Number.isInteger(port) || port < 1 || port > 65_535) return null;
+  if (u.username || u.password || (u.pathname !== '/' && u.pathname !== '') || u.search) return null;
+  if (!host.includes('.') || host.endsWith('.') || /^[\d.]+$/.test(host) || host.includes(':') || host === 'localhost' || host.endsWith('.localhost')) return null;
+  return { host, port };
 }

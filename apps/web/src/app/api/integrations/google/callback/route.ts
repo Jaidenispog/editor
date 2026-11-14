@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
+import { googleApiUrl } from '@studio/config';
 import { GOOGLE_OAUTH_PRODUCTS, GoogleProductSchema, isJobType } from '@studio/core';
 import { handleApi, requireOwner } from '@/lib/api';
 import { writeAudit } from '@/lib/audit';
 import { getDb } from '@/lib/db';
 import { getEnv } from '@/lib/env';
-import { GOOGLE_OAUTH_PATH, GoogleExchangeError, exchangeGoogleCode, googleExchangeMessage, googleFollowUpJob, googleRedirectUri, storeGoogleConnection } from '@/lib/google-oauth';
+import { GOOGLE_OAUTH_PATH, GOOGLE_TOKEN_URL, GoogleExchangeError, exchangeGoogleCode, googleExchangeMessage, googleFollowUpJob, googleRedirectUri, storeGoogleConnection } from '@/lib/google-oauth';
 import { createTrackedJob } from '@/lib/jobs';
 import { getLogger } from '@/lib/logger';
 import { clearOAuthStateCookie, consumeOAuthState, oauthStateMessage } from '@/lib/oauth-state';
@@ -52,6 +53,8 @@ export const GET = handleApi(async ({ req, user, session }) => {
       clientSecret: env.GOOGLE_CLIENT_SECRET,
       redirectUri: googleRedirectUri(env.APP_URL),
       product: product.data,
+      // Google's own token endpoint; a local fake only under NODE_ENV=test with GOOGLE_API_BASE_URL.
+      tokenUrl: googleApiUrl(env, GOOGLE_TOKEN_URL),
     });
     const { connectionId, provider } = await storeGoogleConnection(getDb(), product.data, tokens);
     await writeAudit({ userId: user.id, action: `integration.${provider}.connected`, entityType: 'integration_connection', entityId: connectionId, data: { scopes: tokens.scopes } });

@@ -3,7 +3,7 @@ import https from 'node:https';
 import type { LookupFunction } from 'node:net';
 import { CancelledError } from '@studio/core';
 import type { FetchPolicy } from './fetcher.js';
-import { BlockedHostError, resolveSafeAddress, systemResolver } from './ssrf.js';
+import { BlockedHostError, isFixtureHost, resolveSafeAddress, systemResolver } from './ssrf.js';
 
 /**
  * A `fetch` for the WordPress REST API with the crawler's SSRF guard (design §7.1, §7.4.2): the host is resolved and
@@ -28,7 +28,8 @@ function abortReason(signal: AbortSignal | null | undefined): Error {
 export function createGuardedFetch(policy: FetchPolicy): typeof fetch {
   const guarded = async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
-    const testHttp = url.protocol === 'http:' && policy.testHttpPort !== undefined;
+    const fixture = isFixtureHost(policy, url.hostname);
+    const testHttp = url.protocol === 'http:' && (policy.testHttpPort !== undefined || fixture);
     if (url.protocol !== 'https:' && !testHttp) throw new BlockedHostError(url.hostname, 'port');
     if (url.username || url.password) throw new BlockedHostError(url.hostname, 'port');
     if (url.port && url.port !== (url.protocol === 'https:' ? '443' : '80')) throw new BlockedHostError(url.hostname, 'port');
@@ -57,7 +58,7 @@ export function createGuardedFetch(policy: FetchPolicy): typeof fetch {
       const req = (url.protocol === 'https:' ? https : http).request({
         protocol: url.protocol,
         hostname: url.hostname,
-        port: testHttp ? policy.testHttpPort : 443,
+        port: fixture ? policy.fixture?.port : testHttp ? policy.testHttpPort : 443,
         path: `${url.pathname}${url.search}`,
         method: (init.method ?? 'GET').toUpperCase(),
         headers,

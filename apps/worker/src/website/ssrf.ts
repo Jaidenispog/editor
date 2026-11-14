@@ -6,7 +6,8 @@ import { isBlockedAddress, isLoopbackAddress } from '@studio/core/address-ranges
  * SSRF guard for the website crawler (design §7.1). Every host is resolved before connecting; if ANY address is in a
  * private, loopback, link-local, carrier-grade NAT, benchmark, multicast or reserved range, the request is refused.
  * The connection is then made to the validated address only (the fetcher pins it), so DNS rebinding cannot swap it.
- * There is no environment variable that turns this off; tests inject a policy in code.
+ * There is no environment variable that turns this off; tests inject a policy in code. The browser test's
+ * WEBSITE_FIXTURE_BASE_URL (NODE_ENV=test only) adds one exact fixture host name on 127.0.0.1 and nothing else.
  */
 
 // The ranges live in @studio/core/address-ranges, shared with the web app (which refuses them when the owner saves an
@@ -36,9 +37,20 @@ export class BlockedHostError extends Error {
   }
 }
 
-/** What the guard may allow. `allowLoopback` exists only for tests with a local fixture server. */
+/** What the guard may allow. `allowLoopback` and `fixture` exist only for tests with a local fixture server. */
 export interface GuardPolicy {
   allowLoopback: boolean;
+  /**
+   * Tests only: one exact host name served by a local fixture site on 127.0.0.1 at `port` (plain http). That name is
+   * never looked up; every other host goes through the normal checks, so loopback and private addresses stay refused.
+   * Built only by code, or from WEBSITE_FIXTURE_BASE_URL under NODE_ENV=test ({@link websiteFetchPolicy} in deps.ts).
+   */
+  fixture?: { host: string; port: number };
+}
+
+/** True when `host` is the policy's test fixture host (exact name, case-insensitive). */
+export function isFixtureHost(policy: Pick<GuardPolicy, 'fixture'>, host: string): boolean {
+  return Boolean(policy.fixture) && host.replace(/^\[|\]$/g, '').toLowerCase() === policy.fixture?.host;
 }
 
 /**
@@ -47,6 +59,7 @@ export interface GuardPolicy {
  */
 export async function resolveSafeAddress(host: string, policy: GuardPolicy, resolver: HostResolver = systemResolver): Promise<{ address: string; family: number }> {
   const bare = host.replace(/^\[|\]$/g, '');
+  if (isFixtureHost(policy, bare)) return { address: '127.0.0.1', family: 4 };
   let addresses: Array<{ address: string; family: number }>;
   if (isIP(bare)) addresses = [{ address: bare, family: isIP(bare) }];
   else {

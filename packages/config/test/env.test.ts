@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeCapabilities, loadEnv, testOnlyBaseUrl } from '../src/index.js';
+import { describeCapabilities, googleApiUrl, loadEnv, testOnlyBaseUrl, testOnlyWebsiteFixture } from '../src/index.js';
 
 const base = {
   DATABASE_URL: 'postgres://localhost/studio',
@@ -88,6 +88,46 @@ describe('loadEnv', () => {
     // Postmark's API host likewise (Stage C browser test only; the worker reads it through testOnlyBaseUrl).
     expect(loadEnv({ ...base, POSTMARK_API_BASE_URL: 'http://127.0.0.1:4556' }).POSTMARK_API_BASE_URL).toBe('http://127.0.0.1:4556');
     expect(loadEnv({ ...base, POSTMARK_API_BASE_URL: '' }).POSTMARK_API_BASE_URL).toBeUndefined();
+  });
+
+  it('sends Google calls to the fake only under NODE_ENV=test (Stage C website browser test)', () => {
+    const real = 'https://searchconsole.googleapis.com/webmasters/v3/sites/sc-domain%3Aexample.com.au/searchAnalytics/query?x=1';
+    const fake = 'http://127.0.0.1:4600/';
+    expect(googleApiUrl({ NODE_ENV: 'test', GOOGLE_API_BASE_URL: fake }, real)).toBe(
+      'http://127.0.0.1:4600/searchconsole.googleapis.com/webmasters/v3/sites/sc-domain%3Aexample.com.au/searchAnalytics/query?x=1',
+    );
+    expect(googleApiUrl({ NODE_ENV: 'production', GOOGLE_API_BASE_URL: fake }, real)).toBe(real);
+    expect(googleApiUrl({ NODE_ENV: 'development', GOOGLE_API_BASE_URL: fake }, real)).toBe(real);
+    expect(googleApiUrl({ NODE_ENV: 'test', GOOGLE_API_BASE_URL: undefined }, real)).toBe(real);
+    expect(googleApiUrl(undefined, real)).toBe(real);
+    expect(loadEnv({ ...base, GOOGLE_API_BASE_URL: '' }).GOOGLE_API_BASE_URL).toBeUndefined();
+    expect(() => loadEnv({ ...base, GOOGLE_API_BASE_URL: 'not a url' })).toThrow(/GOOGLE_API_BASE_URL/);
+  });
+
+  it('names the fixture website only under NODE_ENV=test, and only as a plain http host name with a port', () => {
+    const value = 'http://ivanhoe-studio.test:4700';
+    expect(testOnlyWebsiteFixture({ NODE_ENV: 'test', WEBSITE_FIXTURE_BASE_URL: value })).toEqual({ host: 'ivanhoe-studio.test', port: 4700 });
+    expect(testOnlyWebsiteFixture({ NODE_ENV: 'test', WEBSITE_FIXTURE_BASE_URL: 'http://Ivanhoe-Studio.TEST:4700/' })).toEqual({ host: 'ivanhoe-studio.test', port: 4700 });
+    expect(testOnlyWebsiteFixture({ NODE_ENV: 'production', WEBSITE_FIXTURE_BASE_URL: value })).toBeNull();
+    expect(testOnlyWebsiteFixture({ NODE_ENV: 'development', WEBSITE_FIXTURE_BASE_URL: value })).toBeNull();
+    expect(testOnlyWebsiteFixture({ NODE_ENV: 'test', WEBSITE_FIXTURE_BASE_URL: undefined })).toBeNull();
+    expect(testOnlyWebsiteFixture(undefined)).toBeNull();
+    // Never an address, localhost, https, a missing port or anything beyond the origin.
+    for (const bad of [
+      'http://127.0.0.1:4700',
+      'http://10.0.0.5:4700',
+      'http://[::1]:4700',
+      'http://localhost:4700',
+      'http://studio.localhost:4700',
+      'http://ivanhoe-studio:4700',
+      'https://ivanhoe-studio.test:4700',
+      'http://ivanhoe-studio.test',
+      'http://user:pw@ivanhoe-studio.test:4700',
+      'http://ivanhoe-studio.test:4700/sub/',
+    ]) {
+      expect(testOnlyWebsiteFixture({ NODE_ENV: 'test', WEBSITE_FIXTURE_BASE_URL: bad }), bad).toBeNull();
+    }
+    expect(loadEnv({ ...base, WEBSITE_FIXTURE_BASE_URL: value }).WEBSITE_FIXTURE_BASE_URL).toBe(value);
   });
 
   it('reads optional pool sizes as whole numbers', () => {

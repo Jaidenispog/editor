@@ -1,6 +1,6 @@
 import { ownershipHost, type SiteScope } from '@studio/core';
-import type { WorkerContext } from '../../context.js';
 import { httpRequest, readJson } from '../http.js';
+import { googleUrl, type GoogleCtx } from './address.js';
 
 /**
  * Google Search Console, read-only (scope `webmasters.readonly`, memo §7; website design §7.2). The host, paths,
@@ -65,10 +65,10 @@ export function mapSearchConsoleError(status: number, body: unknown): SearchCons
   return new SearchConsoleError('transient', `Google Search Console didn't answer properly (HTTP ${status}). We'll try again.`);
 }
 
-async function call(ctx: Pick<WorkerContext, 'fetch' | 'logger'>, token: string, url: string, init: RequestInit, label: string, signal?: AbortSignal): Promise<unknown> {
+async function call(ctx: GoogleCtx, token: string, url: string, init: RequestInit, label: string, signal?: AbortSignal): Promise<unknown> {
   const res = await httpRequest(
     ctx,
-    url,
+    googleUrl(ctx, url),
     {
       ...init,
       headers: {
@@ -85,7 +85,7 @@ async function call(ctx: Pick<WorkerContext, 'fetch' | 'logger'>, token: string,
 }
 
 /** `sites.list`: every property the account can see, with its permission level. */
-export async function listSites(ctx: Pick<WorkerContext, 'fetch' | 'logger'>, token: string, signal?: AbortSignal): Promise<SiteEntry[]> {
+export async function listSites(ctx: GoogleCtx, token: string, signal?: AbortSignal): Promise<SiteEntry[]> {
   const json = await call(ctx, token, `${SEARCH_CONSOLE_BASE}/sites`, { method: 'GET' }, 'search_console.sites', signal);
   if (json === null || typeof json !== 'object') throw new SearchConsoleError('unrecognised', "Google's response format wasn't recognised.");
   const entries = (json as { siteEntry?: unknown }).siteEntry;
@@ -199,7 +199,7 @@ export function syncWindows(backfill: boolean, today: string): Array<{ startDate
  * than `rowLimit`. `dataState` is omitted (final data only, ⚠ the API default).
  */
 export async function fetchWindow(
-  ctx: Pick<WorkerContext, 'fetch' | 'logger'>,
+  ctx: GoogleCtx,
   token: string,
   siteUrl: string,
   window: { startDate: string; endDate: string },

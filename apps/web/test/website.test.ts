@@ -3,7 +3,7 @@ import { AppSettingsSchema, buildQueryClassifier, type WebsiteChange } from '@st
 import { buildWebsiteIntegrations } from '../src/lib/integrations/website';
 import { PAGES_NOT_READ, countsLine, findingsNote } from '../src/components/website/check-words';
 import { mergeSettings } from '../src/lib/settings-merge';
-import { applyAvailability, groupSearchRows, missingBusinessDetails, openingHoursLines } from '../src/lib/website';
+import { applyAvailability, checkedWordPressBaseUrl, groupSearchRows, missingBusinessDetails, openingHoursLines } from '../src/lib/website';
 
 const env = { GOOGLE_CLIENT_ID: 'g', GOOGLE_CLIENT_SECRET: 'g' } as never;
 const card = (facts: { connections: Array<Record<string, unknown>> }, e = env) => {
@@ -126,5 +126,49 @@ describe('website check wording when no page was read', () => {
     expect(findingsNote(1, { reasons: [] })).toContain(PAGES_NOT_READ);
     expect(findingsNote(0, null)).toBe('The check found nothing to fix. Nice work.');
     expect(findingsNote(2, null)).toBeNull();
+  });
+});
+
+describe('WordPress address rule and the test-only fixture host', () => {
+  const FIXTURE = 'http://ivanhoe-studio.test:4701';
+  /** A resolver that answers loopback for every name (what the fixture host would resolve to if it were looked up). */
+  const looked: string[] = [];
+  const loopback = async (host: string) => {
+    looked.push(host);
+    return [{ address: '127.0.0.1' }];
+  };
+  const publicDns = async () => [{ address: '93.184.215.14' }];
+  const refused = (p: Promise<unknown>, message: RegExp) => expect(p).rejects.toMatchObject({ code: 'VALIDATION', message: expect.stringMatching(message) });
+
+  it('ignores WEBSITE_FIXTURE_BASE_URL outside NODE_ENV=test: plain http and the private-address check apply to the fixture host', async () => {
+    for (const NODE_ENV of ['production', 'development'] as const) {
+      const env = { NODE_ENV, WEBSITE_FIXTURE_BASE_URL: FIXTURE };
+      await refused(checkedWordPressBaseUrl('http://ivanhoe-studio.test', env, loopback), /https:\/\//);
+      await refused(checkedWordPressBaseUrl('http://ivanhoe-studio.test/', env, loopback), /https:\/\//);
+      // Over https the name is looked up like any other and refused when it points to a private address.
+      looked.length = 0;
+      await refused(checkedWordPressBaseUrl('https://ivanhoe-studio.test', env, loopback), /private or reserved address/);
+      expect(looked).toEqual(['ivanhoe-studio.test']);
+    }
+  });
+
+  it('under NODE_ENV=test allows plain http for exactly the fixture host (no port, no look-up) and nothing else', async () => {
+    const env = { NODE_ENV: 'test' as const, WEBSITE_FIXTURE_BASE_URL: FIXTURE };
+    looked.length = 0;
+    await expect(checkedWordPressBaseUrl('http://ivanhoe-studio.test/', env, loopback)).resolves.toBe('http://ivanhoe-studio.test');
+    expect(looked).toEqual([]);
+    for (const other of ['http://other.example', 'http://www.ivanhoe-studio.test', 'http://ivanhoe-studio.test.evil.example', 'http://127.0.0.1', 'http://localhost']) {
+      await refused(checkedWordPressBaseUrl(other, env, publicDns), /https:\/\//);
+    }
+    await refused(checkedWordPressBaseUrl('http://ivanhoe-studio.test:4701', env, loopback), /https:\/\//);
+    for (const literal of ['https://127.0.0.1', 'https://10.0.0.5', 'https://[::1]', 'https://169.254.169.254', 'https://localhost']) {
+      await refused(checkedWordPressBaseUrl(literal, env, publicDns), /private|reserved|local|not a public/);
+    }
+    await refused(checkedWordPressBaseUrl('https://rebind.example', env, loopback), /private or reserved address/);
+    await expect(checkedWordPressBaseUrl('https://studio.example.com.au/blog/', env, publicDns)).resolves.toBe('https://studio.example.com.au/blog');
+  });
+
+  it('without WEBSITE_FIXTURE_BASE_URL even NODE_ENV=test keeps the https rule', async () => {
+    await refused(checkedWordPressBaseUrl('http://ivanhoe-studio.test', { NODE_ENV: 'test', WEBSITE_FIXTURE_BASE_URL: undefined }, loopback), /https:\/\//);
   });
 });

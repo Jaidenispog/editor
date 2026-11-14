@@ -1,6 +1,6 @@
 import { starRatingToNumber } from '@studio/core';
-import type { WorkerContext } from '../../context.js';
 import { httpRequest, readJson } from '../http.js';
+import { googleUrl, type GoogleCtx } from './address.js';
 
 /**
  * Google Business Profile APIs, read-only (email design §8.3; memo §7 Tier 2): location discovery (Account Management
@@ -60,11 +60,11 @@ export function mapBusinessProfileError(status: number, body: unknown, apiName: 
   return new BusinessProfileError('transient', `Google didn't answer properly (HTTP ${status}). We'll try again.`);
 }
 
-type Ctx = Pick<WorkerContext, 'fetch' | 'logger'>;
+type Ctx = GoogleCtx;
 
 /** GET with the access token; returns parsed JSON or throws a mapped {@link BusinessProfileError}. */
 export async function gbpGet(ctx: Ctx, token: string, url: string, label: string, apiName: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-  const res = await httpRequest(ctx, url, { method: 'GET', headers: { authorization: `Bearer ${token}`, accept: 'application/json' } }, { label, signal, timeoutMs: GBP_TIMEOUT_MS });
+  const res = await httpRequest(ctx, googleUrl(ctx, url), { method: 'GET', headers: { authorization: `Bearer ${token}`, accept: 'application/json' } }, { label, signal, timeoutMs: GBP_TIMEOUT_MS });
   const json = await readJson(res);
   if (!res.ok) throw mapBusinessProfileError(res.status, json, apiName);
   if (json === null || typeof json !== 'object' || Array.isArray(json)) throw new BusinessProfileError('unrecognised', UNRECOGNISED_RESPONSE_MESSAGE);

@@ -4,12 +4,9 @@ import { handleApi, parseJson, requireOwner } from '@/lib/api';
 import { saveWordPress } from '@/lib/website';
 
 const WordPressSchema = z.object({
-  baseUrl: z
-    .string()
-    .trim()
-    .url()
-    .max(300)
-    .refine((u) => u.startsWith('https://'), 'Use your site’s https:// address'),
+  // https only: `checkedWordPressBaseUrl` (called by `saveWordPress`) refuses anything else (the one exception is the browser test's local fixture host,
+  // and only under NODE_ENV=test with WEBSITE_FIXTURE_BASE_URL naming it).
+  baseUrl: z.string().trim().url().max(300),
   username: z.string().trim().min(1).max(120),
   applicationPassword: z.string().trim().min(16).max(200),
 });

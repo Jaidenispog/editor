@@ -1,5 +1,5 @@
 import { PERFORMANCE_METRICS, type PerformanceMetric } from '@studio/core';
-import type { WorkerContext } from '../../context.js';
+import type { GoogleCtx } from './address.js';
 import { BusinessProfileError, UNRECOGNISED_RESPONSE_MESSAGE, gbpGet, isLocationName } from './business-profile.js';
 
 /**
@@ -26,7 +26,7 @@ export const MAX_KEYWORD_PAGES = 10;
 /** The read-only probe asks for this many days. */
 export const PROBE_DAYS = 7;
 
-type Ctx = Pick<WorkerContext, 'fetch' | 'logger'>;
+type Ctx = GoogleCtx;
 
 /** One daily value as Google returned it (null when the day was listed without a value). */
 export interface DailyMetricRow {

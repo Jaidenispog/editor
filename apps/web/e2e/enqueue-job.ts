@@ -1,27 +1,34 @@
 /**
- * Stage C browser test helper: sends one job through the app's own queue package, the way a scheduled run (the
- * per-minute `email.dispatch`, the 10-minute `email.automation.sweep`) or a duplicate delivery (`email.send` for a
- * message already sent) would arrive, so the test does not wait for the next scheduled time.
+ * Stage C browser test helper: sends one job straight to the queue through the app's own queue package, the way a
+ * scheduled run (the per-minute `email.dispatch`, the 10-minute `email.automation.sweep`), a duplicate delivery or a
+ * manual re-run would arrive (for example a second `website.edit_apply` for a change that is already applied), so the
+ * tests do not wait for the next scheduled time. For a duplicate the worker must do nothing more.
  *
  *   DATABASE_URL=… tsx apps/web/e2e/enqueue-job.ts <type> '<json payload>'
  *
- * Prints `{"bossJobId":"…"}`; the worker records the run in `jobs` under that pg-boss id.
+ * Prints `{"bossJobId":"…"}`; the worker records the run in `jobs` under that pg-boss id. The payload is checked
+ * against the job type's schema in @studio/core first, so only a job the app itself could send is sent.
  */
-import { ALL_JOB_TYPES, type JobType } from '@studio/core';
+import { JOB_PAYLOAD_SCHEMAS, isJobType } from '@studio/core';
 import { createQueue } from '@studio/queue';
 
-const [type, payloadJson] = process.argv.slice(2);
+const [type, payloadText] = process.argv.slice(2);
 const connectionString = process.env['DATABASE_URL'];
-if (!type || !connectionString || !(ALL_JOB_TYPES as readonly string[]).includes(type)) {
-  console.error('Usage: DATABASE_URL=… tsx apps/web/e2e/enqueue-job.ts <job type> [json payload]');
+if (!type || !payloadText || !connectionString || !isJobType(type)) {
+  console.error("Usage: DATABASE_URL=… tsx apps/web/e2e/enqueue-job.ts <job type> '<json payload>'");
   process.exit(2);
 }
-const payload: unknown = JSON.parse(payloadJson ?? '{}');
+const schemaForType: { safeParse(v: unknown): { success: boolean; data?: unknown } } = JOB_PAYLOAD_SCHEMAS[type];
+const parsed = schemaForType.safeParse(JSON.parse(payloadText));
+if (!parsed.success) {
+  console.error(`That payload does not fit ${type}.`);
+  process.exit(2);
+}
 
 const queue = createQueue({ connectionString, role: 'producer', max: 1 });
 try {
   await queue.start();
-  const bossJobId = await queue.enqueue(type as JobType, payload as never);
+  const bossJobId = await queue.enqueue(type, parsed.data as never);
   console.log(JSON.stringify({ bossJobId }));
 } finally {
   await queue.stop();

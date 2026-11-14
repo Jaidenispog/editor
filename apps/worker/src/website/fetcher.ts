@@ -4,7 +4,7 @@ import type { LookupFunction } from 'node:net';
 import type { Readable } from 'node:stream';
 import zlib from 'node:zlib';
 import { CancelledError } from '@studio/core';
-import { BlockedHostError, resolveSafeAddress, systemResolver, type HostResolver } from './ssrf.js';
+import { BlockedHostError, isFixtureHost, resolveSafeAddress, systemResolver, type GuardPolicy, type HostResolver } from './ssrf.js';
 
 /**
  * The website crawler's HTTP client (design §7.1). Stricter than `lib/http.ts`: GET and HEAD only, no cookies, no
@@ -40,6 +40,8 @@ export interface FetchPolicy {
   /** Time limits (tests shorten them). */
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
+  /** Tests only: the one fixture host served on 127.0.0.1 (see {@link GuardPolicy.fixture}). */
+  fixture?: GuardPolicy['fixture'];
 }
 
 /** The production policy: no loopback, real DNS, real ports, 500 ms spacing. */
@@ -227,7 +229,13 @@ export class WebsiteFetcher {
 
   private send(u: URL, pinned: { address: string; family: number }, method: 'GET' | 'HEAD', options: RequestOptions): Promise<FetchResult> {
     const isHttps = u.protocol === 'https:';
-    const port = !isHttps && this.policy.testHttpPort ? this.policy.testHttpPort : isHttps ? 443 : 80;
+    const port = isFixtureHost(this.policy, u.hostname)
+      ? (this.policy.fixture?.port ?? 80)
+      : !isHttps && this.policy.testHttpPort
+        ? this.policy.testHttpPort
+        : isHttps
+          ? 443
+          : 80;
     const lookup: LookupFunction = (_hostname, opts, cb) => {
       if ((opts as { all?: boolean }).all) (cb as unknown as (e: null, a: Array<{ address: string; family: number }>) => void)(null, [pinned]);
       else cb(null, pinned.address, pinned.family);

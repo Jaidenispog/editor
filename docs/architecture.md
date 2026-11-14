@@ -372,7 +372,9 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   (RFC 9309; per host, so the www./bare twin's own robots.txt is read before any page there, and every redirect hop
   of a page must be allowed too), host variants, the root, the sitemap (fast-xml-parser, entities off), ≤ 25 HTML pages breadth-first,
   image sizes, links and a soft-404 probe. `extract.ts` parses pages with cheerio as data only. Tests inject a
-  loopback policy in code; there is no environment variable that loosens the guard.
+  loopback policy in code. The only setting that touches the guard is the browser test's `WEBSITE_FIXTURE_BASE_URL`:
+  ignored unless `NODE_ENV=test`, and even then it maps one exact host name to the local fixture on 127.0.0.1 while
+  every other loopback or private address stays refused (`websiteFetchPolicy` in `website/deps.ts`).
 - **Changes**: `website.audit` stores the validated result and summary and refreshes prepared changes in one
   transaction (`changes.ts`): one open change per dedupe key (partial unique index), owner/AI wording kept, superseded
   when the finding is gone or the page changed, applied changes verified from the next check.

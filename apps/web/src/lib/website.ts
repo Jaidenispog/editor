@@ -1,6 +1,7 @@
 import 'server-only';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { and, desc, eq, gte, inArray, isNotNull, ne, sql } from 'drizzle-orm';
+import { testOnlyWebsiteFixture, type Env } from '@studio/config';
 import {
   AppError,
   AuditSummarySchema,
@@ -38,7 +39,7 @@ import {
   type WebsiteEditSource,
   type WebsiteEditStatus,
 } from '@studio/core';
-import { resolvedPrivateHostReason } from '@studio/core/address-ranges';
+import { resolvedPrivateHostReason, type AddressLookup } from '@studio/core/address-ranges';
 import { approvalDestination, approvalHash } from '@studio/core/website-approval';
 import { schema } from '@studio/db';
 import type { AuditSummaryDto, GroupTotals, QueryRowDto, SearchPanelState, SearchPerformanceDto, WebsiteEditDto, WebsiteOverviewDto } from '@/components/website/types';
@@ -1322,19 +1323,42 @@ export async function disconnectSearchConsole(user: SessionUser, deleteData: boo
   });
 }
 
+/**
+ * The WordPress address rule (design §7.4.2): https only, no credentials or other port in the address, and no private
+ * or reserved address (also for a name that resolves to one). Returns the address as stored, or throws a VALIDATION
+ * error the owner can act on. The one exception is the browser test's local fixture site (NODE_ENV=test with
+ * WEBSITE_FIXTURE_BASE_URL, see `testOnlyWebsiteFixture`): exactly that host name, plain http, no port in the address;
+ * the worker maps it the same way. With any other NODE_ENV the variable is ignored and the fixture host is an ordinary
+ * address.
+ */
+export async function checkedWordPressBaseUrl(
+  input: string,
+  env: Pick<Env, 'NODE_ENV' | 'WEBSITE_FIXTURE_BASE_URL'>,
+  lookup: AddressLookup = async (host) => dnsLookup(host, { all: true, verbatim: true }),
+): Promise<string> {
+  let base: URL;
+  try {
+    base = new URL(input);
+  } catch {
+    throw new AppError('VALIDATION', 'Use your site’s https:// address.');
+  }
+  const fixture = testOnlyWebsiteFixture(env);
+  const isFixture = Boolean(fixture) && base.protocol === 'http:' && !base.port && base.hostname.toLowerCase() === fixture?.host;
+  if (base.protocol !== 'https:' && !isFixture) throw new AppError('VALIDATION', 'Use your site’s https:// address.');
+  if (base.username || base.password || (base.port && base.port !== '443')) throw new AppError('VALIDATION', 'Use your site’s plain https:// address.');
+  // The worker refuses private addresses when it connects (with DNS, every time); refuse them here as well, also for a
+  // name that resolves to one, so the owner hears at once instead of after the check runs.
+  const privateHost = isFixture ? null : await resolvedPrivateHostReason(base.hostname, lookup);
+  if (privateHost) throw new AppError('VALIDATION', `That address points to ${privateHost}, not a public website. Use your site’s public https:// address.`);
+  return `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
+}
+
 /** Saves the WordPress connection (credential encrypted, never echoed) and queues the read-only check. */
 export async function saveWordPress(
   user: SessionUser,
   input: { baseUrl: string; username: string; applicationPassword: string },
 ): Promise<{ state: 'checking'; job: ReturnType<typeof toJobDto> }> {
-  const base = new URL(input.baseUrl);
-  if (base.protocol !== 'https:') throw new AppError('VALIDATION', 'Use your site’s https:// address.');
-  if (base.username || base.password || (base.port && base.port !== '443')) throw new AppError('VALIDATION', 'Use your site’s plain https:// address.');
-  // The worker refuses private addresses when it connects (with DNS, every time); refuse them here as well, also for a
-  // name that resolves to one, so the owner hears at once instead of after the check runs.
-  const privateHost = await resolvedPrivateHostReason(base.hostname, async (host) => dnsLookup(host, { all: true, verbatim: true }));
-  if (privateHost) throw new AppError('VALIDATION', `That address points to ${privateHost}, not a public website. Use your site’s public https:// address.`);
-  const baseUrl = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
+  const baseUrl = await checkedWordPressBaseUrl(input.baseUrl, getEnv());
   const values = {
     status: 'not_configured' as const,
     accessTokenEncrypted: encryptToken(`${input.username.trim()}:${input.applicationPassword.trim()}`),

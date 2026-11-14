@@ -666,3 +666,119 @@ All with fakes; nothing contacts Google.
   Integrations, choose the location, compare the review list with Google Maps, then on the Website page compare 7 days
   of calls with the Business Profile dashboard and confirm the Performance request parameter names, response nesting
   and keyword threshold format (website design §12.3, step 3). Record differences in `docs/research/`.
+
+## Stage C browser test: website and search
+
+`apps/web/e2e/stage-c-website.e2e.mjs` drives the Stage C website and search flow (WP8 and WP9) in Chromium the way
+the owner would, against local fakes only, and prints `N checks passed, 0 failed`. Like the Stage A and B tests it is
+plain Node + Playwright.
+
+```bash
+bash apps/web/e2e/run-stage-c-website.sh                                  # fresh database studio_e2e_c_website, build, port 3900
+E2E_SKIP_BUILD=1 E2E_PORT=3900 E2E_DB=studio_e2e_c2 bash apps/web/e2e/run-stage-c-website.sh
+```
+
+The runner creates and migrates a throwaway database, builds the web app (with `NODE_ENV=production`), then starts
+three detached processes: the fakes (`apps/web/e2e/fake-stage-c-website.ts`, on two free ports or
+`E2E_FAKE_SITE_PORT` / `E2E_FAKE_GOOGLE_PORT`), `next start` and the worker. The web app and worker run with
+`NODE_ENV=test`, dummy `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, `GOOGLE_API_BASE_URL` pointing at the Google fake
+and `WEBSITE_FIXTURE_BASE_URL=http://ivanhoe-studio.test:<site port>`; no AI, email, Square, Meta or Places settings.
+Everything is stopped and the database dropped afterwards (logs are kept on failure or with `E2E_KEEP=1`). Other
+settings: `E2E_PG_URL`, `E2E_WORK_DIR`. A passing run prints `114 checks passed, 0 failed` after about two minutes plus
+the build (118, 131 and 132 s in three consecutive runs on 2026-11-14); most of it is the crawl, which honours the
+fixture's `Crawl-delay: 1`, and the Search Console backfill (one request a second). Every wait is on a real state (a
+check, job, change or connection reported through the API or the database, a button enabled), never a fixed delay.
+
+**What the fakes replace.**
+
+- *The owner's website*: the worker's fixture site (`apps/worker/test/helpers/fixture-site.ts`, unchanged, with its
+  known issues) behind a small front server that also answers the WordPress REST API for the same host
+  (`apps/worker/test/fakes/wordpress.ts`: Basic auth with the Application Password, `users/me`, pages by slug, single
+  reads and updates) and shows the WordPress text of the home and contact pages on the public pages. The app reaches
+  it as `http://ivanhoe-studio.test/`.
+- *Google*: one server for every Google host, addressed as `/<google host>/<path>`: the consent screen (approves at once
+  and redirects back, checking the client id, `S256` PKCE and the redirect address), the token endpoint (code
+  exchange with the verifier, refresh), Search Console (`sites` with three properties, one unreadable, and
+  `searchAnalytics.query` over a fixed ten-day data set) and the Business Profile APIs through WP9's in-memory fake
+  (`apps/worker/test/fakes/google-business-profile.ts`: accounts, locations, reviews, Performance; quota 0 switchable).
+- `GET /__fake/state` on the Google port reports every website request, every WordPress call and write, every Google
+  call and the data sets; `POST /__fake/wordpress/edit-on-next-read` edits a page "in WordPress" just before the
+  worker's next single-page read; `POST /__fake/business-profile` switches quota 0 off.
+
+**Test hooks** (both in `packages/config`, both ignored unless `NODE_ENV=test`; `.env.example`, `docs/deployment.md`):
+
+- `GOOGLE_API_BASE_URL` (`googleApiUrl`): the consent screen address in the connect route, the token exchange in the
+  callback, and the worker's Google calls (`apps/worker/src/lib/google/address.ts`) go to the fake. Unit tests:
+  `packages/config/test/env.test.ts`, `apps/worker/test/google-address.test.ts`.
+- `WEBSITE_FIXTURE_BASE_URL` (`testOnlyWebsiteFixture`): must be a plain `http://<dotted name>:<port>` (never an IP,
+  `localhost`, https or a path). The worker's crawler and WordPress transport (`websiteFetchPolicy` in
+  `apps/worker/src/website/deps.ts`) then map exactly that host name to 127.0.0.1 at that port without a DNS look-up;
+  loopback in general and every other private address stay refused. The web app accepts `http://` for exactly that
+  WordPress host (`checkedWordPressBaseUrl`, called by `saveWordPress`; the route's schema no longer refuses http by
+  itself, so this one rule decides). `apps/web/test/website.test.ts` proves that with the variable set but NODE_ENV
+  production or development the fixture name over http is refused with the https message (and over https is looked up
+  and refused as private), and that under test only that exact name, without a port, skips the rule;
+  `apps/web/test/website.integration.test.ts` still sees `http://`, `ftp://` and the fixture name refused without the
+  setting. `apps/worker/test/website-fixture-policy.test.ts` proves it is inert in production and development
+  (the strict default policy, the fixture name refused even when it resolves to the local server, nothing sent) and
+  that under test `127.0.0.1`, `::1`, `10.x`, `169.254.169.254`, `localhost`, the www twin, a look-alike name and the
+  fixture's own port in the address are all still refused before connecting.
+
+**What it covers** (database rows are read only where the UI cannot show them):
+
+- *Before setup*: the checklist asks for the website address; "This is my business's own website" cannot be ticked and
+  "Check my website" is disabled (with the reason) until the address is saved in Settings → Business and the box is
+  ticked; a new address needs the box ticked again. The Search Console and Business Profile performance cards show no
+  number, zero or "—" before connecting, nothing is stored, and "Reviews on Google" says "Not connected".
+- *Refused addresses*: first the fixture's own loopback address and port, `http://127.0.0.1:<fixture port>/`, where it
+  really answers: the checklist says it isn't a plain web address, the ownership box and "Check my website" stay
+  disabled, the server refuses both the ownership confirmation and a check started through the API (400, two
+  deliberate console errors), no check is stored and the fixture (front and inner server) receives nothing. Then
+  `http://127.0.0.1/`, a private address on a standard port, so the crawler's own private-address guard decides:
+  the check finishes with "site unreachable … private or reserved address", reads no page, records a request count
+  of 0 and the page says the pages could not be checked. (Nothing listens on 127.0.0.1:80 here, so for this one the
+  proof is the guard's reason and the request count, not the fixture's request log.) The five-minute pause between
+  checks is then skipped by moving that check's finish time back in the database (the only write).
+- *The fixture check*: progress reads "Checking your website" and no raw job type name appears anywhere; the
+  fixture's known issues are all found (noindex, duplicate and long titles, invalid JSON-LD, wrong phone number, large
+  and oversized images without dimensions, broken internal link, soft 404, bad sitemap URLs, redirect chain, no https,
+  missing descriptions) and listed by title; "Everything we found" runs from most to least urgent and "Do these first"
+  starts with the most urgent; at most 25 pages are read ("We stopped at 25 pages"), `/private/` (robots.txt) is
+  never requested and the 400-request budget holds.
+- *Without WordPress*: the phone-number correction shows exactly `(03) 9876 5432` → `03 9499 1234`; "Apply to website"
+  is disabled with the reason; "Copy steps" names the page and the exact text; nothing contacts WordPress.
+- *WordPress*: connected in Settings → Integrations → Website editing; the read-only check only reads (live site);
+  the Application Password is not in the page, the field is empty after saving, and no app response afterwards
+  (pages, API, server components; bodies read within 10 s, about 170 of 390 per run, the rest being cancelled
+  prefetches or streams the browser dropped) contains it or a Google token. The change is edited ("Written by you"), the
+  confirmation shows the destination, the page and exactly the edited before/after, nothing is written before
+  "Apply now", the worker writes once, the fake's page and the public page show the new text ("confirmed on the
+  public page"), and the change moves to Done. A second apply is refused (409) and a re-delivered
+  `website.edit_apply` job (`apps/web/e2e/enqueue-job.ts`) claims nothing: still one write. For the home page change,
+  the page is edited in WordPress after approval and before the write: the change is "Not applied" because the page
+  changed, and nothing is written.
+- *Search Console*: "Connect Search Console" goes through the real connect route, the fake consent screen and the
+  callback (read-only scope only, offline, PKCE); the owner chooses between the two readable properties; the sync
+  stores exactly the fake's rows; the card is labelled "Source: Google Search Console (property). Data up to <last
+  day>" with "Last 28 days" selected, and the local searches tile and the "barber ivanhoe" row show the fake's sums.
+- *Business Profile*: connected from Reviews → Reviews on Google with the Business Profile scope only. With quota 0
+  the sync ends normally, the tab says "Waiting for Google" with the approval message (no error), Google was called
+  once (one 429) and nothing is queued to retry; the Performance card shows no numbers. After "approval" and "Check
+  again", the three reviews show as written (reviewer, stars, text, date, the reply on Google), labelled as from
+  Google Business Profile, without review-request status words, and absent from the Requests tab. Over the whole
+  run Google answers quota 0 exactly once. Performance tiles
+  show the fake's sums; bookings (listed without values) and message clicks (not sent) show "—", are stored as NULL
+  or not at all, and never as 0.
+- *Layout*: Website and Reviews at 390 and 1440 px have no horizontal overflow, no cut-off card titles, and the
+  two connection cards (Google Search Console, Website editing) are both there with their titles on one line.
+- No page or console errors except the deliberate ones: the ownership confirmation and the check start refused for the
+  fixture's loopback address (400, see above) and the second "Apply" of an applied change (409).
+
+**Not verified without the owner's real accounts.** The fakes answer the documented happy path at once. Unproven
+until the owner's own site and accounts are used: how the real site behaves under the crawler (false positives,
+caching, a real robots.txt, https), which builder it uses and whether WordPress Application Passwords work on its host
+(security plugins, the REST API, Basic auth headers, revisions), the real Google consent screen (unverified-app
+warning, Testing vs Production), the Search Console property type and the share of anonymised queries, Google's Basic
+API Access approval for Business Profile (not guaranteed), real review shapes and the page-2 issue, and the Performance
+request parameters, response nesting and retention (website design §12.3, email design §11). See the WP8 and WP9
+smoke tests above.

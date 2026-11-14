@@ -5,6 +5,7 @@ import type { WorkerContext } from '../../context.js';
 import { refreshIfExpiring, withConnectionLock, type ConnectionRow, type RefreshedTokens } from '../connections.js';
 import { decryptCredential } from '../credentials.js';
 import { httpRequest, readJson } from '../http.js';
+import { googleUrl, type GoogleCtx } from './address.js';
 
 /** Google's token endpoint (refresh) and revocation endpoint. */
 export const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -45,7 +46,7 @@ export async function refreshGoogleToken(ctx: Pick<WorkerContext, 'env' | 'fetch
   });
   const res = await httpRequest(
     ctx,
-    GOOGLE_TOKEN_URL,
+    googleUrl(ctx, GOOGLE_TOKEN_URL),
     { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' }, body },
     { label: 'google.token_refresh', signal, timeoutMs: TOKEN_TIMEOUT_MS },
   );
@@ -95,10 +96,10 @@ export async function getGoogleAccessToken(ctx: WorkerContext, provider: GoogleP
  * Asks Google to revoke a token (which also ends the refresh token's grant). `already_invalid` means Google no
  * longer knew it (HTTP 400), which is the same end state. Other failures throw so the job can retry.
  */
-export async function revokeGoogleToken(ctx: Pick<WorkerContext, 'fetch' | 'logger'>, token: string, signal?: AbortSignal): Promise<'revoked' | 'already_invalid'> {
+export async function revokeGoogleToken(ctx: GoogleCtx, token: string, signal?: AbortSignal): Promise<'revoked' | 'already_invalid'> {
   const res = await httpRequest(
     ctx,
-    GOOGLE_REVOKE_URL,
+    googleUrl(ctx, GOOGLE_REVOKE_URL),
     { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token }) },
     { label: 'google.revoke', signal, timeoutMs: TOKEN_TIMEOUT_MS },
   );
