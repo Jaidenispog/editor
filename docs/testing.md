@@ -570,7 +570,7 @@ three detached processes: the fakes (`apps/web/e2e/fake-stage-c-website.ts`, on 
 `NODE_ENV=test`, dummy `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, `GOOGLE_API_BASE_URL` pointing at the Google fake
 and `WEBSITE_FIXTURE_BASE_URL=http://ivanhoe-studio.test:<site port>`; no AI, email, Square, Meta or Places settings.
 Everything is stopped and the database dropped afterwards (logs are kept on failure or with `E2E_KEEP=1`). Other
-settings: `E2E_PG_URL`, `E2E_WORK_DIR`. A passing run prints `104 checks passed, 0 failed` after about two minutes plus
+settings: `E2E_PG_URL`, `E2E_WORK_DIR`. A passing run prints `114 checks passed, 0 failed` after about two minutes plus
 the build (118, 131 and 132 s in three consecutive runs on 2026-11-14); most of it is the crawl, which honours the
 fixture's `Crawl-delay: 1`, and the Search Console backfill (one request a second). Every wait is on a real state (a
 check, job, change or connection reported through the API or the database, a button enabled), never a fixed delay.
@@ -600,9 +600,12 @@ check, job, change or connection reported through the API or the database, a but
   `localhost`, https or a path). The worker's crawler and WordPress transport (`websiteFetchPolicy` in
   `apps/worker/src/website/deps.ts`) then map exactly that host name to 127.0.0.1 at that port without a DNS look-up;
   loopback in general and every other private address stay refused. The web app accepts `http://` for exactly that
-  WordPress host (`saveWordPress`; the route's schema no longer refuses http by itself, so this one rule decides, and
+  WordPress host (`checkedWordPressBaseUrl`, called by `saveWordPress`; the route's schema no longer refuses http by
+  itself, so this one rule decides). `apps/web/test/website.test.ts` proves that with the variable set but NODE_ENV
+  production or development the fixture name over http is refused with the https message (and over https is looked up
+  and refused as private), and that under test only that exact name, without a port, skips the rule;
   `apps/web/test/website.integration.test.ts` still sees `http://`, `ftp://` and the fixture name refused without the
-  setting). `apps/worker/test/website-fixture-policy.test.ts` proves it is inert in production and development
+  setting. `apps/worker/test/website-fixture-policy.test.ts` proves it is inert in production and development
   (the strict default policy, the fixture name refused even when it resolves to the local server, nothing sent) and
   that under test `127.0.0.1`, `::1`, `10.x`, `169.254.169.254`, `localhost`, the www twin, a look-alike name and the
   fixture's own port in the address are all still refused before connecting.
@@ -613,10 +616,15 @@ check, job, change or connection reported through the API or the database, a but
   "Check my website" is disabled (with the reason) until the address is saved in Settings → Business and the box is
   ticked; a new address needs the box ticked again. The Search Console and Business Profile performance cards show no
   number, zero or "—" before connecting, nothing is stored, and "Reviews on Google" says "Not connected".
-- *A refused address*: with the website set to `http://127.0.0.1/` (loopback, where the fixture really runs, but not
-  its host name) the check finishes with "site unreachable … private or reserved address", reads no page, records a
-  request count of 0, the fixture receives nothing and the page says the pages could not be checked. The five-minute
-  pause between checks is then skipped by moving that check's finish time back in the database (the only write).
+- *Refused addresses*: first the fixture's own loopback address and port, `http://127.0.0.1:<fixture port>/`, where it
+  really answers: the checklist says it isn't a plain web address, the ownership box and "Check my website" stay
+  disabled, the server refuses both the ownership confirmation and a check started through the API (400, two
+  deliberate console errors), no check is stored and the fixture (front and inner server) receives nothing. Then
+  `http://127.0.0.1/`, a private address on a standard port, so the crawler's own private-address guard decides:
+  the check finishes with "site unreachable … private or reserved address", reads no page, records a request count
+  of 0 and the page says the pages could not be checked. (Nothing listens on 127.0.0.1:80 here, so for this one the
+  proof is the guard's reason and the request count, not the fixture's request log.) The five-minute pause between
+  checks is then skipped by moving that check's finish time back in the database (the only write).
 - *The fixture check*: progress reads "Checking your website" and no raw job type name appears anywhere; the
   fixture's known issues are all found (noindex, duplicate and long titles, invalid JSON-LD, wrong phone number, large
   and oversized images without dimensions, broken internal link, soft 404, bad sitemap URLs, redirect chain, no https,
@@ -648,8 +656,9 @@ check, job, change or connection reported through the API or the database, a but
   show the fake's sums; bookings (listed without values) and message clicks (not sent) show "—", are stored as NULL
   or not at all, and never as 0.
 - *Layout*: Website and Reviews at 390 and 1440 px have no horizontal overflow, no cut-off card titles, and the
-  connection card titles fit on one line.
-- No page or console errors except the deliberate one: the second "Apply" of an applied change (409).
+  two connection cards (Google Search Console, Website editing) are both there with their titles on one line.
+- No page or console errors except the deliberate ones: the ownership confirmation and the check start refused for the
+  fixture's loopback address (400, see above) and the second "Apply" of an applied change (409).
 
 **Not verified without the owner's real accounts.** The fakes answer the documented happy path at once. Unproven
 until the owner's own site and accounts are used: how the real site behaves under the crawler (false positives,

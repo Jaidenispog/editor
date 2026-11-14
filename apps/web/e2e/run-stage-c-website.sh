@@ -128,6 +128,6 @@ done
 curl -fsS "http://localhost:$PORT/api/health" >/dev/null || { printf 'The web app did not start; see %s\n' "$WORK/logs/web.log" >&2; exit 1; }
 grep -q '"worker started"' "$WORK/logs/worker.log" || { printf 'The worker did not start; see %s\n' "$WORK/logs/worker.log" >&2; exit 1; }
 
-E2E_BASE_URL="http://localhost:$PORT" E2E_OUT_DIR="$WORK/out" E2E_FAKE_GOOGLE_URL="$GOOGLE_URL" E2E_FIXTURE_SITE="http://$FIXTURE_HOST" \
+E2E_BASE_URL="http://localhost:$PORT" E2E_OUT_DIR="$WORK/out" E2E_FAKE_GOOGLE_URL="$GOOGLE_URL" E2E_FIXTURE_SITE="http://$FIXTURE_HOST" E2E_FIXTURE_PORT="$SITE_PORT" \
   E2E_WP_USER=studio-assistant E2E_WP_PASSWORD="$WP_PASSWORD" E2E_DATABASE_URL="$DB_URL" E2E_LOG_DIR="$WORK/logs" \
   node "$REPO_ROOT/apps/web/e2e/stage-c-website.e2e.mjs"

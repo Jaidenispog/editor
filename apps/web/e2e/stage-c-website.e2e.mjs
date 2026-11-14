@@ -67,7 +67,17 @@ const PHONE = '03 9499 1234';
 const TSX = path.join(REPO_ROOT, 'apps', 'web', 'node_modules', '.bin', 'tsx');
 const DESKTOP = { width: 1440, height: 1000 };
 const PHONE_VIEWPORT = { width: 390, height: 844 };
-/** The address of the refused check: loopback, where the fixture really runs, but not the fixture's host name. */
+/** The port the fixture site really answers on (127.0.0.1), passed on by run-stage-c-website.sh. */
+const FIXTURE_PORT = Number(process.env.E2E_FIXTURE_PORT ?? '');
+/**
+ * The fixture's real loopback address, which it would answer if every guard failed (the app's plain-address rule, the
+ * crawler's port rule and its private-address rule): refused before any check starts.
+ */
+const FIXTURE_LOOPBACK_SITE = `http://127.0.0.1:${FIXTURE_PORT}/`;
+/**
+ * A private address on a standard port, so the crawler's private-address guard itself is what refuses it. Nothing
+ * listens on 127.0.0.1:80 here, so the proof is the guard's own reason and its request count of 0.
+ */
 const PRIVATE_SITE = 'http://127.0.0.1/';
 /** Raw job type names that must never reach the owner. */
 const RAW_JOB_TYPES = /\b(website\.audit|website\.edit_apply|website\.connection_check|search\.sync|reviews\.gbp\.sync|google\.disconnect)\b/;
@@ -201,7 +211,11 @@ async function openSettings(page, tab) {
   await page.getByRole('tab', { selected: true }).waitFor({ timeout: 30_000 });
 }
 
-/** A Card (components/ui/card.tsx) by its title. */
+/**
+ * A Card (components/ui/card.tsx) by its own heading (h2) text. Cards have no role or accessible name in the app, so this is the one
+ * styling-based locator left; every use reads or waits on it, so a card it stops finding fails the run (timeout), never
+ * passes quietly.
+ */
 function cardByTitle(page, title) {
   return page.locator('div[class*="radius-card"]', { has: page.getByRole('heading', { level: 2, name: title, exact: true }) }).last();
 }
@@ -259,6 +273,14 @@ async function waitForEdit(page, id, statuses, description) {
   );
 }
 
+/** The connection cards on the Website page, in order (apps/web/src/lib/integrations/website.ts). */
+const CONNECTION_TITLES = ['Google Search Console', 'Website editing (WordPress)'];
+
+/** In the browser: the severity label each finding row shows (by its text, whatever the badge looks like), or ''. */
+function severityLabels(rows, labels) {
+  return rows.map((row) => [...row.querySelectorAll('span')].map((el) => el.textContent?.trim() ?? '').find((t) => labels.includes(t)) ?? '');
+}
+
 /** Asserts the page has no horizontal overflow and no truncated card or connection titles. */
 async function checkLayout(page, label) {
   const layout = await page.evaluate(() => {
@@ -269,7 +291,10 @@ async function checkLayout(page, label) {
         const s = getComputedStyle(el);
         return { text: el.textContent?.trim() ?? '', cut: el.scrollWidth > el.clientWidth + 1 || s.textOverflow === 'ellipsis' };
       });
-    const connectionTitles = [...document.querySelectorAll('ul > li.rounded-xl h3')].map((el) => ({ text: el.textContent?.trim() ?? '', cut: el.scrollWidth > el.clientWidth + 1, height: el.getBoundingClientRect().height }));
+    // The connection cards: the list items under the "Connections" heading (found by its text, not by styling).
+    let box = [...document.querySelectorAll('h2')].find((h) => h.textContent?.trim() === 'Connections') ?? null;
+    while (box && !box.querySelector('ul')) box = box.parentElement;
+    const connectionTitles = [...(box?.querySelectorAll('ul > li h3') ?? [])].map((el) => ({ text: el.textContent?.trim() ?? '', cut: el.scrollWidth > el.clientWidth + 1, height: el.getBoundingClientRect().height }));
     return { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, cut: titles.filter((t) => t.cut).map((t) => t.text), connectionTitles };
   });
   check(layout.scrollWidth <= layout.clientWidth, `${label}: no horizontal overflow`, `${layout.scrollWidth} > ${layout.clientWidth}`);
@@ -369,13 +394,38 @@ async function main() {
     await googleTab.getByRole('link', { name: 'Connect Google Business Profile' }).waitFor({ timeout: 15_000 });
     check(/Not connected/.test(await textOf(googleTab)) && (await googleTab.locator('li').count()) === 0, 'Reviews on Google says "Not connected" and lists no reviews before connecting');
 
-    // ---- c. A check of an address that is not the fixture site is refused without any request. ----------------
-    log(`Refused check of ${PRIVATE_SITE}`);
+    // ---- c. Addresses that are not the fixture site are refused without any request. -----------------------------
     await openSettings(page, 'branding');
     await page.getByLabel('Business name', { exact: true }).fill(BUSINESS_NAME);
     await page.getByRole('button', { name: 'Save branding' }).click();
     await waitFor('the business name to be saved', async () => (await apiGet(page, '/api/settings')).settings.brand.businessName === BUSINESS_NAME, { timeoutMs: 15_000, intervalMs: 500 });
-    await saveBusiness(page, { 'Street address': '12 Upper Heidelberg Rd', Suburb: 'Ivanhoe', State: 'VIC', Postcode: '3079', Phone: PHONE, Website: PRIVATE_SITE });
+
+    // c1. The fixture's own loopback address and port, where it really answers: refused before any check starts.
+    check(Number.isInteger(FIXTURE_PORT) && FIXTURE_PORT > 0 && FIXTURE_PORT !== 80, 'the run passed on the fixture site\'s real port', String(process.env.E2E_FIXTURE_PORT));
+    log(`Refused address ${FIXTURE_LOOPBACK_SITE} (where the fixture site really answers)`);
+    const siteBeforeLoopback = await fakeState();
+    await saveBusiness(page, { 'Street address': '12 Upper Heidelberg Rd', Suburb: 'Ivanhoe', State: 'VIC', Postcode: '3079', Phone: PHONE, Website: FIXTURE_LOOPBACK_SITE });
+    await openWebsite(page);
+    await checklist.getByText(`"${FIXTURE_LOOPBACK_SITE}" isn't a plain web address.`, { exact: false }).waitFor({ timeout: 15_000 });
+    check(true, 'the checklist says the fixture\'s loopback address with its port is not a plain web address');
+    check(await checklist.getByRole('checkbox', { name: /This is my business's own website/ }).isDisabled(), 'the ownership box cannot be ticked for that address');
+    check(await checkButton.isDisabled(), '"Check my website" stays disabled for that address');
+    expectError(/status of 400\b.*\/api\/website\/(ownership|audits)\b/, 'confirming ownership of, and starting a check of, the fixture\'s loopback address through the API (POST /api/website/ownership and /api/website/audits → 400)');
+    const ownLoopback = await pageFetch(page, '/api/website/ownership', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+    check(ownLoopback.status === 400 && /Add your website address/.test(ownLoopback.body?.error?.message ?? ''), 'the server refuses to confirm ownership of that address', `${ownLoopback.status} ${JSON.stringify(ownLoopback.body)}`);
+    const startLoopback = await pageFetch(page, '/api/website/audits', { method: 'POST', body: '{}' });
+    check(startLoopback.status === 400 && /Add your website address/.test(startLoopback.body?.error?.message ?? ''), 'the server refuses to start a check of that address', `${startLoopback.status} ${JSON.stringify(startLoopback.body)}`);
+    check((await q('select count(*)::int as n from website_audits'))[0].n === 0, 'no website check was stored or queued for that address');
+    const siteAfterLoopback = await fakeState();
+    check(
+      siteAfterLoopback.site.requests.length === siteBeforeLoopback.site.requests.length && siteAfterLoopback.site.fixtureRequests.length === siteBeforeLoopback.site.fixtureRequests.length,
+      'the fixture site, which answers on that very address, received nothing',
+      `${siteBeforeLoopback.site.requests.length} → ${siteAfterLoopback.site.requests.length}`,
+    );
+
+    // c2. A private address on a standard port: the check runs and the crawler's private-address guard refuses it.
+    log(`Refused check of ${PRIVATE_SITE}`);
+    await saveBusiness(page, { Website: PRIVATE_SITE });
     await openWebsite(page);
     check(await checkButton.isDisabled(), '"Check my website" stays disabled until "This is my business\'s own website" is ticked');
     check(/Confirm that this is your own website first\./.test(await textOf(checkCard)), 'the check card asks for the ownership confirmation');
@@ -383,7 +433,6 @@ async function main() {
     await checkButton.waitFor({ state: 'visible' });
     await waitFor('"Check my website" to be enabled', async () => checkButton.isEnabled(), { timeoutMs: 15_000, intervalMs: 300 });
     check(true, 'ticking the ownership box enables "Check my website"');
-    const siteBeforeRefused = (await fakeState()).site.requests.length;
     await checkButton.click();
     const refused = await waitForCheck(page, null);
     const refusedFindings = refused.latestResult?.findings ?? [];
@@ -392,7 +441,6 @@ async function main() {
     check(refused.latestAudit.summary.pagesChecked === 0, 'no page was read from the private address', String(refused.latestAudit.summary.pagesChecked));
     const refusedRow = (await q('select result from website_audits where id = $1', [refused.latestAudit.id]))[0];
     check((refusedRow?.result?.limits?.requests ?? -1) === 0, 'the refused check made no request at all (its request count is 0)', JSON.stringify(refusedRow?.result?.limits ?? null));
-    check((await fakeState()).site.requests.length === siteBeforeRefused, 'the fixture site (which really runs on 127.0.0.1) received nothing');
     await page.reload();
     await checkCard.getByText("We couldn't check your pages this time.").first().waitFor({ timeout: 15_000 });
     check(true, 'the Website page says the pages could not be checked (no "nothing to fix")');
@@ -408,6 +456,7 @@ async function main() {
     check(await checkButton.isDisabled(), 'a new website address needs the ownership confirmation again');
     await checklist.getByRole('checkbox', { name: /This is my business's own website/ }).check();
     await waitFor('"Check my website" to be enabled', async () => checkButton.isEnabled(), { timeoutMs: 15_000, intervalMs: 300 });
+    const siteBeforeCheck = (await fakeState()).site.requests.length;
     await checkButton.click();
     const progress = page.getByRole('progressbar', { name: 'Checking your website progress' });
     await progress.waitFor({ timeout: 30_000 });
@@ -422,7 +471,7 @@ async function main() {
     const fetched = (result?.pages ?? []).filter((p) => p.skipped === null);
     check(fetched.length <= 25 && done.latestAudit.summary.pagesChecked <= 25 && result?.limits?.hitPageLimit === true, 'the check read at most 25 pages (and stopped at the limit)', `${fetched.length} fetched, ${done.latestAudit.summary.pagesChecked} checked`);
     const afterCheck = await fakeState();
-    const siteReqs = afterCheck.site.requests.slice(siteBeforeRefused);
+    const siteReqs = afterCheck.site.requests.slice(siteBeforeCheck);
     check(siteReqs.length > 0 && !siteReqs.some((r) => r.path.startsWith('/private/')), 'robots.txt-disallowed /private/ was never requested', `${siteReqs.length} requests`);
     check(siteReqs.length <= 400 && (result?.limits?.requests ?? 0) <= 400, 'the check stayed within its 400-request budget', String(siteReqs.length));
     check((result?.robots?.blockedForUs ?? []).some((u) => u.includes('/private/')), 'the result records /private/ as blocked for the check by robots.txt');
@@ -435,8 +484,9 @@ async function main() {
     check(!RAW_JOB_TYPES.test(await page.locator('body').innerText()), 'no raw job type name is shown after the check');
     // Priority order: "Everything we found" lists findings from most to least urgent.
     const allFindings = checkCard.locator('section[aria-labelledby="all-findings"] button[aria-expanded]');
-    const severities = await allFindings.evaluateAll((els) => els.map((el) => el.querySelector('span.rounded-full')?.textContent?.trim() ?? ''));
+    const severities = await allFindings.evaluateAll(severityLabels, Object.keys(SEVERITY_RANK));
     const ranks = severities.map((s) => SEVERITY_RANK[s] ?? -1);
+    check(severities.length === (result?.findings ?? []).length && ranks.every((r) => r >= 0), 'every listed finding shows one of the severity labels', severities.join(', '));
     const shownTitles = await allFindings.evaluateAll((els) => els.map((el) => el.querySelector('p')?.textContent?.trim() ?? ''));
     // The order of website design §6.4, computed here independently: severity weight + quick-fix bonus + pages (up to
     // five), then category order, then check id. (A quick "Note" may outrank a slow "Minor"; Urgent, Important and
@@ -454,7 +504,7 @@ async function main() {
     const knownTitles = (result?.findings ?? []).filter((f) => FIXTURE_ISSUES.includes(f.checkId)).map((f) => f.title);
     check(knownTitles.length > 0 && knownTitles.every((t) => shownTitles.includes(t)), 'the known issues are listed on the page by their titles', knownTitles.filter((t) => !shownTitles.includes(t)).join(' | '));
     const firstFive = checkCard.locator('section[aria-labelledby="do-these-first"] button[aria-expanded]');
-    const topSeverities = await firstFive.evaluateAll((els) => els.map((el) => el.querySelector('span.rounded-full')?.textContent?.trim() ?? ''));
+    const topSeverities = await firstFive.evaluateAll(severityLabels, Object.keys(SEVERITY_RANK));
     check(topSeverities.length > 0 && topSeverities.length <= 5 && SEVERITY_RANK[topSeverities[0]] === Math.max(...ranks), '"Do these first" starts with the most urgent finding (five at most)', topSeverities.join(', '));
 
     // ---- e. Without WordPress: copy-paste steps only. ----------------------------------------------------------
@@ -624,7 +674,8 @@ async function main() {
     const lastDayLabel = new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Melbourne', dateStyle: 'medium' }).format(new Date(`${lastDay}T12:00:00Z`));
     check(scText.includes(`Source: Google Search Console (${SITE}/). Data up to ${lastDayLabel}`), 'the card labels the numbers as Google Search Console with the property and "data up to" date', scText.slice(0, 260));
     check((await searchCard.getByRole('button', { name: 'Last 28 days' }).getAttribute('aria-pressed')) === 'true', 'the date range shown is "Last 28 days"');
-    const localTile = searchCard.locator('div.rounded-lg', { has: page.getByText('Local searches', { exact: true }) }).first();
+    const localTile = searchCard.locator('div:has(> p:text-is("Local searches")):has(> dl)');
+    check((await localTile.count()) === 1, 'the Search Console card has exactly one "Local searches" tile', String(await localTile.count()));
     const fmt = (n) => new Intl.NumberFormat('en-AU').format(n);
     const localText = await textOf(localTile);
     check(localText.includes(`Clicks ${fmt(sum(local, 'clicks'))}`) && localText.includes(`Impressions ${fmt(sum(local, 'impressions'))}`), "the local searches tile shows the fake's numbers", localText);
@@ -733,7 +784,11 @@ async function main() {
       await openWebsite(page);
       await profileCard.getByText(/^Source: Google Business Profile/).waitFor({ timeout: 15_000 });
       const w = await checkLayout(page, `Website at ${viewport.width} px`);
-      check(w.connectionTitles.length === 2 && w.connectionTitles.every((t) => !t.cut && t.height < 30), `Website at ${viewport.width} px: connection card titles fit on one line`, JSON.stringify(w.connectionTitles));
+      check(
+        w.connectionTitles.map((t) => t.text).join(' | ') === CONNECTION_TITLES.join(' | ') && w.connectionTitles.every((t) => !t.cut && t.height < 30),
+        `Website at ${viewport.width} px: both connection card titles are there and fit on one line`,
+        JSON.stringify(w.connectionTitles),
+      );
       await page.goto(`${BASE_URL}/reviews`);
       await page.getByRole('tab', { name: 'Reviews on Google' }).click();
       await reviewItems.first().waitFor({ timeout: 15_000 });
