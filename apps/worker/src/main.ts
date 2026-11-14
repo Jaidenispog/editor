@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,14 +20,30 @@ import { handleCleanup } from './handlers/cleanup.js';
 
 type Handler<T extends JobType> = (ctx: WorkerContext, run: TrackedRun, payload: JobPayload<T>) => Promise<void>;
 
+/**
+ * Local development keeps one .env at the repository root that the web app and the worker share.
+ * Values already in the process environment always win (the same rule as apps/web/src/lib/env.ts).
+ */
+function loadRootEnvFile(): void {
+  const file = path.join(repoRoot(), '.env');
+  if (existsSync(file)) process.loadEnvFile(file);
+}
+
+/** Relative paths (STORAGE_LOCAL_ROOT, WORKER_TMP_DIR) resolve against the repository root, like the web app. */
+export function resolveConfiguredPath(configured: string): string {
+  return path.isAbsolute(configured) ? configured : path.resolve(repoRoot(), configured);
+}
+
 export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => Promise<void> }> {
-  const env = loadEnv();
+  loadRootEnvFile();
+  const loaded = loadEnv();
+  const env = { ...loaded, STORAGE_LOCAL_ROOT: resolveConfiguredPath(loaded.STORAGE_LOCAL_ROOT), WORKER_TMP_DIR: resolveConfiguredPath(loaded.WORKER_TMP_DIR) };
   const logger = pino({ level: env.LOG_LEVEL, base: { service: 'studio-worker' } });
   const dbHandle = createDatabase(env.DATABASE_URL, { max: 8, applicationName: 'studio-worker' });
   const store = createBlobStore(env);
   const queue = createQueue({ connectionString: env.QUEUE_DATABASE_URL ?? env.DATABASE_URL, role: 'worker', logger });
   const ai = createAiProviders(env, logger);
-  const tmpRoot = path.resolve(env.WORKER_TMP_DIR);
+  const tmpRoot = env.WORKER_TMP_DIR;
   await mkdir(tmpRoot, { recursive: true });
   const ctx: WorkerContext = {
     env,
