@@ -25,6 +25,11 @@ History of the background runs:
    architect writing `docs/design/stage-bc-plan.md` (ordered, conflict-free work packages). Design only: no code.
    Stage B/C implementation starts from that plan after the Stage A merges.
 
+5. 2026-11-14: the three hardening branches were merged into `claude/blissful-lamport-f1lndn` (worktrees removed).
+   After the merge: 9 packages typecheck, 333 unit tests pass, worker integration 12/12, browser test 51/51
+   (production) and 44/44 (dev server). Two bugs found and fixed while verifying: a relative-time hydration mismatch
+   (`apps/web/src/components/ui/relative-time.tsx`) and dev-mode media 404s (driver tag instead of `instanceof`).
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
