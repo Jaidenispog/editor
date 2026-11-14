@@ -39,7 +39,7 @@ export const websiteModule: WorkerModule = {
       case 'website.connection_check':
         return typeof payload['provider'] === 'string' ? payload['provider'] : null;
       case 'search.sync':
-        return 'google_search_console';
+        return payload['source'] === 'business_profile' ? 'google_business_profile' : 'google_search_console';
       default:
         return undefined;
     }

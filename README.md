@@ -153,3 +153,15 @@ against a fake (it needs the Anthropic key).
 - **Waiting on account access**: a domain with DNS access, Postmark servers, streams, webhooks and account approval;
   email permission recorded at the counter; the review link; optionally a Google Maps key and Place ID. Square
   completions drive the automation once Square is connected (WP6).
+
+## Google Business Profile (Stage C, WP9)
+
+- **Built**: "Reviews on Google" on the Reviews page (location choice, reviews with Google's reply state and policy
+  flag, daily incremental and weekly full reads) and the Business Profile performance card on the Website page (calls,
+  direction requests, website clicks, bookings, message clicks, views, monthly search keywords), both read-only on one
+  Google sign-in, with "Waiting for Google approval" while Google's quota is 0.
+- **Verified with fakes**: every read, refusal and state against a fake of the Business Profile APIs on a test
+  database. No real Google call has been made.
+- **Waiting on account access**: a Google Cloud project with the Business Profile APIs, the consent screen published
+  to Production, and Google's Basic API Access approval, which isn't guaranteed for a single shop. The Performance
+  request and response shapes are confirmed only once that approval exists.

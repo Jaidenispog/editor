@@ -6,6 +6,7 @@ import { integrationPill } from '@/components/app/integration-pill';
 import { GoogleRatingCard, ReviewLinkCard } from '@/components/reviews/review-cards';
 import { ReviewsWorkspace, type ReviewsData } from '@/components/reviews/review-requests';
 import { PageHeader } from '@/components/ui/page-header';
+import { getGoogleReviews } from '@/lib/business-profile';
 import { getEmailStatus, listClients, listTemplates } from '@/lib/email';
 import { getIntegrationStatuses } from '@/lib/integrations';
 import { getPlacesState, listReviewRequests } from '@/lib/reviews';
@@ -41,9 +42,10 @@ export default async function ReviewsPage() {
     googleProfile: { state: gbpPill.status, label: gbpPill.label, message: gbp?.message ?? 'Not set up.' },
   };
   if (isOwner) {
-    const [requests, clients, templates] = await Promise.all([listReviewRequests(), listClients({}), listTemplates()]);
+    const [requests, clients, templates, googleReviews] = await Promise.all([listReviewRequests(), listClients({}), listTemplates(), getGoogleReviews()]);
     data = {
       ...data,
+      googleReviews,
       requests: requests.items,
       counts: requests.counts,
       clients: clients.items,

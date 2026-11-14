@@ -43,3 +43,5 @@ export * from './website.js';
 export * from './website-checks.js';
 export * from './robots.js';
 export * from './jobs/website.js';
+export * from './business-profile.js';
+export * from './jobs/business_profile.js';

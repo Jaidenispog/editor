@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
 import { WebsitePage as WebsitePageBody } from '@/components/website/website-page';
+import { getProfilePerformance } from '@/lib/business-profile';
 import { getCurrentUser } from '@/lib/session';
 import { getSearchPerformance, getWebsiteOverview, listEdits } from '@/lib/website';
 
@@ -32,11 +33,11 @@ export default async function WebsitePage() {
       </>
     );
   }
-  const [overview, edits, search] = await Promise.all([getWebsiteOverview(), listEdits('open'), getSearchPerformance('28d', true)]);
+  const [overview, edits, search, profile] = await Promise.all([getWebsiteOverview(), listEdits('open'), getSearchPerformance('28d', true), getProfilePerformance('28d')]);
   return (
     <>
       {header}
-      <WebsitePageBody initial={overview} initialEdits={edits} initialSearch={search} />
+      <WebsitePageBody initial={overview} initialEdits={edits} initialSearch={search} initialProfile={profile} />
     </>
   );
 }

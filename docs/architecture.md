@@ -396,3 +396,31 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   given); `null` (button hidden) unless `AI_PROVIDER=anthropic`.
 - **Not built here (WP9):** Business Profile Performance (`search.sync` source `business_profile`, its connection
   check branch and card) — they extend the payload enums in a backwards-compatible way.
+
+## Google Business Profile (Stage C, WP9)
+
+- **One connection, two uses**: the `google_business_profile` row (shared Google sign-in, `business.manage` only)
+  holds `config.locations` (discovery), `config.account`/`location`/`locationTitle` (the chosen listing) and two
+  capability keys written by read-only calls: `apiAccess` (discovery and reviews) and `performanceApi`, each
+  `available` / `awaiting_approval` / `api_disabled` / `error` (`packages/core/src/business-profile.ts`). Google gives a
+  project quota 0 until it approves Basic API Access (memo §7): a 429, or a 403 naming a quota limit of 0, is recorded as
+  `awaiting_approval` and the job ends normally, so nothing retries until the next scheduled run.
+- **Reviews** (`apps/worker/src/lib/google/business-profile.ts`, `handlers/reviews-gbp.ts`): discovery (Account
+  Management `accounts`, Business Information `{account}/locations?readMask=name,title,storefrontAddress`) on connect
+  or while no location is chosen (one location is chosen automatically; several wait for the owner on the Reviews
+  page); then v4 `reviews.list` (page size 50, newest update first). Daily syncs stop at the stored
+  `reviews.review_updated_at` watermark; `weekly_full` and the first sync read every page, which also picks up reviews
+  Google's known "missing from page 2 onward" issue left out. Upsert on `(provider, external_review_id)`; `raw` keeps the
+  location, `reviewReplyState` and `policyViolation`. Nothing is ever written to Google (no replies).
+- **Performance** (`lib/google/business-profile-performance.ts`, `modules/business_profile/performance.ts`):
+  `website.connection_check` with `provider: 'business_profile_performance'` makes one 7-day
+  `fetchMultiDailyMetricsTimeSeries` read and records `performanceApi`; `search.sync` with `source: 'business_profile'`
+  runs only while it is `available`: 18 months of daily metrics in 92-day windows on the first sync (35 days later) and
+  monthly search keywords (6 complete months, later 2; each month replaced in one transaction) into `search_metrics`
+  (source `business_profile`, property `locations/{id}`). A day listed without a value is stored as NULL, never 0. The
+  request parameter names and response nesting are those of the design (⚠, not in the memo): anything else fails with
+  "Google's response format wasn't recognised" and stores nothing. The two WP8 handlers only dispatch to this module.
+- **Web** (`apps/web/src/lib/business-profile.ts`, `lib/integrations/business_profile.ts`): one pure state function
+  feeds the Settings card, the "Reviews on Google" tab (`components/reviews/google-reviews-tab.tsx`) and the Website
+  page's `components/website/profile-performance-card.tsx`. Tiles sum only what Google returned in the range ending on
+  the last day with a value.

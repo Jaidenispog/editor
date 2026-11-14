@@ -392,3 +392,26 @@ Jobs (`packages/core/src/jobs/website.ts`): `website.audit { auditId }`, `websit
 Melbourne, key `search_console_daily`). All have `projectId = null`; payloads hold ids only.
 
 ## Google Business Profile (Stage C, WP9)
+
+Owner-only (`requireOwner`; staff get 403), through `handleApi` (session + CSRF guard). No route calls Google: every
+read is a worker job. Only what Google returned is ever sent; a number Google did not send is `null` (shown "—").
+Shapes: `apps/web/src/lib/shared/business-profile-dto.ts`. One connection (`google_business_profile`, scope
+`business.manage`, through the shared `/api/integrations/google/{connect,callback}?product=business_profile`, which
+now queues `reviews.gbp.sync { reason: 'connect' }`) serves both the reviews list and the Performance numbers.
+
+| Method | Route | Body | Response / notes |
+| --- | --- | --- | --- |
+| GET | `/api/reviews/google` | — | `{ places, profile }`: `places` is WP7's Places state; `profile` is `GoogleReviewsDto` with `state` (not_configured / not_connected / checking / awaiting_approval / choose_location / needs_reauth / error / connected), the chosen location, the discovered `locations` (only while choosing), up to 200 reviews of the chosen location (stars, reviewer, dates, text, owner reply, Google's reply state and policy flag in plain words), Google's own `totalReviewCount` and `averageRating`, `syncedAt`, `canRefresh` |
+| POST | `/api/reviews/google/refresh` | `{}` | 202 `{ jobIds }` (`reviews.gbp.sync`, `manual`); 429 within 10 minutes of the last read; 422 when not connected |
+| PUT | `/api/integrations/google-business-profile/location` | `{ locationName: 'locations/{id}' }` (one of the discovered ones) | `{ state }`; 400 for anything Google did not list. Removes stored reviews of any other location, resets the Performance state, queues `reviews.gbp.sync` (`manual`) and the Performance probe; audit `integration.google_business_profile.location_selected` |
+| POST | `/api/integrations/google-business-profile/check` | `{}` | 202 `{ jobs }`: "Check again" — re-reads locations and reviews and, with a location chosen, re-probes Performance (all read-only). 422 when not connected |
+| DELETE | `/api/integrations/google-business-profile` | `?deleteData=true\|false` | 202; status `disconnected`, queues the shared `google.disconnect`; `deleteData=true` also deletes the stored Google reviews and every `search_metrics` row with source `business_profile` |
+| GET | `/api/website/business-profile-performance` | `?range=28d\|3m\|12m` (anything else → 28d) | `ProfilePerformanceDto`: `state` (not_configured / not_connected / choose_location / awaiting_approval / not_checked / api_disabled / needs_reauth / error / syncing / no_data / connected), tile totals (calls, direction requests, website clicks, bookings, message clicks, views on Search and on Maps with their mobile/desktop parts), `dataThrough` (last day with a value), the latest month of search keywords grouped with `classifyQuery` (`threshold` when Google only says "fewer than N"). No numbers unless `connected` |
+| POST | `/api/website/business-profile-performance` | `{}` | 202 `{ job }` (`search.sync`, source `business_profile`, `manual`); 422 until Google has approved access; 429 within 15 minutes |
+
+Jobs: `reviews.gbp.sync { reason: 'connect' | 'daily' | 'manual' | 'weekly_full' }`
+(`packages/core/src/jobs/business_profile.ts`; daily 5:53 am, full re-read Mondays 6:07 am Melbourne). The same file
+extends two website queues backwards-compatibly: `website.connection_check` gains `provider:
+'business_profile_performance'` (read-only 7-day probe; re-probed Mondays 8:13 am while not available) and
+`search.sync` gains `source: 'business_profile'` (daily 7:47 am; does nothing until Google has approved access).
+Payloads hold no tokens or review text.

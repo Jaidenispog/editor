@@ -404,3 +404,16 @@ not allow it for this app setup, the card says "Not available" and everything el
 - AI wording uses `AI_WEBSITE_MODEL` (default `claude-haiku-5-5`) only when `AI_PROVIDER=anthropic`.
 - WordPress needs nothing on the server: the owner enters the site address and an Application Password in
   Settings → Integrations.
+
+## Google Business Profile (Stage C, WP9)
+
+- No new server settings: it reuses `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` and the callback
+  `https://<app address>/api/integrations/google/callback`.
+- In the same Google Cloud project turn on the My Business Account Management API, My Business Business Information
+  API, Google My Business API (v4 reviews) and Business Profile Performance API, publish the OAuth consent screen to
+  Production, and submit Google's "Application for Basic API Access" (the profile must be verified for 60+ days and
+  have a website; about 14 days; not guaranteed). Until Google approves, the app shows "Waiting for Google approval";
+  never request a quota increase while the quota is 0.
+- The worker needs outbound HTTPS to `mybusinessaccountmanagement.googleapis.com`,
+  `mybusinessbusinessinformation.googleapis.com`, `mybusiness.googleapis.com`,
+  `businessprofileperformance.googleapis.com` and `oauth2.googleapis.com`.

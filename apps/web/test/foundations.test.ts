@@ -34,7 +34,7 @@ describe('integration statuses', () => {
     // Square by the Square module (WP6, design §4.1 states; no "Needs setup:" prefix), the Resend card was replaced
     // by the email module's Postmark and Google rating cards (WP7, plan §10.1), and Google Search Console by the
     // website module (WP8, design §10.5: "Existing Search Console message text is replaced").
-    const replaced = new Set(['instagram', 'tiktok', 'square', 'email', 'google_search_console']);
+    const replaced = new Set(['instagram', 'tiktok', 'square', 'email', 'google_search_console', 'google_business_profile']);
     const legacy = now.filter((s) => !replaced.has(s.id) && expected.some((e) => e['id'] === s.id)).map(({ state: _s, liveMode: _l, verified: _v, ...rest }) => rest);
     expect(legacy).toEqual(expected.filter((e) => !replaced.has(String(e['id']))));
   });
@@ -157,9 +157,9 @@ describe('Google OAuth', () => {
     await expect(exchangeGoogleCode({ ...base, fetchImpl: answer({ error: 'invalid_grant' }, 400) })).rejects.toMatchObject({ reason: 'rejected' });
   });
 
-  it('enqueues no follow-up job while the owning module has not registered it', () => {
-    expect(googleFollowUpJob('business_profile')).toBeNull();
-    // The website module (WP8) registers the Search Console check.
+  it('enqueues the follow-up job each owning module registered', () => {
+    // The Business Profile module (WP9) registers the reviews sync; the website module (WP8) the Search Console check.
+    expect(googleFollowUpJob('business_profile')).toEqual({ type: 'reviews.gbp.sync', payload: { reason: 'connect' } });
     expect(googleFollowUpJob('search_console')).toEqual({ type: 'website.connection_check', payload: { provider: 'google_search_console', reason: 'connect' } });
   });
 });

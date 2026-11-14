@@ -525,3 +525,30 @@ All with fakes; nothing contacts a real website, WordPress or Google.
   scripts/website-smoke.ts --audit https://your-site/ --i-own-this-site` prints the request log and findings and
   writes nothing. Then, with the owner present: connect Search Console and compare one 28-day total with the Search
   Console web report; run the WordPress check and one `text_replace` plus its undo on a staging copy first.
+
+## Google Business Profile (Stage C, WP9)
+
+All with fakes; nothing contacts Google.
+
+- **Unit** (`pnpm -r test`): `packages/core/test/business-profile.test.ts` (star ratings, Google words, tile totals that
+  stay null without data, the extended website payloads); `apps/worker/test/business-profile.test.ts` (quota 0 →
+  awaiting approval, `SERVICE_DISABLED` names the API, recorded-shape parsers for discovery, reviews and Performance,
+  a missing value → null, int64 strings, thresholds, unknown shapes → the plain "wasn't recognised" message, request
+  URLs never naming `BUSINESS_CONVERSATIONS`, backfill windows, valid cron payloads); `apps/web/test/business-profile.test.ts`
+  (every card state incl. "Waiting for Google", Performance states, sums of only what Google returned, "—" for a
+  missing number).
+- **Database** (`TEST_DATABASE_URL`): `apps/worker/test/business-profile-db.test.ts` against an in-memory fake of the
+  Business Profile APIs (`apps/worker/test/fakes/google-business-profile.ts`, injected fetch, page size 2): quota-0 429
+  → `awaiting_approval` with the job ending normally; discovery auto-selects one location and the first sync reads
+  every page and queues the Performance probe; the incremental watermark stops after the first page at or before it;
+  a review hidden by the page-2 issue is picked up only by `weekly_full`; several locations wait for the owner;
+  Performance probe quota 0 → waiting (reviews untouched), then 200 → available and the first sync queued; a missing
+  value stored as NULL, thresholds kept, re-runs identical; an unknown shape fails with the plain message;
+  `invalid_grant` → `needs_reauth` on the shared row and Performance stops without calling Google.
+  `apps/web/test/business-profile-routes.integration.test.ts` covers the routes: owner-only and CSRF, no reviews or
+  numbers while waiting for approval, the location limited to what Google listed (other listings' reviews removed),
+  the refresh limits, and disconnect with "delete stored data".
+- **Smoke test with the owner** (read-only, once Google has approved the project): connect in Settings →
+  Integrations, choose the location, compare the review list with Google Maps, then on the Website page compare 7 days
+  of calls with the Business Profile dashboard and confirm the Performance request parameter names, response nesting
+  and keyword threshold format (website design §12.3, step 3). Record differences in `docs/research/`.

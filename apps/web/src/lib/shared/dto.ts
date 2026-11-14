@@ -78,6 +78,7 @@ const JOB_LABELS = {
   'website.copy_draft': 'Writing wording suggestions',
   'website.connection_check': 'Checking a connection (read-only)',
   'search.sync': 'Fetching search data',
+  'reviews.gbp.sync': 'Reading your Google reviews',
 } as const satisfies Record<JobType, string>;
 
 /** Friendly names for job types (looked up by the stored type string). */
