@@ -11,3 +11,21 @@ export { PLANNER_SYSTEM_PROMPT, LABELER_SYSTEM_PROMPT, buildPlannerUserContent, 
 export { PlannerWireSchema, LabelWireSchema, type PlannerWire, type LabelWire } from './anthropic/schemas.js';
 export { OpenAiTranscriber, toSegments, OPENAI_MAX_UPLOAD_BYTES } from './transcription/openai.js';
 export { NoneTranscriber } from './transcription/none.js';
+export {
+  DeepgramTranscriber,
+  deepgramToSegments,
+  splitIntoCaptionChunks,
+  mergeShortChunks,
+  holdShortSegments,
+  wrapCaptionLines,
+  DEEPGRAM_LISTEN_URL,
+  DEEPGRAM_DEFAULT_MODEL,
+  DEEPGRAM_MIN_SEGMENT_CONFIDENCE,
+  CAPTION_MAX_LINE_CHARS,
+  CAPTION_MAX_LINES,
+  CAPTION_MIN_SECONDS,
+  CAPTION_PAUSE_SPLIT_SECONDS,
+  type DeepgramTranscriberOptions,
+  type TimedWord,
+} from './transcription/deepgram.js';
+export { audioMimeType } from './transcription/audio-mime.js';

@@ -12,7 +12,7 @@ packages/db     Drizzle ORM schema + SQL migrations (PostgreSQL; identical on lo
 packages/queue  Thin wrapper over pg-boss (durable queue in Postgres: retries, expiry, heartbeats, cancellation).
 packages/storage BlobStore interface: LocalDiskStore (dev / single server) and S3Store (Supabase Storage S3, R2, S3). Expiring links only.
 packages/media  FFmpeg/ffprobe wrappers, footage analysis (scenes, quality, audio, beats) and the plan → filtergraph renderer.
-packages/ai     Provider abstraction: vision labelling, edit planning, transcription. Anthropic implementation + deterministic rules fallback.
+packages/ai     Provider abstraction: vision labelling, edit planning, transcription. Anthropic implementation + deterministic rules fallback; Deepgram (recommended) or OpenAI whisper-1 speech-to-text.
 packages/config Typed environment (Zod). Secrets never leave the server.
 ```
 
@@ -27,7 +27,7 @@ packages/config Typed environment (Zod). Secrets never leave the server.
 
 ## Durability
 
-- pg-boss queues per job type with `retryLimit`, `expireInSeconds` and `heartbeatSeconds`. A worker that dies stops heart-beating; the attempt is failed and retried → restart recovery.
+- pg-boss queues per job type with `retryLimit`, `expireInSeconds` and `heartbeatSeconds` (30 s). A worker that dies stops heart-beating; the worker's pg-boss supervisor (every 30 s) fails the attempt and it is retried → restart recovery.
 - `jobs` table mirrors every job for the UI (progress, message, cancel flag). Cancel = flag + `boss.cancel` → the worker's `AbortSignal` kills FFmpeg.
 - Handlers are idempotent: re-running ingest or render overwrites the same storage keys; planning skips versions that already have a plan.
 - Per-job temp dirs under `WORKER_TMP_DIR`, removed in `finally`; an hourly cleanup job removes orphans.

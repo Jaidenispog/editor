@@ -183,10 +183,29 @@ From the dashboard's **Connect** dialog, copy the connection strings:
 - **Transaction mode** works for the web app's queries. It must not be used with named prepared statements,
   and the app does not use them. *Confirm pooler host names and modes against Supabase documentation.*
 - Add `?sslmode=require` to connection strings and turn on **Enforce SSL** in the database settings.
-- **Connection budget:** Micro allows about 60 Postgres connections in total, and the session pooler about 15
-  per role (research figures). The worker opens up to 8 (database pool) + 6 (queue). The web app opens up to
-  10 + 3. That fits a direct connection. If the session pooler refuses connections, raise the pool size in the
-  database settings, or run the web app over the transaction pooler.
+- **Connection budget:** Micro allows about 60 Postgres connections in total (shared with Supabase's own Auth,
+  Storage and API services), and the session pooler about 15 per role by default (research figures). Without
+  overrides the worker opens up to 8 (database pool) + 6 (queue) = 14 and the web app up to 10 + 3 = 13. That
+  fits a direct connection, but not the session pooler for both apps. Two optional variables set the budget per
+  process: `DB_POOL_MAX` (app queries) and `QUEUE_POOL_MAX` (pg-boss). A pool that is full makes queries wait
+  their turn rather than fail.
+
+  **Supabase Micro example (both apps on the session pooler, port 5432, 15 connections):**
+
+  | Process | `DB_POOL_MAX` | `QUEUE_POOL_MAX` | Connections |
+  | --- | ---: | ---: | ---: |
+  | Worker (`WORKER_CONCURRENCY=1`) | 4 | 3 | 7 |
+  | Web app on a long-running host (Fly.io, VPS) | 5 | 2 | 7 |
+  | Migrations (`pnpm db:migrate`, before the apps start) | — | — | 1 |
+  | **Total at most** | | | **15** |
+
+  - Web app on serverless (Vercel) over the **transaction** pooler (port 6543): `DB_POOL_MAX=1` and
+    `QUEUE_POOL_MAX=1` per function instance; the transaction pooler shares its own server connections.
+  - Raising `WORKER_CONCURRENCY` above 1 needs a larger worker budget (about 2 more database connections per
+    extra job). Raise the pooler's **Pool Size** in the database settings instead of exceeding it, and keep the
+    total under about 80 % of the 60-connection limit.
+  - With a direct connection (IPv6 from the host) the 15-connection pooler limit does not apply, and the
+    defaults fit comfortably. *Confirm current Micro limits against Supabase documentation.*
 
 ### 2. Media storage: Supabase Storage via the S3 protocol
 

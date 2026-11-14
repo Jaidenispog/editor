@@ -26,17 +26,19 @@ pnpm -r --no-bail test               # unit tests (+ DB-backed suites when TEST_
 pnpm --filter @studio/core test      # one package at a time
 ```
 
-Last full run (14 Nov 2026, sandbox, `TEST_DATABASE_URL` set): typecheck clean. All 243 tests passed:
+Last full run (14 Nov 2026, sandbox, `TEST_DATABASE_URL` set): typecheck clean. All 276 tests passed:
 
 | Package | Tests | Covers |
 | --- | ---: | --- |
-| `packages/core` | 23 | EditPlan validation, revision parsing, style support, manual labels |
+| `packages/config` | 4 | environment validation (Deepgram key check, optional pool sizes) |
+| `packages/core` | 35 | EditPlan validation, revision parsing (incl. natural phrasings), style support, manual labels |
 | `packages/db` | 3 | token encryption |
+| `packages/queue` | 2 | queue durability settings (30 s heartbeat), default pool sizes |
 | `packages/storage` | 5 | local store, signed links |
-| `packages/ai` | 60 | rules planner (five distinct valid plans), providers, Anthropic adapter with a stubbed client |
+| `packages/ai` | 72 | rules planner (five distinct valid plans), providers, Anthropic adapter with a stubbed client, Deepgram adapter with a fake fetch (caption-sized segments) |
 | `packages/media` | 64 | analysis on the synthetic clips, beat detection, ASS text, filtergraph, real renders |
-| `apps/worker` | 11 | job tracker: cancel vs interruption, retries, stale-job recovery |
-| `apps/web` | 77 | auth, CSRF, HTTP ranges, upload maths, status payload; route handlers against a throwaway database |
+| `apps/worker` | 12 | job tracker: cancel vs interruption, retries, stale-job recovery; queue settings on a real database |
+| `apps/web` | 79 | auth, CSRF, HTTP ranges, upload maths, status payload, integration statuses; route handlers against a throwaway database |
 
 ## 3. Worker integration test (Stage A pipeline)
 
@@ -129,7 +131,8 @@ seeing it work.
       explained in plain words. Nothing is invented.
 - [ ] A clip without sound, a very short clip and an unsupported file each give a clear, non-technical message.
 - [ ] Interrupted job: restart the worker (or the server) during a render. The job shows "will resume
-      automatically" and finishes without a second click. Cancelling a job stops it and says "Cancelled".
+      automatically" within about a minute and finishes without a second click (pg-boss heartbeat 30 s,
+      supervisor every 30 s, plus the retry delay). Cancelling a job stops it and says "Cancelled".
 - [ ] With no AI key configured, Settings says so and edits still generate (rules planner).
 - [ ] Deleting a project removes its clips, previews and exports (the storage folder or bucket prefix is gone).
 

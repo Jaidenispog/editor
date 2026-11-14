@@ -5,6 +5,11 @@ const bool = z
   .optional()
   .transform((v) => v === 'true' || v === '1');
 
+/** An optional whole number within [min, max]; an empty string counts as unset. */
+function optionalInt(min: number, max: number) {
+  return z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), z.coerce.number().int().min(min).max(max).optional());
+}
+
 /**
  * Every runtime setting the app and worker read from the environment, validated once at start-up.
  * Secrets stay server-side: nothing here is ever sent to the browser.
@@ -17,6 +22,13 @@ export const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1),
   /** Optional separate connection for the queue (e.g. Supabase session-mode pooler). Defaults to DATABASE_URL. */
   QUEUE_DATABASE_URL: z.string().min(1).optional(),
+  /**
+   * Largest database pool this process opens for app queries. Unset keeps the defaults (web 10, worker 8).
+   * Lower it on small hosted databases such as Supabase Micro; see docs/deployment.md.
+   */
+  DB_POOL_MAX: optionalInt(1, 100),
+  /** Largest pool the job queue (pg-boss) opens. Unset keeps the defaults (web 3, worker 6). */
+  QUEUE_POOL_MAX: optionalInt(1, 100),
 
   /** 32+ random bytes, base64 or hex. Signs session cookies and media links. */
   APP_SECRET: z.string().min(32),
@@ -49,7 +61,14 @@ export const EnvSchema = z.object({
   AI_VISION_MODEL: z.string().default('claude-haiku-5-5'),
   /** Upper bound on sampled frames sent to the vision model per clip. */
   AI_VISION_MAX_FRAMES_PER_CLIP: z.coerce.number().int().min(2).max(40).default(10),
-  TRANSCRIPTION_PROVIDER: z.enum(['none', 'openai']).default('none'),
+  /**
+   * Speech-to-text for captions. `deepgram` (Nova-3, word and utterance timestamps) is the recommended provider.
+   * `openai` uses whisper-1, which OpenAI has announced will shut down on 26 February 2027; newer OpenAI models
+   * return no timestamps, so they cannot time captions.
+   */
+  TRANSCRIPTION_PROVIDER: z.enum(['none', 'deepgram', 'openai']).default('none'),
+  DEEPGRAM_API_KEY: z.string().optional(),
+  DEEPGRAM_MODEL: z.string().min(1).default('nova-3'),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_TRANSCRIPTION_MODEL: z.string().default('whisper-1'),
 
@@ -86,6 +105,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   if (env.AI_PROVIDER === 'anthropic' && !env.ANTHROPIC_API_KEY) {
     throw new Error('AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY');
   }
+  if (env.TRANSCRIPTION_PROVIDER === 'deepgram' && !env.DEEPGRAM_API_KEY) {
+    throw new Error('TRANSCRIPTION_PROVIDER=deepgram requires DEEPGRAM_API_KEY');
+  }
   if (source === process.env) cached = env;
   return env;
 }
@@ -96,7 +118,12 @@ export function describeCapabilities(env: Env) {
     ai: {
       planner: env.AI_PROVIDER === 'anthropic' ? { provider: 'anthropic', model: env.AI_PLANNER_MODEL, effort: env.AI_PLANNER_EFFORT } : null,
       vision: env.AI_PROVIDER === 'anthropic' ? { provider: 'anthropic', model: env.AI_VISION_MODEL } : null,
-      transcription: env.TRANSCRIPTION_PROVIDER === 'openai' && env.OPENAI_API_KEY ? { provider: 'openai', model: env.OPENAI_TRANSCRIPTION_MODEL } : null,
+      transcription:
+        env.TRANSCRIPTION_PROVIDER === 'deepgram' && env.DEEPGRAM_API_KEY
+          ? { provider: 'deepgram', model: env.DEEPGRAM_MODEL }
+          : env.TRANSCRIPTION_PROVIDER === 'openai' && env.OPENAI_API_KEY
+            ? { provider: 'openai', model: env.OPENAI_TRANSCRIPTION_MODEL }
+            : null,
     },
     storage: { driver: env.STORAGE_DRIVER },
     integrations: {

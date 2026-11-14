@@ -154,7 +154,8 @@ NODE_ENV, LOG_LEVEL, APP_URL, DATABASE_URL, QUEUE_DATABASE_URL?, APP_SECRET (≥
 STORAGE_DRIVER=local|s3, STORAGE_LOCAL_ROOT, S3_ENDPOINT/S3_REGION/S3_BUCKET/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_FORCE_PATH_STYLE,
 MEDIA_LINK_TTL_SECONDS, MAX_UPLOAD_BYTES, WORKER_TMP_DIR, WORKER_CONCURRENCY, FFMPEG_PATH, FFPROBE_PATH, FFMPEG_THREADS,
 AI_PROVIDER=none|anthropic, ANTHROPIC_API_KEY, AI_PLANNER_MODEL, AI_PLANNER_EFFORT, AI_VISION_MODEL, AI_VISION_MAX_FRAMES_PER_CLIP,
-TRANSCRIPTION_PROVIDER=none|openai, OPENAI_API_KEY, OPENAI_TRANSCRIPTION_MODEL, META_APP_ID/SECRET, TIKTOK_CLIENT_KEY/SECRET,
+DB_POOL_MAX?, QUEUE_POOL_MAX?, TRANSCRIPTION_PROVIDER=none|deepgram|openai, DEEPGRAM_API_KEY, DEEPGRAM_MODEL (nova-3),
+OPENAI_API_KEY, OPENAI_TRANSCRIPTION_MODEL, META_APP_ID/SECRET, TIKTOK_CLIENT_KEY/SECRET,
 SQUARE_APPLICATION_ID/SECRET, SQUARE_ENVIRONMENT, SQUARE_WEBHOOK_SIGNATURE_KEY, RESEND_API_KEY, EMAIL_FROM, GOOGLE_CLIENT_ID/SECRET.
 Sandbox `.env` used: DATABASE_URL=postgres://postgres@127.0.0.1:55432/studio_assistant, APP_SECRET=dev-only-…,
 STORAGE_DRIVER=local, STORAGE_LOCAL_ROOT=./data/storage, WORKER_TMP_DIR=./tmp/worker, AI_PROVIDER=none.
@@ -193,8 +194,21 @@ STORAGE_DRIVER=local, STORAGE_LOCAL_ROOT=./data/storage, WORKER_TMP_DIR=./tmp/wo
    "head" region x 120–960 for boxes ending at y ≤ 840; subtitles centred, ≤ 480 px wide, ≥ 56 px type, bottom
    ≤ 1248. Needs a two-region SafeZone in core and matching changes in `packages/media/src/render/ass.ts` and its
    pixel-diff test. Deferred so the in-flight integration tests are not disturbed.
-2. **Transcription.** OpenAI `whisper-1` is scheduled to shut down on 26 Feb 2027 and newer OpenAI models give no
-   documented timestamps. Default to a Deepgram Nova-3 adapter (VAD-gated); keep whisper-1 as optional.
+2. **Transcription. Done (adapter); VAD gate still open.** OpenAI `whisper-1` is scheduled to shut down on 26 Feb
+   2027 and newer OpenAI models give no documented timestamps. `packages/ai/src/transcription/deepgram.ts` now
+   calls Deepgram's pre-recorded `POST /v1/listen` (Nova-3, `smart_format`, `punctuate`, `utterances`, header
+   `Authorization: Token …`, raw audio bytes with their content type) and maps utterance words to caption-sized
+   segments (≤ 42 characters per line, ≤ 2 lines, ≥ 0.7 s on screen, real word timings only; low-confidence
+   segments dropped). `TRANSCRIPTION_PROVIDER=deepgram` + `DEEPGRAM_API_KEY` (+ optional `DEEPGRAM_MODEL`) select
+   it; Settings → Integrations shows it as configured or missing. whisper-1 stays as the optional `openai`
+   provider. Still to do: the Silero VAD gate (only the DSP heuristic gates today), caching results by asset +
+   audio hash so retries do not pay twice, and checking the parser against a recorded live Deepgram response
+   (the response nesting of `utterances` was not verified; both places are read).
+   Also done in the same change: pg-boss `heartbeatSeconds` 30 on every queue and `superviseIntervalSeconds` 30
+   for the worker (existing queues are updated at worker start); optional `DB_POOL_MAX`/`QUEUE_POOL_MAX` with a
+   Supabase Micro budget in `docs/deployment.md`; more natural revision phrasings in `parseRevisionInstruction`
+   ("turn the music down", "cut it to 15", "half a minute", "no wipes", "keep it simple", "linger on the
+   reveal", "start with the finished cut").
 3. **Vision requests.** At most 20 images per Claude request; frames at 768 px; no person identification.
 4. **Export preset.** Level 4.1 at ≤ 30 fps (4.2 only for 60 fps), constant 30 fps unless every source is ≥ 50 fps,
    closed 2 s GOP, 180 s cap, ffprobe check after every export (the renderer currently uses level 4.2 always).

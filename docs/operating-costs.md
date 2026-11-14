@@ -95,10 +95,11 @@ Notes:
 ### Optional transcription (captions from speech)
 
 - Only clips with likely speech are transcribed.
-- OpenAI `whisper-1` is about USD 0.006 per minute (*confirm*). At most 4.5 min per project, that is
-  ≤ USD 0.03 per project and ≤ USD 0.54 per month.
-- The research notes that `whisper-1` is scheduled to shut down on 26 Feb 2027. A Deepgram adapter is
-  suggested as the replacement, at a similar per-minute cost (*confirm*).
+- Deepgram Nova-3 (`TRANSCRIPTION_PROVIDER=deepgram`, the recommended provider) is about USD 0.0043–0.0048 per
+  minute, billed per second, with a non-expiring USD 200 sign-up credit (*confirm*). At most 4.5 min per project,
+  that is ≤ USD 0.03 per project.
+- OpenAI `whisper-1` (optional) is about USD 0.006 per minute (*confirm*), ≤ USD 0.03 per project. OpenAI has
+  announced it shuts down on 26 Feb 2027, and its newer models return no timestamps for captions.
 
 ## 4. Hosting options
 

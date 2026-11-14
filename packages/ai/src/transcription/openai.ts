@@ -4,23 +4,12 @@ import { z } from 'zod';
 import { AppError, CancelledError, type TranscriptSegment } from '@studio/core';
 import type { Logger } from 'pino';
 import type { TranscribeOptions, Transcriber, TranscriptionResult } from '../types.js';
+import { audioMimeType } from './audio-mime.js';
 
 /** OpenAI's speech-to-text endpoint. */
 export const OPENAI_TRANSCRIPTION_URL = 'https://api.openai.com/v1/audio/transcriptions';
 /** The endpoint's upload limit; the worker sends a compressed mono speech track well under it. */
 export const OPENAI_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-
-const MIME_BY_EXT: Record<string, string> = {
-  '.m4a': 'audio/mp4',
-  '.mp4': 'audio/mp4',
-  '.mp3': 'audio/mpeg',
-  '.mpga': 'audio/mpeg',
-  '.mpeg': 'audio/mpeg',
-  '.wav': 'audio/wav',
-  '.webm': 'audio/webm',
-  '.ogg': 'audio/ogg',
-  '.flac': 'audio/flac',
-};
 
 const VerboseJsonSchema = z.object({
   language: z.string().nullable().optional(),
@@ -43,6 +32,9 @@ export interface OpenAiTranscriberOptions {
 
 /**
  * Speech-to-text through OpenAI's transcription endpoint (verbose JSON with segment timestamps).
+ * Optional second provider: OpenAI has announced that whisper-1 shuts down on 26 February 2027 (deprecation notice
+ * of 26 August 2026), and its newer transcription models return no documented timestamps, so they cannot time
+ * captions. Deepgram (`TRANSCRIPTION_PROVIDER=deepgram`) is the recommended provider.
  * Segments come back verbatim so captions can be checked against them; nothing is reworded.
  */
 export class OpenAiTranscriber implements Transcriber {
@@ -75,9 +67,8 @@ export class OpenAiTranscriber implements Transcriber {
       throw new AppError('UNSUPPORTED', 'This clip’s speech track is too large to transcribe (over 25 MB).', { details: { size } });
     }
     const bytes = await readFile(audioPath);
-    const ext = path.extname(audioPath).toLowerCase();
     const form = new FormData();
-    form.append('file', new Blob([bytes], { type: MIME_BY_EXT[ext] ?? 'application/octet-stream' }), path.basename(audioPath));
+    form.append('file', new Blob([bytes], { type: audioMimeType(audioPath) }), path.basename(audioPath));
     form.append('model', this.model);
     form.append('response_format', 'verbose_json');
     form.append('timestamp_granularities[]', 'segment');
