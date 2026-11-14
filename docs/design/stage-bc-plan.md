@@ -1102,3 +1102,19 @@ Requests carried to later packages (each is in that package's Owns list):
 - **Done by the lead after G2 started:** `ConnectionFacts.trendWatches` (optional; `TrendWatchFact` now lives in
   `apps/web/src/lib/integrations/types.ts`) is read by `getIntegrationStatuses`, so the `youtube_chart` card in the
   shared list shows the chart's real state. **WP5:** use the same facts for the hashtag card.
+
+### 10.1 Screenshot review findings left for the packages that own the files (2026-11-14)
+
+A read-only review of 29 screenshots of the production build (each finding checked against the source by a second
+agent) confirmed 23 UI findings; none were high severity. The lead fixes the ones outside G2's files on a separate
+branch, merged after G2. These stay with the package that owns the file:
+
+- **WP4:** Content Library cards (`apps/web/src/app/(app)/library/page.tsx`): the status pill shrinks and wraps
+  ("Preview / ready" on two lines) while the style name is cut short; give the pill `shrink-0 whitespace-nowrap` and the
+  title `min-w-0`. Publishing and other integration messages start with "Needs setup:" right under a "Needs setup"
+  pill; drop the prefix in `apps/web/src/lib/integrations/publishing.ts` (and any card WP4 adds). The Stage A
+  Publishing page still says edits are sent "to your TikTok drafts"; WP4's page must say TikTok is posted by hand from
+  the exported file (memo decision).
+- **WP2:** genres typed in the music upload are dropped (already listed above under WP2).
+- **WP7:** the email card still names Resend (Stage A wording); WP7 switches it to Postmark as the memo decides, and
+  drops the "Needs setup:" prefix.
