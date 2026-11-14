@@ -15,10 +15,11 @@ describe('music integration cards', () => {
     const entries = musicStatusEntries();
     expect(entries.map((e) => e.id)).toEqual(['spotify_reference', 'music_catalogue']);
     expect(entries.every((e) => e.connected === false && e.verified === false && e.liveMode === null && e.missingEnv.length === 0)).toBe(true);
-    expect(entries.find((e) => e.id === 'spotify_reference')).toMatchObject({ state: 'not_connected' });
+    expect(entries.find((e) => e.id === 'spotify_reference')).toMatchObject({ state: 'not_connected', stateLabel: 'Links only · no account needed' });
     expect(entries.find((e) => e.id === 'spotify_reference')?.message).toMatch(/not licensed for playing in the shop or in your videos/);
-    expect(entries.find((e) => e.id === 'music_catalogue')).toMatchObject({ state: 'not_configured' });
-    expect(entries.find((e) => e.id === 'music_catalogue')?.message).toMatch(/^Not available\. Download tracks from your business-eligible library/);
+    // Not a setup step the server could fix: a neutral "Not available" whose text starts with the manual route.
+    expect(entries.find((e) => e.id === 'music_catalogue')).toMatchObject({ state: 'unavailable' });
+    expect(entries.find((e) => e.id === 'music_catalogue')?.message).toMatch(/^Download tracks from your business-eligible library/);
     // The same cards appear in the shared status list (the Stage A wording test checks only its own ids).
     expect(buildMusicIntegrations({} as never, { connections: [], socialAccounts: [] })).toEqual(entries);
   });

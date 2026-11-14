@@ -10,16 +10,8 @@ import { Input, Textarea } from '@/components/ui/field';
 import { StatusPill } from '@/components/ui/status-pill';
 import { useToast } from '@/components/ui/toast';
 import { apiRequest, fieldErrors } from '@/lib/client/api-client';
+import { projectStatusPill } from '@/lib/shared/project-status';
 import type { StudioStatusDto } from '@/lib/shared/studio-dto';
-
-const PROJECT_STATUS_LABELS: Record<string, string> = {
-  draft: 'No clips yet',
-  analysing: 'Analysing clips',
-  ready: 'Ready to generate',
-  generating: 'Making edits',
-  complete: 'Edits ready',
-  archived: 'Archived',
-};
 
 /** Project title, client name and status, with "Edit details" and a permanent "Delete project". */
 export function ProjectHeader({ project, onChanged }: { project: StudioStatusDto['project']; onChanged: () => void }) {
@@ -76,6 +68,7 @@ export function ProjectHeader({ project, onChanged }: { project: StudioStatusDto
   };
 
   const confirmed = confirmText.trim().toLowerCase() === 'delete';
+  const pill = projectStatusPill(project.status);
 
   return (
     <header className="mb-6">
@@ -88,7 +81,7 @@ export function ProjectHeader({ project, onChanged }: { project: StudioStatusDto
           <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-charcoal-950 sm:text-3xl">{project.title}</h1>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-charcoal-600">
             {project.clientName ? <span>Client: {project.clientName}</span> : null}
-            <StatusPill status={project.status} label={PROJECT_STATUS_LABELS[project.status] ?? undefined} />
+            <StatusPill status={pill.status} label={pill.label} />
           </div>
           {project.notes ? <p className="mt-2 max-w-2xl text-sm whitespace-pre-line text-charcoal-600">{project.notes}</p> : null}
         </div>

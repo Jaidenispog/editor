@@ -117,6 +117,27 @@ export interface SoundState {
   originalVolume: number; // 0–100
 }
 
+/**
+ * The "Original sound" choices for a track. With no music, "Under the music" means nothing (it would make a version
+ * identical to the current one), so only "Off" (a silent export) and "Original sound only" are offered. A choice
+ * that is already selected stays listed so the radio group never loses its checked option.
+ */
+export function originalSoundChoices(track: string, selected?: SoundState['original']): Array<SoundState['original']> {
+  if (track !== 'none' || selected === 'under_music') return ['off', 'under_music', 'only'];
+  return ['off', 'only'];
+}
+
+/**
+ * The panel state after choosing a track ('none' for no music). The song section restarts at 0 for a new track
+ * (or returns to the saved one for the current track), and "Under the music" becomes "Original sound only" when the
+ * music is taken away, which is what the owner hears in that case.
+ */
+export function withTrack(state: SoundState, track: string, from: SoundState | null): SoundState {
+  const start = from && track === from.track ? from.start : 0;
+  const original = track === 'none' && state.original === 'under_music' ? 'only' : state.original;
+  return { ...state, track, start, original };
+}
+
 /** The patch for the changes made in the panel (only the fields that changed). */
 export function buildAudioPatch(from: SoundState, to: SoundState, keepCuts: boolean): Partial<z.infer<typeof AudioPatchSchema>> {
   const patch: Partial<z.infer<typeof AudioPatchSchema>> = {};

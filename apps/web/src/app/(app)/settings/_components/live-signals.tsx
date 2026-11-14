@@ -20,7 +20,8 @@ const FIRST_ROWS = 10;
 /** The pill for a source card: the watch's own state when it is on, else the shared integration state. */
 function sourcePill(source: TrendSourceDto): { status: string; label: string } {
   const watch = source.watch;
-  if (!watch) return source.status.state === 'not_configured' ? { status: 'not_configured', label: 'Not set up' } : { status: 'not_connected', label: 'Off' };
+  // Same words as Settings → Integrations for the same state ("Needs setup", "Missing server settings").
+  if (!watch) return source.status.state === 'not_configured' ? { status: 'not_configured', label: 'Needs setup' } : { status: 'not_connected', label: 'Off' };
   switch (watch.status) {
     case 'ok':
       return { status: 'connected', label: 'On · read-only' };
@@ -149,9 +150,16 @@ function SourceCard({
         <div className="mt-3 space-y-3">
           <p className="text-sm text-charcoal-600">{source.status.message}</p>
           {source.status.missingEnv.length ? (
-            <p className="text-xs text-charcoal-500">
-              Server setting needed: <code className="rounded bg-charcoal-100 px-1.5 py-0.5">{source.status.missingEnv.join(', ')}</code>
-            </p>
+            <div>
+              <p className="text-xs font-medium text-charcoal-500">Missing server settings</p>
+              <ul className="mt-1 flex flex-wrap gap-1.5">
+                {source.status.missingEnv.map((name) => (
+                  <li key={name}>
+                    <code className="rounded bg-charcoal-100 px-1.5 py-0.5 text-xs text-charcoal-700">{name}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ) : isOwner ? (
             <Button size="sm" onClick={add} loading={busy === 'add'}>
               Show the chart

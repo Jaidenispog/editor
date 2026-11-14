@@ -29,6 +29,12 @@ export interface IntegrationStatus {
   liveMode?: LiveMode | null;
   /** A recorded live verification exists (first real post, Square self-test). Never set by a connection check. */
   verified?: boolean;
+  /**
+   * Words for the status pill when the state word alone would mislead, for example a links-only card that has no
+   * account to connect ("Links only · no account needed" rather than "Ready to connect"). The pill keeps the state's
+   * colour. Leave unset to use the shared words for the state.
+   */
+  stateLabel?: string;
 }
 
 /** The state word for a card: the explicit `state`, or one derived from the older booleans. */

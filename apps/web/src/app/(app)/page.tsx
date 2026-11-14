@@ -4,7 +4,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { schema } from '@studio/db';
-import { integrationState } from '@/components/app/integration-status-list';
+import { countNeedingSetup, integrationPill } from '@/components/app/integration-pill';
 import { JobList } from '@/components/app/job-list';
 import { NewProjectButton } from '@/components/app/new-project-dialog';
 import { ProjectCard } from '@/components/app/project-card';
@@ -38,7 +38,7 @@ export default async function DashboardPage() {
   const [projects, jobs, integrations] = await Promise.all([listProjects(user, { limit: 6 }), activeJobsWithTitles(user), getIntegrationStatuses()]);
   const firstName = user.displayName.split(/\s+/)[0] ?? '';
   const active = integrations.filter((i) => i.connected).length;
-  const needsSetup = integrations.filter((i) => !i.configured).length;
+  const needsSetup = countNeedingSetup(integrations);
 
   return (
     <>
@@ -97,14 +97,16 @@ export default async function DashboardPage() {
             <CardBody className="pt-3">
               <ul className="space-y-2.5">
                 {integrations.map((i) => {
-                  const state = integrationState(i);
+                  const pill = integrationPill(i);
                   return (
                     <li key={i.id} className="flex items-center justify-between gap-3 text-sm">
-                      <span className="flex min-w-0 items-center gap-2 truncate text-charcoal-800">
+                      <span className="flex min-w-0 items-center gap-2 text-charcoal-800">
                         <PlugZap className="size-4 shrink-0 text-charcoal-400" aria-hidden="true" />
-                        {i.name}
+                        <span className="min-w-0 truncate" title={i.name}>
+                          {i.name}
+                        </span>
                       </span>
-                      <StatusPill status={state === 'connected' ? 'connected' : state === 'ready' ? 'queued' : 'needs_setup'} label={state === 'connected' ? 'Active' : state === 'ready' ? 'Ready' : 'Needs setup'} />
+                      <StatusPill status={pill.status} label={pill.label} />
                     </li>
                   );
                 })}

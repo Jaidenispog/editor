@@ -331,7 +331,6 @@ function TrendCard({
           {item.summary ? <p className="mt-1.5 text-sm text-charcoal-600 [overflow-wrap:anywhere]">{item.summary}</p> : null}
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <Badge>{TREND_CATEGORY_LABELS[item.category] ?? item.category}</Badge>
-            {curated && item.editorSuggestion ? <Badge tone="neutral">Editor suggestion — no external source</Badge> : null}
             {curated && item.dueForReview ? <Badge tone="warning">Due for review</Badge> : null}
           </div>
           {item.kind === 'noted' && item.sourceUrl ? (

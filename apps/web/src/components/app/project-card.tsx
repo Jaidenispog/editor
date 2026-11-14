@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { StatusPill } from '@/components/ui/status-pill';
 import { RelativeTime } from '@/components/ui/relative-time';
 import type { ProjectSummaryDto } from '@/lib/shared/dto';
+import { projectStatusPill } from '@/lib/shared/project-status';
 
 /** Plain-language summary of where a project is up to. */
 export function projectProgressText(p: ProjectSummaryDto): string {
@@ -15,7 +16,7 @@ export function projectProgressText(p: ProjectSummaryDto): string {
 
 /** Card linking to a project in the Video Studio. */
 export function ProjectCard({ project }: { project: ProjectSummaryDto }) {
-  const status = project.latestGeneration?.status ?? project.status;
+  const pill = projectStatusPill(project.status, project.latestGeneration?.status);
   return (
     <Link
       href={`/studio/${project.id}`}
@@ -25,7 +26,7 @@ export function ProjectCard({ project }: { project: ProjectSummaryDto }) {
         <span className="flex size-10 items-center justify-center rounded-lg bg-charcoal-900 text-accent" aria-hidden="true">
           {project.assetCount ? <Film className="size-5" /> : <Clapperboard className="size-5" />}
         </span>
-        <StatusPill status={status} />
+        <StatusPill status={pill.status} label={pill.label} />
       </div>
       <h3 className="mt-4 truncate text-base font-semibold text-charcoal-950 group-hover:underline group-hover:decoration-[var(--accent)] group-hover:decoration-2 group-hover:underline-offset-4">
         {project.title}
