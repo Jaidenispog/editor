@@ -20,6 +20,9 @@ import { handleCleanup } from './handlers/cleanup.js';
 
 type Handler<T extends JobType> = (ctx: WorkerContext, run: TrackedRun, payload: JobPayload<T>) => Promise<void>;
 
+/** How often rows left "running" by a dead worker are looked for after start-up. */
+const STALE_SWEEP_MS = 30_000;
+
 /**
  * Local development keeps one .env at the repository root that the web app and the worker share.
  * Values already in the process environment always win (the same rule as apps/web/src/lib/env.ts).
@@ -63,11 +66,22 @@ export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => P
   };
 
   await queue.start();
-  const recovered = await recoverStaleJobs(ctx.db, logger, async (type, id) => {
+  const lookupBossJob = async (type: JobType, id: string) => {
     const job = await queue.getBossJob(type, id);
     return job ? { state: job.state } : null;
-  });
+  };
+  const recovered = await recoverStaleJobs(ctx.db, logger, lookupBossJob);
   if (recovered) logger.warn({ recovered }, 'recovered jobs left running by a previous worker');
+  // A worker that dies while this one keeps running (or one killed moments before this start-up) leaves rows
+  // that only go stale later, so the sweep repeats; pg-boss itself retries the underlying jobs.
+  const sweep = setInterval(() => {
+    recoverStaleJobs(ctx.db, logger, lookupBossJob)
+      .then((n) => {
+        if (n) logger.warn({ recovered: n }, 'recovered jobs whose worker stopped heart-beating');
+      })
+      .catch((err: unknown) => logger.warn({ err }, 'stale job sweep failed'));
+  }, STALE_SWEEP_MS);
+  sweep.unref();
 
   const registered: JobType[] = [];
   const register = async <T extends JobType>(type: T, handler: Handler<T>, concurrency: number) => {
@@ -122,6 +136,7 @@ export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => P
   const stop = async () => {
     if (stopping) return;
     stopping = true;
+    clearInterval(sweep);
     logger.info('worker stopping (waiting for active jobs)');
     try {
       await queue.stop(true);

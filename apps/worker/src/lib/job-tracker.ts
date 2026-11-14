@@ -1,10 +1,16 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, lt, sql } from 'drizzle-orm';
 import type { Logger } from 'pino';
 import { CancelledError, errorMessage, isAppError, newId, type JobType } from '@studio/core';
 import { schema, type Database } from '@studio/db';
 import { QUEUE_SETTINGS } from '@studio/queue';
 
-const HEARTBEAT_MS = 10_000;
+/** How often a running job writes its heartbeat (and checks the owner's cancel flag). */
+export const HEARTBEAT_MS = 10_000;
+/**
+ * A "running" row whose heartbeat is older than this belongs to a worker that died (4.5 missed heartbeats).
+ * Kept well under pg-boss's own 60 s heartbeat so the UI says "will resume" before the queue retries the job.
+ */
+export const STALE_AFTER_MS = 45_000;
 const PROGRESS_MIN_INTERVAL_MS = 1_500;
 
 export interface TrackedRun {
@@ -28,6 +34,8 @@ export interface TrackedJobInput {
   retryCount: number;
   bossSignal: AbortSignal;
   workerId: string;
+  /** Heartbeat interval override (tests); defaults to HEARTBEAT_MS. */
+  heartbeatMs?: number;
 }
 
 /**
@@ -78,13 +86,18 @@ export async function runTracked<T>(
   const heartbeat = setInterval(() => {
     void (async () => {
       try {
-        await db.update(schema.jobs).set({ heartbeatAt: new Date(), updatedAt: new Date() }).where(eq(schema.jobs.id, jobId));
+        // A stale-job sweep may have marked this row "queued" while the database was briefly unreachable;
+        // the job is still running here, so put the row back. Cancelled or finished rows are left alone.
+        await db
+          .update(schema.jobs)
+          .set({ heartbeatAt: new Date(), updatedAt: new Date(), status: sql`case when ${schema.jobs.status} = 'queued' then 'running' else ${schema.jobs.status} end` })
+          .where(eq(schema.jobs.id, jobId));
         await checkCancelFlag();
       } catch (err) {
         log.warn({ err }, 'heartbeat failed');
       }
     })();
-  }, HEARTBEAT_MS);
+  }, input.heartbeatMs ?? HEARTBEAT_MS);
 
   let lastProgressAt = 0;
   let lastProgress = 0;
@@ -198,15 +211,16 @@ export function friendlyFailure(err: unknown): string {
 }
 
 /**
- * Startup recovery: rows left "running" by a worker that died. The queue retries the underlying job when its
- * heartbeat lapses, so the row goes back to "queued"; if the queue already gave up, the row is failed.
+ * Recovery for rows left "running" by a worker that died (run at start-up and then periodically). The queue
+ * retries the underlying job once its own heartbeat lapses, so the row goes back to "queued" with a plain
+ * message; if the queue already gave up on the job, the row is failed so the owner can retry it.
  */
-export async function recoverStaleJobs(db: Database, logger: Logger, lookup: (type: JobType, bossJobId: string) => Promise<{ state: string } | null>, staleAfterMs = 2 * 60_000): Promise<number> {
+export async function recoverStaleJobs(db: Database, logger: Logger, lookup: (type: JobType, bossJobId: string) => Promise<{ state: string } | null>, staleAfterMs = STALE_AFTER_MS): Promise<number> {
   const cutoff = new Date(Date.now() - staleAfterMs);
   const stale = await db
     .select({ id: schema.jobs.id, type: schema.jobs.type, bossJobId: schema.jobs.bossJobId })
     .from(schema.jobs)
-    .where(and(eq(schema.jobs.status, 'running'), sql`${schema.jobs.heartbeatAt} < ${cutoff}`));
+    .where(and(eq(schema.jobs.status, 'running'), lt(schema.jobs.heartbeatAt, cutoff)));
   let recovered = 0;
   for (const row of stale) {
     let next: 'queued' | 'failed' = 'queued';
@@ -216,15 +230,18 @@ export async function recoverStaleJobs(db: Database, logger: Logger, lookup: (ty
     } else {
       next = 'failed';
     }
-    await db
+    // Only if it is still stale: a retry may have picked the job up since the select above.
+    const updated = await db
       .update(schema.jobs)
       .set({
         status: next,
-        message: next === 'queued' ? 'Recovered after a worker restart; waiting to resume' : 'The worker restarted before this job could finish. Please retry.',
+        message: next === 'queued' ? 'Interrupted when the worker stopped unexpectedly; it will resume automatically' : 'The worker stopped before this job could finish. Please retry.',
         finishedAt: next === 'failed' ? new Date() : null,
         updatedAt: new Date(),
       })
-      .where(eq(schema.jobs.id, row.id));
+      .where(and(eq(schema.jobs.id, row.id), eq(schema.jobs.status, 'running'), lt(schema.jobs.heartbeatAt, cutoff)))
+      .returning({ id: schema.jobs.id });
+    if (updated.length === 0) continue;
     recovered++;
     logger.warn({ jobId: row.id, next }, 'recovered stale job');
   }

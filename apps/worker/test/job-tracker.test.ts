@@ -3,7 +3,7 @@ import pino from 'pino';
 import { eq } from 'drizzle-orm';
 import { CancelledError, JOB_TYPES, newId } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
-import { recoverStaleJobs, runTracked } from '../src/lib/job-tracker.js';
+import { STALE_AFTER_MS, recoverStaleJobs, runTracked } from '../src/lib/job-tracker.js';
 import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 
 const logger = pino({ level: 'silent' });
@@ -102,5 +102,65 @@ describe.skipIf(skip)('runTracked', () => {
     expect(n).toBe(2);
     expect((await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.id, stale) }))?.status).toBe('queued');
     expect((await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.id, dead) }))?.status).toBe('failed');
+  });
+
+  it('only treats a row as stale after several missed heartbeats', async () => {
+    const recent = newId();
+    const lapsed = newId();
+    await handle.db.insert(schema.jobs).values([
+      { id: recent, type: JOB_TYPES.INGEST_ASSET, payload: {}, status: 'running', heartbeatAt: new Date(Date.now() - 20_000), bossJobId: 'boss-recent' },
+      { id: lapsed, type: JOB_TYPES.INGEST_ASSET, payload: {}, status: 'running', heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 5_000), bossJobId: 'boss-lapsed' },
+    ]);
+    const n = await recoverStaleJobs(handle.db, logger, async () => ({ state: 'active' }));
+    expect(n).toBe(1);
+    expect((await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.id, recent) }))?.status).toBe('running');
+    const row = await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.id, lapsed) });
+    expect(row?.status).toBe('queued');
+    expect(row?.message).toMatch(/resume automatically/);
+  });
+
+  it('puts its own row back to running if a sweep marked it queued while it was still alive', async () => {
+    const id = newId();
+    await handle.db.insert(schema.jobs).values({ id, type: JOB_TYPES.RENDER_PREVIEW, payload: {}, status: 'queued' });
+    await runTracked(
+      handle.db,
+      logger,
+      { type: JOB_TYPES.RENDER_PREVIEW, bossJobId: newId(), trackingJobId: id, payload: {}, retryCount: 0, bossSignal: new AbortController().signal, workerId: 'w1', heartbeatMs: 40 },
+      async () => {
+        await handle.db.update(schema.jobs).set({ status: 'queued' }).where(eq(schema.jobs.id, id));
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        expect((await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.id, id) }))?.status).toBe('running');
+      },
+    );
+    expect((await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.id, id) }))?.status).toBe('succeeded');
+  });
+
+  it('warns about a queue abort only while the work is still running', async () => {
+    const lines: string[] = [];
+    const capture = pino({ level: 'warn' }, { write: (line: string) => void lines.push(line) });
+    const boss = new AbortController();
+    await runTracked(
+      handle.db,
+      capture,
+      { type: JOB_TYPES.CLEANUP, bossJobId: newId(), payload: {}, retryCount: 0, bossSignal: boss.signal, workerId: 'w1' },
+      async () => 'done',
+    );
+    // pg-boss aborts the job signal after every normal completion; that is not worth a warning.
+    boss.abort(new Error('settled'));
+    expect(lines.filter((l) => l.includes('queue aborted the job'))).toHaveLength(0);
+
+    const expired = new AbortController();
+    await expect(
+      runTracked(
+        handle.db,
+        capture,
+        { type: JOB_TYPES.CLEANUP, bossJobId: newId(), payload: {}, retryCount: 0, bossSignal: expired.signal, workerId: 'w1' },
+        async (run) => {
+          expired.abort(new CancelledError('expired'));
+          run.checkCancelled();
+        },
+      ),
+    ).rejects.toBeInstanceOf(CancelledError);
+    expect(lines.filter((l) => l.includes('queue aborted the job'))).toHaveLength(1);
   });
 });
