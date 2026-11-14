@@ -85,6 +85,9 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...base, META_DIALOG_BASE_URL: 'http://127.0.0.1:4555' }).META_DIALOG_BASE_URL).toBe('http://127.0.0.1:4555');
     expect(loadEnv({ ...base, META_DIALOG_BASE_URL: '' }).META_DIALOG_BASE_URL).toBeUndefined();
     expect(() => loadEnv({ ...base, META_DIALOG_BASE_URL: 'not a url' })).toThrow(/META_DIALOG_BASE_URL/);
+    // Postmark's API host likewise (Stage C browser test only; the worker reads it through testOnlyBaseUrl).
+    expect(loadEnv({ ...base, POSTMARK_API_BASE_URL: 'http://127.0.0.1:4556' }).POSTMARK_API_BASE_URL).toBe('http://127.0.0.1:4556');
+    expect(loadEnv({ ...base, POSTMARK_API_BASE_URL: '' }).POSTMARK_API_BASE_URL).toBeUndefined();
   });
 
   it('reads optional pool sizes as whole numbers', () => {

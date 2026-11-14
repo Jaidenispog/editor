@@ -252,10 +252,14 @@ suite('Square routes (database-backed)', () => {
     // Two active locations and none chosen: nothing is shown until the owner chooses.
     expect((await call(list.GET, 'GET', '/api/appointments?view=upcoming')).json.bookings).toEqual([]);
     signIn(owner);
+    const syncsBefore = new Set((await d.select({ id: s.jobs.id }).from(s.jobs).where(eq(s.jobs.type, 'square.sync'))).map((j) => j.id));
     expect((await call(settingsRoute.PATCH, 'PATCH', '/api/integrations/square', {}, { locationId: 'LOC_1' })).status).toBe(200);
     // Choosing removes the other location's copied bookings.
     expect(await d.select().from(s.bookings).where(eq(s.bookings.id, otherLocation))).toHaveLength(0);
     expect((await d.select().from(s.auditLog).where(eq(s.auditLog.action, 'integration.square.location_selected'))).at(-1)?.data).toMatchObject({ locationId: 'LOC_1', otherLocationBookingsRemoved: 1 });
+    // The first copy for the chosen location reads the wide connect range, so its past bookings are copied straight away.
+    const queued = (await d.select().from(s.jobs).where(eq(s.jobs.type, 'square.sync'))).filter((j) => !syncsBefore.has(j.id));
+    expect(queued.map((j) => j.payload)).toEqual([{ reason: 'connect' }]);
     signIn(staff);
     const upcoming = await call(list.GET, 'GET', '/api/appointments?view=upcoming');
     // "Upcoming" starts at the beginning of today in Melbourne, so the booking from 3 hours ago is listed too when the

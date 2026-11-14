@@ -1,9 +1,9 @@
 import type { HTMLAttributes, ReactNode } from 'react';
 import { cn } from '@/lib/shared/cn';
 
-/** White rounded surface used for every content block. */
+/** White rounded surface used for every content block (`data-card` lets tests find a card without styling classes). */
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('rounded-[var(--radius-card)] border border-charcoal-200/70 bg-white shadow-[var(--shadow-card)]', className)} {...props} />;
+  return <div data-card="" className={cn('rounded-[var(--radius-card)] border border-charcoal-200/70 bg-white shadow-[var(--shadow-card)]', className)} {...props} />;
 }
 
 /** Card heading row with an optional description and actions on the right. */

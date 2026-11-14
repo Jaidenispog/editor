@@ -24,6 +24,7 @@ export interface FakeSquareError {
 
 /** Endpoint names used for error injection and call counting. */
 export type SquareEndpoint =
+  | 'authorize'
   | 'token'
   | 'token_status'
   | 'revoke'
@@ -323,6 +324,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown> |
 }
 
 function endpointFor(method: string, path: string): SquareEndpoint | 'unknown' {
+  if (path === '/oauth2/authorize' && method === 'GET') return 'authorize';
   if (path === '/oauth2/token') return 'token';
   if (path === '/oauth2/token/status') return 'token_status';
   if (path === '/oauth2/revoke') return 'revoke';
@@ -350,8 +352,18 @@ function endpointFor(method: string, path: string): SquareEndpoint | 'unknown' {
 
 const DAY = 24 * 3600_000;
 
-/** Starts the fake on 127.0.0.1 with a random port. */
-export async function startFakeSquareServer(initial: Partial<SquareScenario> = {}): Promise<FakeSquareServer> {
+/** Where the fake listens (default 127.0.0.1 on a random port). */
+export interface FakeSquareListenOptions {
+  port?: number;
+  host?: string;
+}
+
+/**
+ * Starts the fake on 127.0.0.1 with a random port (or `listen`). Besides the API it plays Square's authorise page for
+ * a browser test: `GET /oauth2/authorize` "approves" at once and redirects to `redirect_uri` with the scenario's code
+ * and the state it was given (the requested `scope` is recorded with the call).
+ */
+export async function startFakeSquareServer(initial: Partial<SquareScenario> = {}, listen: FakeSquareListenOptions = {}): Promise<FakeSquareServer> {
   const scenario: SquareScenario = { ...defaultSquareScenario(), ...initial };
   const calls: SquareCall[] = [];
   const notFound = (res: ServerResponse) => squareError(res, { status: 404, code: 'NOT_FOUND', detail: 'Not found' });
@@ -365,6 +377,17 @@ export async function startFakeSquareServer(initial: Partial<SquareScenario> = {
       const auth = req.headers['authorization'];
       calls.push({ endpoint, method, path: u.pathname, query: Object.fromEntries(u.searchParams), body, authorization: typeof auth === 'string' ? auth : undefined });
       if (endpoint === 'unknown') return notFound(res);
+      if (endpoint === 'authorize') {
+        const redirect = u.searchParams.get('redirect_uri');
+        const state = u.searchParams.get('state');
+        if (!redirect || !state || !u.searchParams.get('client_id')) return squareError(res, { status: 400, code: 'BAD_REQUEST', detail: 'client_id, state and redirect_uri are required' });
+        const back = new URL(redirect);
+        back.searchParams.set('code', scenario.oauthCode);
+        back.searchParams.set('state', state);
+        res.writeHead(302, { location: back.toString() });
+        res.end();
+        return;
+      }
       const injected = scenario.failOnce[endpoint];
       if (injected) {
         delete scenario.failOnce[endpoint];
@@ -507,7 +530,7 @@ export async function startFakeSquareServer(initial: Partial<SquareScenario> = {
       res.end(JSON.stringify({ errors: [{ category: 'API_ERROR', code: 'INTERNAL_SERVER_ERROR', detail: String(err) }] }));
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => server.listen(listen.port ?? 0, listen.host ?? '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}`,

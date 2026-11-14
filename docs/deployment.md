@@ -389,6 +389,8 @@ not allow it for this app setup, the card says "Not available" and everything el
   that itself and flags the client when Postmark still refuses.
 - Outbound HTTPS from the worker to `api.postmarkapp.com` and `places.googleapis.com`, plus DNS look-ups for the
   advisory DMARC / Return-Path hints.
+  `POSTMARK_API_BASE_URL` is for tests only and ignored unless `NODE_ENV=test` (the worker then always calls
+  `https://api.postmarkapp.com`).
 - The worker schedules `email.dispatch` every minute, `email.automation.sweep` every 10 minutes, the read-only
   `email.provider.check` daily at 4:37 am and `reviews.places.sync` daily at 5:41 am Melbourne time. Press "Check
   connection" (Settings → Integrations) after setting Postmark up; the check never sends.

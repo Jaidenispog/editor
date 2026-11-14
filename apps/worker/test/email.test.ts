@@ -10,12 +10,13 @@ import { describe, expect, it } from 'vitest';
 import { ALL_JOB_TYPES } from '@studio/core';
 import { QUEUE_SETTINGS } from '@studio/queue';
 import { POSTMARK_API_BASE, PostmarkProvider, mapSendResponse, parsePostmarkWebhook } from '../src/lib/email/postmark.js';
-import { createEmailProvider } from '../src/lib/email/provider.js';
+import { createEmailProvider, postmarkSettings } from '../src/lib/email/provider.js';
 import { hashLinkToken, newLinkToken } from '../src/lib/email/tokens.js';
 import { dnsHints } from '../src/handlers/email-check.js';
 import { placesErrorFor } from '../src/lib/google/places.js';
 import { emailModule } from '../src/modules/email/index.js';
 import { fakeFetch, json } from './helpers/fakes.js';
+import { startFakePostmarkServer } from './fakes/postmark-server.js';
 
 const fixture = (name: string): unknown => JSON.parse(readFileSync(path.join(import.meta.dirname, 'fixtures', 'postmark', `${name}.json`), 'utf8'));
 const logger = pino({ level: 'silent' });
@@ -128,6 +129,58 @@ describe('PostmarkProvider against a fake fetch', () => {
     expect(createEmailProvider({ env: env({}), logger })).toBeNull();
     expect(createEmailProvider({ env: env({ EMAIL_PROVIDER: 'postmark', POSTMARK_SERVER_TOKEN: 't' }), logger })).toBeNull();
     expect(createEmailProvider({ env: env({ EMAIL_PROVIDER: 'postmark', POSTMARK_SERVER_TOKEN: 't', EMAIL_FROM: 'a@b.example' }), logger })).toBeInstanceOf(PostmarkProvider);
+  });
+
+  it('calls a local fake host only under NODE_ENV=test (POSTMARK_API_BASE_URL is inert in production)', async () => {
+    const env = (over: Record<string, unknown>) =>
+      ({ EMAIL_PROVIDER: 'postmark', POSTMARK_SERVER_TOKEN: 't', EMAIL_FROM: 'a@b.example', POSTMARK_TRANSACTIONAL_STREAM: 'outbound', POSTMARK_BROADCAST_STREAM: 'broadcast', POSTMARK_API_BASE_URL: 'http://127.0.0.1:4999/', ...over }) as never;
+    expect(postmarkSettings(env({ NODE_ENV: 'production' }))?.apiBase).toBe(POSTMARK_API_BASE);
+    expect(postmarkSettings(env({ NODE_ENV: 'development' }))?.apiBase).toBe(POSTMARK_API_BASE);
+    expect(postmarkSettings(env({ NODE_ENV: 'test' }))?.apiBase).toBe('http://127.0.0.1:4999');
+    expect(postmarkSettings(env({ NODE_ENV: 'test', POSTMARK_API_BASE_URL: undefined }))?.apiBase).toBe(POSTMARK_API_BASE);
+    const sent = () => fakeFetch(() => json(200, { ErrorCode: 0, MessageID: 'pm-1', SubmittedAt: '2026-11-14T00:00:00Z' }));
+    const live = sent();
+    const msg = { emailMessageId: 'm1', to: 'c@example.com', from: 'a@b.example', replyTo: null, subject: 's', html: '<p>x</p>', text: 'x', stream: 'transactional' as const, tag: 'custom', metadata: {} };
+    await new PostmarkProvider({ fetch: live, logger }, postmarkSettings(env({ NODE_ENV: 'production' }))!).send(msg, signal);
+    expect(live.calls[0]?.url).toBe(`${POSTMARK_API_BASE}/email`);
+    const local = sent();
+    await new PostmarkProvider({ fetch: local, logger }, postmarkSettings(env({ NODE_ENV: 'test' }))!).send(msg, signal);
+    expect(local.calls[0]?.url).toBe('http://127.0.0.1:4999/email');
+  });
+});
+
+describe('PostmarkProvider against the HTTP fake Postmark (test/fakes/postmark-server.ts)', () => {
+  // The browser test (apps/web/e2e/run-stage-c-bookings.sh) runs the real worker against this fake; this pins the
+  // fake's response shapes to what the provider parses, so the two cannot drift apart unnoticed.
+  it('checks read-only, sends once, finds the send again and adds a suppression', async () => {
+    const fake = await startFakePostmarkServer({ serverToken: 'server-token', webhookUrl: 'http://localhost:3800/api/webhooks/postmark' });
+    try {
+      const p = new PostmarkProvider({ fetch: globalThis.fetch, logger }, { ...settings, apiBase: fake.url });
+      expect(await p.check(signal)).toMatchObject({ state: 'connected', deliveryType: 'live', streams: { transactional: true, broadcast: true }, webhooks: { configured: true }, serverName: 'Fake Postmark server' });
+      expect(fake.counts).toMatchObject({ server: 1, message_streams: 1, webhooks: 2, email: 0 });
+      expect(fake.sends).toHaveLength(0);
+
+      const msg = { emailMessageId: 'm1', to: 'client@example.com', from: settings.from, replyTo: 'hello@studio.example', subject: 'Hi', html: '<p>Hi</p>', text: 'Hi', stream: 'broadcast' as const, tag: 'campaign', metadata: { emailMessageId: 'm1' } };
+      const r = await p.send(msg, signal);
+      expect(r).toMatchObject({ ok: true });
+      expect(fake.sends).toHaveLength(1);
+      expect(fake.sends[0]).toMatchObject({ to: 'client@example.com', stream: 'broadcast', metadata: { emailMessageId: 'm1' } });
+      expect(r.ok && r.providerMessageId).toBe(fake.sends[0]?.messageId);
+      expect(await p.findSent('m1', 'client@example.com', signal)).toBe(fake.sends[0]?.messageId);
+      expect(await p.findSent('m2', 'client@example.com', signal)).toBeNull();
+      await p.suppress('client@example.com', 'broadcast', signal);
+      expect(fake.counts.suppressions).toBe(1);
+
+      const noHooks = await startFakePostmarkServer({ serverToken: 'server-token' });
+      try {
+        expect(await new PostmarkProvider({ fetch: globalThis.fetch, logger }, { ...settings, apiBase: noHooks.url }).check(signal)).toMatchObject({ state: 'needs_attention', webhooks: { configured: false } });
+      } finally {
+        await noHooks.close();
+      }
+      expect(await new PostmarkProvider({ fetch: globalThis.fetch, logger }, { ...settings, token: 'wrong', apiBase: fake.url }).check(signal)).toMatchObject({ state: 'needs_reauth' });
+    } finally {
+      await fake.close();
+    }
   });
 });
 

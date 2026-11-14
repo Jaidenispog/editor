@@ -1,6 +1,6 @@
-import type { Env } from '@studio/config';
+import { testOnlyBaseUrl, type Env } from '@studio/config';
 import type { WorkerContext } from '../../context.js';
-import { PostmarkProvider } from './postmark.js';
+import { POSTMARK_API_BASE, PostmarkProvider } from './postmark.js';
 
 /**
  * The email provider interface (email design §3.1). Worker only: the web app never calls the provider. Postmark is
@@ -72,9 +72,16 @@ export interface EmailProvider {
 }
 
 /** The settings Postmark needs, or null when email sending is not set up on the server. */
-export function postmarkSettings(env: Env): { token: string; from: string; transactionalStream: string; broadcastStream: string } | null {
+export function postmarkSettings(env: Env): { token: string; from: string; transactionalStream: string; broadcastStream: string; apiBase: string } | null {
   if (env.EMAIL_PROVIDER !== 'postmark' || !env.POSTMARK_SERVER_TOKEN || !env.EMAIL_FROM) return null;
-  return { token: env.POSTMARK_SERVER_TOKEN, from: env.EMAIL_FROM, transactionalStream: env.POSTMARK_TRANSACTIONAL_STREAM, broadcastStream: env.POSTMARK_BROADCAST_STREAM };
+  return {
+    token: env.POSTMARK_SERVER_TOKEN,
+    from: env.EMAIL_FROM,
+    transactionalStream: env.POSTMARK_TRANSACTIONAL_STREAM,
+    broadcastStream: env.POSTMARK_BROADCAST_STREAM,
+    // A local fake only under NODE_ENV=test (the Stage C browser test); every deployment calls Postmark itself.
+    apiBase: testOnlyBaseUrl(env, env.POSTMARK_API_BASE_URL) ?? POSTMARK_API_BASE,
+  };
 }
 
 /** The Postmark provider when `EMAIL_PROVIDER=postmark` and its token and sender are set, otherwise null. */
