@@ -127,6 +127,11 @@ export class JobQueue {
     this.started = true;
   }
 
+  /** A cheap round trip on the queue's own connection pool; throws when the queue database cannot be reached. */
+  async ping(): Promise<void> {
+    await this.boss.getDb().executeSql('select 1');
+  }
+
   async stop(graceful = true): Promise<void> {
     if (!this.started) return;
     await this.boss.stop({ graceful, timeout: 30_000 });

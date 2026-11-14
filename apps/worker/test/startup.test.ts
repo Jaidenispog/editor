@@ -10,7 +10,9 @@ import {
   connectionSecrets,
   databaseTarget,
   describeFatalStartupError,
+  isConfigurationError,
   redact,
+  startupFailure,
   waitForDatabase,
   waitingMessage,
   type Sleep,
@@ -203,6 +205,47 @@ describe('start-up failure messages', () => {
   it('explains configuration problems in plain words', () => {
     expect(describeFatalStartupError(coded('28P01'), LOCAL)).toMatch(/user name or password in DATABASE_URL \(\.env\) was refused/);
     expect(describeFatalStartupError(coded('3D000'), LOCAL)).toMatch(/"studio_assistant" does not exist .*scripts\/local-postgres\.sh start/);
+  });
+
+  it('only suggests local-postgres.sh for the database that script creates', () => {
+    const before = process.env.LOCAL_PG_DB;
+    delete process.env.LOCAL_PG_DB;
+    try {
+      const typo = databaseTarget('postgres://postgres@127.0.0.1:5433/nosuchdb');
+      const message = describeFatalStartupError(coded('3D000'), typo);
+      expect(message).toMatch(/"nosuchdb" does not exist/);
+      expect(message).toMatch(/Check the database name in DATABASE_URL \(\.env\)/);
+      expect(message).not.toContain('local-postgres');
+      process.env.LOCAL_PG_DB = 'nosuchdb';
+      expect(describeFatalStartupError(coded('3D000'), typo)).toContain('bash scripts/local-postgres.sh start');
+      // A remote server never gets the local script hint.
+      expect(describeFatalStartupError(coded('3D000'), databaseTarget('postgres://u@db.example.com/studio_assistant'))).not.toContain('local-postgres');
+    } finally {
+      if (before === undefined) delete process.env.LOCAL_PG_DB;
+      else process.env.LOCAL_PG_DB = before;
+    }
+  });
+
+  it('treats only real configuration problems as settings (exit 78); unknown errors exit 1 so dev.sh restarts', () => {
+    for (const code of ['28P01', '28000', '3D000', '42501', 'ERR_INVALID_URL', 'CERT_HAS_EXPIRED']) {
+      expect(isConfigurationError(coded(code)), code).toBe(true);
+      expect(startupFailure(coded(code), LOCAL), code).toBeInstanceOf(StartupConfigError);
+    }
+    const notMigrated = new StartupConfigError('The database has not been updated for this version of the app.');
+    expect(startupFailure(notMigrated, LOCAL)).toBe(notMigrated);
+    expect(isConfigurationError(new Error('wrapped', { cause: coded('28P01') }))).toBe(true);
+
+    // pg's codeless error for a broken client, and any other surprise: not retried, but not a setting either.
+    const unknown = new Error('Client has encountered a connection error and is not queryable');
+    expect(classifyStartupError(unknown)).toBe('fatal');
+    expect(isConfigurationError(unknown)).toBe(false);
+    expect(startupFailure(unknown, LOCAL)).toBe(unknown);
+    expect(reportStartupFailure(startupFailure(unknown, LOCAL), () => {})).toBe(1);
+    expect(reportStartupFailure(startupFailure(new TypeError('x is undefined'), LOCAL), () => {})).toBe(1);
+    expect(reportStartupFailure(startupFailure(coded('3D000'), LOCAL), () => {})).toBe(EXIT_CONFIG);
+
+    const aborted = new StartupAbortedError();
+    expect(startupFailure(aborted, LOCAL)).toBe(aborted);
   });
 
   it('never prints the connection password, and exits 78 for configuration problems', () => {

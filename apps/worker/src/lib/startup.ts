@@ -80,7 +80,19 @@ const RETRYABLE_CODES = new Set([
 ]);
 
 /** Codes that mean the address or account is wrong; checked before the retryable ones. */
-const FATAL_CODES = new Set(['28P01', '28000', '3D000', '42501', 'ERR_INVALID_URL', 'SELF_SIGNED_CERT_IN_CHAIN', 'DEPTH_ZERO_SELF_SIGNED_CERT']);
+const FATAL_CODES = new Set([
+  '28P01',
+  '28000',
+  '3D000',
+  '42501',
+  'ERR_INVALID_URL',
+  // TLS certificate problems: retrying will not change the certificate.
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'CERT_HAS_EXPIRED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
 
 /** Messages pg and pg-boss use for connections that time out or drop while connecting (these have no code). */
 const RETRYABLE_MESSAGES = [/timeout expired/i, /connection timeout/i, /Connection terminated unexpectedly/i, /timed out/i, /the database system is (starting up|shutting down|in recovery mode)/i];
@@ -127,6 +139,27 @@ export function classifyStartupError(err: unknown): 'retry' | 'fatal' {
   return 'fatal';
 }
 
+/**
+ * Whether a start-up error is a configuration problem the owner has to fix (exit 78, which scripts/dev.sh does not
+ * restart): a StartupConfigError (bad address, not migrated, invalid environment, missing handler) or a refused
+ * password, unknown role, missing database, missing permission, invalid URL or certificate problem anywhere in the
+ * chain. Anything else that is not retried is unexpected, not a setting, and must not stop the whole app as one.
+ */
+export function isConfigurationError(err: unknown): boolean {
+  if (err instanceof StartupConfigError) return true;
+  return errorChain(err).some((e) => e instanceof StartupConfigError || FATAL_CODES.has(codeOf(e) ?? ''));
+}
+
+/**
+ * What a failed start-up throws: a StartupConfigError with a plain explanation for configuration problems, the
+ * original error otherwise (reportStartupFailure then exits 1 and scripts/dev.sh starts the worker again).
+ */
+export function startupFailure(err: unknown, target: DatabaseTarget | null): unknown {
+  if (err instanceof StartupAbortedError) return err;
+  if (isConfigurationError(err)) return err instanceof StartupConfigError ? err : new StartupConfigError(describeFatalStartupError(err, target));
+  return err;
+}
+
 /** Waits before the next attempt: 1 s, 2 s, 4 s, 8 s, then 15 s each time. `failures` counts from 1. */
 export function backoffDelayMs(failures: number, initialMs = START_RETRY_INITIAL_MS, maxMs = START_RETRY_MAX_MS): number {
   const n = Math.max(1, Math.floor(failures));
@@ -166,6 +199,11 @@ export function connectionSecrets(connectionString: string | undefined): string[
   return out;
 }
 
+/** The database scripts/local-postgres.sh creates (LOCAL_PG_DB, default studio_assistant). */
+export function localDatabaseName(env: NodeJS.ProcessEnv = process.env): string {
+  return env.LOCAL_PG_DB || 'studio_assistant';
+}
+
 /** Plain explanation of a start-up error that will not be retried (for the owner's terminal). */
 export function describeFatalStartupError(err: unknown, target: DatabaseTarget | null): string {
   if (err instanceof StartupConfigError) return err.message;
@@ -174,7 +212,12 @@ export function describeFatalStartupError(err: unknown, target: DatabaseTarget |
   if (codes.includes('28P01') || codes.includes('28000')) return `The worker could not sign in to ${where}: the user name or password in DATABASE_URL (.env) was refused.`;
   if (codes.includes('3D000')) {
     const name = target?.database ? `"${target.database}" ` : '';
-    return `The database ${name}does not exist at ${target?.display ?? 'that address'}. ${target?.isLocal ? 'Run: bash scripts/local-postgres.sh start (it creates it), then bash scripts/dev.sh migrate.' : 'Create it, or fix the name in DATABASE_URL (.env).'}`;
+    // local-postgres.sh creates only LOCAL_PG_DB (default studio_assistant); any other name is most likely a typo.
+    const createdByScript = Boolean(target?.isLocal && target.database === localDatabaseName());
+    const advice = createdByScript
+      ? 'Run: bash scripts/local-postgres.sh start (it creates it), then bash scripts/dev.sh migrate.'
+      : 'Check the database name in DATABASE_URL (.env).';
+    return `The database ${name}does not exist at ${target?.display ?? 'that address'}. ${advice}`;
   }
   if (codes.includes('42501')) return `The database user in DATABASE_URL (.env) is not allowed to set up ${where}.`;
   const message = err instanceof Error ? err.message : String(err);

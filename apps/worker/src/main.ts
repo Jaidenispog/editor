@@ -12,7 +12,7 @@ import { ALL_JOB_TYPES, CancelledError, JOB_PAYLOAD_SCHEMAS, JOB_TYPES, NonRetry
 import { repoRoot, type WorkerContext } from './context.js';
 import { recoverStaleJobs, runTracked, type TrackedRun } from './lib/job-tracker.js';
 import { refIdFor } from './lib/jobs.js';
-import { StartupAbortedError, StartupConfigError, connectionSecrets, databaseTarget, describeFatalStartupError, redact, waitForDatabase, type Sleep } from './lib/startup.js';
+import { StartupAbortedError, StartupConfigError, connectionSecrets, databaseTarget, redact, startupFailure, waitForDatabase, type Sleep } from './lib/startup.js';
 import { startWorkerHeartbeat } from './lib/worker-heartbeat.js';
 import { handleIngestAsset } from './handlers/ingest.js';
 import { handleGenerateEdits, handleReviseEdit } from './handlers/generate.js';
@@ -154,20 +154,23 @@ export async function startWorker(options: StartWorkerOptions = {}): Promise<{ c
       ...(options.sleep ? { sleep: options.sleep } : {}),
       attempt: async () => {
         await probeDatabase(env.DATABASE_URL, { applicationName: 'studio-worker' });
-        if (env.QUEUE_DATABASE_URL && env.QUEUE_DATABASE_URL !== env.DATABASE_URL) await probeDatabase(env.QUEUE_DATABASE_URL, { applicationName: 'studio-worker' });
-        await queue.start();
-        // Reachable but not migrated (an update was pulled without `dev.sh migrate`): waiting will not fix that.
+        // Reachable but not migrated (an update was pulled without `dev.sh migrate`, or DATABASE_URL names the wrong
+        // database): waiting will not fix that. Checked before pg-boss starts, so such a database is left untouched
+        // (pg-boss would otherwise create its schema there).
         if (!(await hasWorkerHeartbeatsTable(dbHandle.db))) {
           throw new StartupConfigError('The database has not been updated for this version of the app. Run: bash scripts/dev.sh migrate, then start the app again.');
         }
+        if (env.QUEUE_DATABASE_URL && env.QUEUE_DATABASE_URL !== env.DATABASE_URL) await probeDatabase(env.QUEUE_DATABASE_URL, { applicationName: 'studio-worker' });
+        await queue.start();
       },
     });
   } catch (err) {
     // The queue never finished starting, so close pg-boss's own pool directly.
     await queue.raw.stop({ graceful: false, timeout: 1_000 }).catch(() => {});
     await dbHandle.close().catch(() => {});
-    if (err instanceof StartupAbortedError) throw err;
-    throw new StartupConfigError(describeFatalStartupError(err, target));
+    // Only configuration problems become a StartupConfigError (exit 78: dev.sh stops the app with the reason).
+    // Anything unexpected is rethrown as it is, so the worker exits 1 and dev.sh reports it and starts it again.
+    throw startupFailure(err, target);
   }
   const lookupBossJob = async (type: JobType, id: string) => {
     const job = await queue.getBossJob(type, id);
@@ -238,7 +241,11 @@ export async function startWorker(options: StartWorkerOptions = {}): Promise<{ c
   if (missing.length) throw new Error(`No handler registered for: ${missing.join(', ')}`);
   // Rows left by workers that were killed long ago; the web app only looks at the newest heartbeat anyway.
   await pruneWorkerHeartbeats(ctx.db).catch((err: unknown) => logger.warn({ err }, 'could not prune old worker heartbeats'));
-  const heartbeat = await startWorkerHeartbeat(ctx.db, { id: ctx.workerId, hostname: os.hostname(), pid: process.pid, version: workerVersion(), queues: registered }, logger);
+  // A beat is only written while the queue's own connection answers too, so a worker that cannot reach its queue
+  // (a separate QUEUE_DATABASE_URL that is down) does not tell the app it is running.
+  const heartbeat = await startWorkerHeartbeat(ctx.db, { id: ctx.workerId, hostname: os.hostname(), pid: process.pid, version: workerVersion(), queues: registered }, logger, {
+    healthCheck: () => queue.ping(),
+  });
   logger.info({ workerId: ctx.workerId, concurrency: c, queues: registered, ai: ai.describe(), storage: store.driver, tmpRoot }, 'worker started');
 
   let stopping = false;

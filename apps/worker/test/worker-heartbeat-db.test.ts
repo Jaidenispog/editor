@@ -89,7 +89,7 @@ describe.skipIf(skip)('worker heartbeat (database-backed)', () => {
   });
 
   it('startWorkerHeartbeat writes at once, keeps beating and removes the row on stop', async () => {
-    const hb = await startWorkerHeartbeat(handle.db, info('w4'), quietLogger, 50);
+    const hb = await startWorkerHeartbeat(handle.db, info('w4'), quietLogger, { intervalMs: 50 });
     expect((await readWorkerStatus(handle.db)).alive).toBe(true);
     await ageRow('w4', 120);
     expect((await readWorkerStatus(handle.db)).alive).toBe(false);
@@ -97,6 +97,51 @@ describe.skipIf(skip)('worker heartbeat (database-backed)', () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect((await readWorkerStatus(handle.db)).alive).toBe(true);
     await hb.stop();
+    expect(await readWorkerStatus(handle.db)).toEqual({ alive: false, lastSeenAt: null });
+  });
+
+  it('pauses the beat while the queue health check fails, and resumes when it passes', async () => {
+    let queueUp = true;
+    const hb = await startWorkerHeartbeat(handle.db, info('w5'), quietLogger, {
+      intervalMs: 30,
+      healthCheck: async () => {
+        if (!queueUp) throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      },
+    });
+    queueUp = false;
+    await ageRow('w5', 120);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    // Several ticks ran, none of them wrote: the app sees no running worker.
+    expect((await readWorkerStatus(handle.db)).alive).toBe(false);
+    queueUp = true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect((await readWorkerStatus(handle.db)).alive).toBe(true);
+    await hb.stop();
+    expect((await readWorkerStatus(handle.db)).alive).toBe(false);
+  });
+
+  it('never starts a beat while the previous one is still running, and stop waits for it', async () => {
+    let running = 0;
+    let maxRunning = 0;
+    let calls = 0;
+    const hb = await startWorkerHeartbeat(handle.db, info('w6'), quietLogger, {
+      intervalMs: 10,
+      // A slow beat (a hanging database): 120 ms each, twelve times the interval.
+      healthCheck: async () => {
+        calls++;
+        running++;
+        maxRunning = Math.max(maxRunning, running);
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        running--;
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await hb.stop();
+    expect(maxRunning).toBe(1);
+    // About 300 / (120 + 10) beats, far fewer than the 30 ticks.
+    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(calls).toBeLessThanOrEqual(4);
+    expect(running).toBe(0);
     expect(await readWorkerStatus(handle.db)).toEqual({ alive: false, lastSeenAt: null });
   });
 });
