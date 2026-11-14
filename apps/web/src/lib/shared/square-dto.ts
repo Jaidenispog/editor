@@ -1,4 +1,4 @@
-import type { Attendance, ChecklistMark, SquareServiceLabel } from '@studio/core';
+import type { Attendance, BookingActionAllowance, BookingChangeKind, ChecklistMark, SquareServiceLabel } from '@studio/core';
 
 /**
  * Square appointments data as the browser sees it (design §8). Square stays the source of truth: every status is
@@ -60,7 +60,23 @@ export interface SquareStatusDto {
   lastWebhookLabel: string | null;
   bookingSiteUrl: string | null;
   dashboardUrl: string | null;
-  tier1: { available: boolean; ready: boolean; summary: string; lines: Tier1LineDto[] };
+  tier1: {
+    available: boolean;
+    ready: boolean;
+    summary: string;
+    lines: Tier1LineDto[];
+    /** The switch may be turned on now (lines 1–4 ticked), with the reason when not. */
+    canEnable: boolean;
+    enableReason: string | null;
+    /** The switch is on (it may still be paused). */
+    switchOn: boolean;
+    /** "Give permission" asks Square for the two booking-change permissions. */
+    canGivePermission: boolean;
+    /** The §4.9 sentence about client notifications, from the owner's self-test answer. */
+    notificationSentence: string;
+  };
+  /** The booking-changes self-test (Tier 1, design §4.5.1). */
+  selfTest: SelfTestDto;
   services: SquareServiceDto[];
   teamMembers: SquareTeamMemberDto[];
   /** The latest sync job, for progress while the first sync runs. */
@@ -71,6 +87,49 @@ export interface SquareStatusDto {
   details: { merchantId: string | null; scopes: string[]; tokenExpiresLabel: string | null } | null;
   /** After a disconnect: whether Square confirmed that the app's access was revoked (design §6), or null. */
   revoke: SquareRevokeDto | null;
+}
+
+/** The latest self-test and whether a new one may be run. */
+export interface SelfTestDto {
+  status: 'none' | 'running' | 'passed' | 'failed';
+  /** The stored result belongs to this Square account and environment. */
+  current: boolean;
+  atLabel: string | null;
+  failure: string | null;
+  canRun: boolean;
+  runReason: string | null;
+  /** The owner's answer to "Did the client get a confirmation from Square?". */
+  notifies: 'yes' | 'no' | 'unknown';
+  /** Ask that question now (a test ran on live Square and it has not been answered). */
+  askNotification: boolean;
+  /** The three steps of the latest test, for its progress line. */
+  steps: BookingChangeDto[];
+}
+
+/** One booking change (design §8 `BookingChangeDto`). Square's own refusal text is plain text, never HTML. */
+export interface BookingChangeDto {
+  id: string;
+  kind: BookingChangeKind;
+  status: string;
+  statusLabel: string;
+  /** A status word for the pill's colour. */
+  pill: string;
+  /** Finished (the worker will not touch it again). */
+  done: boolean;
+  statusMessage: string;
+  /** Square's `detail`, verbatim, when Square refused. */
+  squareDetail: string | null;
+  /** Alternatives the re-check found when the time was taken. */
+  freshSlots: AvailabilitySlotDto[] | null;
+  bookingId: string | null;
+  /** The time asked for, in Melbourne time with the zone ("Sat 21 Nov, 10:30 am AEDT"). */
+  startLabel: string | null;
+  createdAt: string;
+  createdLabel: string;
+  finishedAt: string | null;
+  selfTest: boolean;
+  /** Only while it is still queued (the owner may withdraw it). */
+  canWithdraw: boolean;
 }
 
 /** The outcome of the `square.revoke` job after the latest disconnect. */
@@ -118,6 +177,15 @@ export interface BookingDetailDto extends BookingDto {
   deepLink: { url: string | null; instruction: string };
   clientEmail: string | null;
   clientPhone: string | null;
+  /** Square's version of the booking (sent back with a move or cancel, so Square refuses if it changed). */
+  squareVersion: number;
+  serviceVariationId: string | null;
+  teamMemberId: string | null;
+  durationMinutes: number;
+  /** Move and Cancel from Studio Assistant (Tier 1), with the reason when not offered. */
+  actions: { move: BookingActionAllowance; cancel: BookingActionAllowance };
+  /** Changes made from Studio Assistant, newest first. */
+  changes: BookingChangeDto[];
 }
 
 /** One client copied from Square. Email and phone are for the owner only. */

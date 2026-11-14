@@ -7,7 +7,7 @@ import { Input, Select } from '@/components/ui/field';
 import { Spinner } from '@/components/ui/spinner';
 import { apiRequest } from '@/lib/client/api-client';
 import { cn } from '@/lib/shared/cn';
-import type { AvailabilitySearchDto, SquareServiceDto, SquareTeamMemberDto } from '@/lib/shared/square-dto';
+import type { AvailabilitySearchDto, AvailabilitySlotDto, SquareServiceDto, SquareTeamMemberDto } from '@/lib/shared/square-dto';
 
 /** Today's date in Melbourne, `YYYY-MM-DD`. */
 function melbourneToday(): string {
@@ -16,9 +16,10 @@ function melbourneToday(): string {
 
 /**
  * Free times from Square for a service (design §4.4): service, optional barber, a start day and 1–14 days. The search
- * runs in the background and this polls every second for up to 30 seconds. Times are Square's, read-only.
+ * runs in the background and this polls every second for up to 30 seconds. Times are Square's. With `onBook` (booking
+ * changes on, owner) each time of a service bookable from here opens the booking dialog.
  */
-export function AvailabilityFinder({ services, teamMembers }: { services: SquareServiceDto[]; teamMembers: SquareTeamMemberDto[] }) {
+export function AvailabilityFinder({ services, teamMembers, onBook }: { services: SquareServiceDto[]; teamMembers: SquareTeamMemberDto[]; onBook?: ((slot: AvailabilitySlotDto, searchId: string, serviceVariationId: string) => void) | undefined }) {
   const open = services.filter((s) => s.label !== 'not_bookable');
   const [serviceId, setServiceId] = useState(open[0]?.variationId ?? '');
   const [teamMemberId, setTeamMemberId] = useState('');
@@ -104,11 +105,19 @@ export function AvailabilityFinder({ services, teamMembers }: { services: Square
             <section key={g.key} aria-label={g.label}>
               <h4 className="mb-2 text-xs font-semibold tracking-wide text-charcoal-500 uppercase">{g.label}</h4>
               <ul className="flex flex-wrap gap-2">
-                {g.slots.map((s) => (
-                  <li key={`${s.startAt}-${s.teamMemberId}`} className="rounded-full border border-charcoal-200 bg-white px-3 py-1.5 text-sm text-charcoal-800">
-                    {s.startLabel} · {s.teamMemberName}
-                  </li>
-                ))}
+                {g.slots.map((s) =>
+                  onBook && service?.label === 'bookable' && !search.stale ? (
+                    <li key={`${s.startAt}-${s.teamMemberId}`}>
+                      <button type="button" onClick={() => onBook(s, search.id, service.variationId)} className="min-h-11 rounded-full border border-charcoal-300 bg-white px-3 text-sm text-charcoal-900 hover:border-charcoal-600" aria-label={`Book ${s.dayLabel} ${s.startLabel} with ${s.teamMemberName}`}>
+                        {s.startLabel} · {s.teamMemberName}
+                      </button>
+                    </li>
+                  ) : (
+                    <li key={`${s.startAt}-${s.teamMemberId}`} className="rounded-full border border-charcoal-200 bg-white px-3 py-1.5 text-sm text-charcoal-800">
+                      {s.startLabel} · {s.teamMemberName}
+                    </li>
+                  ),
+                )}
               </ul>
             </section>
           ))}

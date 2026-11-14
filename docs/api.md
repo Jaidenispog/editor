@@ -245,35 +245,58 @@ copyright check), `publish.dispatch {}` (every minute, key `every-minute`), `soc
 
 ## Square appointments (Stage C, WP6 and WP6b)
 
-WP6 is Tier 0: read-only. Studio Assistant never writes to Square and never sends a message. Booking changes and the
-self-test (`/api/appointments/changes/**`, `/api/integrations/square/self-test/**`) are WP6b and are not built.
-All times are ISO UTC with a Melbourne `…Label` beside them. Types in `apps/web/src/lib/shared/square-dto.ts`.
+WP6 is Tier 0: read-only. Studio Assistant never sends a message. WP6b adds booking changes and the self-test
+(Tier 1, below): built and tested against a fake of Square, but **switched off in this version**
+(`SQUARE_TIER1_AVAILABLE = false` in `packages/core/src/square.ts`) until the sandbox smoke test has recorded Square's
+real answers (design §11.3); until then every Tier 1 route refuses with a plain reason and nothing is written to
+Square. All times are ISO UTC with a Melbourne `…Label` beside them. Types in `apps/web/src/lib/shared/square-dto.ts`.
 
 | Method | Route | Notes |
 | --- | --- | --- |
-| GET | `/api/integrations/square/connect?access=read` | Owner. 302 to Square's authorise page (code flow, read scopes, `session=false`); state in a 10-minute HttpOnly cookie on `/api/integrations/square`. 409 when the server keys are missing; `access=write` → 422 until booking changes exist |
+| GET | `/api/integrations/square/connect?access=read` | Owner. 302 to Square's authorise page (code flow, read scopes, `session=false`); state in a 10-minute HttpOnly cookie on `/api/integrations/square`. 409 when the server keys are missing. `access=write` ("Give permission", Tier 1) adds `APPOINTMENTS_WRITE` and `APPOINTMENTS_ALL_WRITE`; 422 while booking changes are not available; the callback audits `integration.square.scopes_upgraded` |
 | GET | `/api/integrations/square/callback?code&state[&error]` | Owner, same session. One code exchange (10 s, no retry); another environment's or account's copied data is purged first; tokens stored encrypted; queues `square.sync { reason: 'connect' }`; 302 to `/settings?tab=integrations&square=checking` (or `square_error=…`) |
-| GET | `/api/integrations/square` | Signed in. `SquareStatusDto`: `state` (shared union), `liveMode` (`sandbox`/`live`), `dataEnvironment`, location choice, last sync, stale flag, webhooks line, booking-changes checklist (read-only), services with labels, team, latest sync job; owner-only `details` (merchant id, scopes, access expiry). Never tokens |
-| PATCH | `/api/integrations/square` | Owner. `{ locationId?, serviceConfirmation?: { variationId, confirmed }, writesEnabled? }` → `SquareStatusDto`. `writesEnabled: true` → 409 (not available yet). Choosing a location deletes the copied bookings of every other location (audit `otherLocationBookingsRemoved`) and queues a sync |
+| GET | `/api/integrations/square` | Signed in. `SquareStatusDto`: `state` (shared union), `liveMode` (`sandbox`/`live`), `dataEnvironment`, location choice, last sync, stale flag, webhooks line, `tier1` (checklist lines, `summary` incl. "Paused: …", `canEnable`/`enableReason`, `switchOn`, `canGivePermission`, `notificationSentence`), `selfTest` (`status`, `current`, `atLabel`, `failure`, `canRun`/`runReason`, `notifies`, `askNotification`, the three `steps`), services with labels, team, latest sync job; owner-only `details` (merchant id, scopes, access expiry). Never tokens |
+| PATCH | `/api/integrations/square` | Owner. `{ locationId?, serviceConfirmation?: { variationId, confirmed }, writesEnabled? }` → `SquareStatusDto`. `writesEnabled: true` → 409 unless booking changes are available and checklist lines 1–4 are ticked (plan flag, permissions, a bookable service, a self-test passed on this account and environment); turning it on again clears a pause (`writesSuspendedReason`); audits `writes_enabled` / `writes_disabled`. Choosing a location deletes the copied bookings of every other location (audit `otherLocationBookingsRemoved`) and queues a sync |
 | DELETE | `/api/integrations/square` | Owner. `{ purgeData }` → `{ status: 'disconnected', revokeJobId, purged }`. Tokens wiped; with `purgeData` bookings and stored Square webhook deliveries deleted and Square clients scrubbed (never deleted), under the connection row's lock so a running job cannot write them back; queues `square.revoke` (skipped if the same account is reconnected before it runs; no call, audited `revoke_failed { reason: 'environment_changed' }`, when the server has since been switched to the other Square environment). After a disconnect, `GET` carries owner-only `revoke { state: pending\|revoked\|failed, message }`; `failed` tells the owner to remove Studio Assistant in Square's App integrations page |
 | POST | `/api/integrations/square/sync` | Owner. → `{ jobId }` (`square.sync { reason: 'manual' }`). 409 when not connected |
 | GET | `/api/appointments?view=upcoming\|confirm\|past&from&days&cursor` | Signed in. `{ bookings: BookingDto[], nextCursor, environment, syncedAt }` from the local copy, for the studio's Square location only (empty while the owner still has to choose one) (upcoming: today + 31 days; confirm: ended ACCEPTED bookings of the last 14 days still needing a word; past: 90 days). Past bookings carry `reviewRequest { status, label }` ("Review request: Skipped — …"; a request sent before Square cancelled the booking, marked it a no-show or the owner pressed "Didn't happen" has `status: 'booking_changed'`, "Review request: Sent before the booking changed") or null |
-| GET | `/api/appointments/[id]` | Signed in. `BookingDetailDto` (evidence, "Open in Square" link with a one-line instruction; notes, email and phone only for the owner) |
+| GET | `/api/appointments/[id]` | Signed in. `BookingDetailDto` (evidence, "Open in Square" link with a one-line instruction; notes, email and phone only for the owner; `squareVersion`; `actions { move, cancel }` each `{ allowed, reason }` — owner only, Tier 1 ready, ACCEPTED, in the future, Move only for a bookable service; `changes: BookingChangeDto[]`) |
 | POST | `/api/appointments/[id]/attendance` | Owner or staff. `{ value: 'attended' \| 'not_attended' \| null }` → `BookingDto`. 409 on Square `NO_SHOW`/cancelled/declined/pending or before the start. Sets `completed_at`/`completion_source` (`owner_marked`) once the appointment has ended, for live Square bookings only (a sandbox booking keeps the label but never counts as completed); audit `booking.attendance_marked` |
 | GET | `/api/appointments/clients?q&cursor` | Signed in. `{ clients: ClientDto[], nextCursor }`; email and phone (and searching by them) only for the owner |
 | GET | `/api/appointments/clients/[id]` | Signed in. `ClientDto` + bookings |
 | GET | `/api/appointments/services` | Signed in. `{ services, teamMembers }` with the per-service label (`bookable`, `needs_confirmation`, `book_in_square`, `unverified`, `not_bookable`) |
-| POST | `/api/appointments/availability` | Signed in. `{ serviceVariationId, teamMemberId?, fromDate: 'YYYY-MM-DD', days: 1..14 }` → `{ searchId, jobId }`. 400 for an unknown service or a day before today (Melbourne) |
+| POST | `/api/appointments/availability` | Signed in. `{ serviceVariationId, teamMemberId?, fromDate: 'YYYY-MM-DD', days: 1..14, bookingId? }` → `{ searchId, jobId }`. 400 for an unknown service or a day before today (Melbourne). With `bookingId` (the booking's own service) the worker uses Square's booking filter: times that booking could move to |
 | GET | `/api/appointments/availability/[searchId]` | Signed in. `{ status, slots: [{ startAt, dayLabel, startLabel, endLabel, teamMemberName, … }], fetchedAt, fetchedLabel, stale, error }` |
+| POST | `/api/appointments/changes` | **Owner** (Tier 1). `{ kind: 'create', customerId, serviceVariationId, teamMemberId, startAt, availabilitySearchId, sellerNote? ≤ 4096 }` \| `{ kind: 'reschedule', bookingId, startAt, teamMemberId, availabilitySearchId, expectedVersion }` \| `{ kind: 'cancel', bookingId, expectedVersion }` → `{ change: BookingChangeDto, jobId }`. `customerId` is Studio Assistant's id of a client copied from Square. Records what the owner approved (the segment copied from the slot Square returned), audit `booking.change_requested`, queues `square.booking_change`. 422 with the plain reason while booking changes are not available, switched off or paused, or for a service not bookable from here, a PENDING / past / cancelled booking, or staff; 400 for a slot not in a `done` search at most 5 minutes old with the same barber, or a client from the other environment; 409 when the booking's Square version differs or another change to it is still running |
+| GET | `/api/appointments/changes/[id]` | Signed in. `BookingChangeDto { id, kind, status, statusLabel, pill, done, statusMessage, squareDetail, freshSlots, bookingId, startLabel ("Sat 21 Nov, 10:30–11:15 am AEDT"), createdAt, createdLabel, finishedAt, selfTest, canWithdraw }` (polled every second). Never the idempotency key or Square ids. A queued change whose job was cancelled before it started is closed as withdrawn |
+| POST | `/api/appointments/changes/[id]/cancel` | **Owner**. Withdraws a `queued` change (→ `cancelled`, audit `booking.change_cancelled`); 409 once checking has started |
+| POST | `/api/integrations/square/self-test` | **Owner** (Tier 1). `{ customerId, serviceVariationId, teamMemberId, startAt, availabilitySearchId, acknowledgeLive }` → `{ selfTestId, jobId }`. Creates the three step rows (`<selfTestId>-create`, `-reschedule`, `-cancel`), sets `selfTestStatus: 'running'`, audit `self_test_requested`, queues `square.self_test`. 422 until lines 1–3 are ticked (and while not available); 409 while a test runs; 400 on live Square without `acknowledgeLive`, for a slot not in a fresh search, or one less than 48 hours ahead |
+| POST | `/api/integrations/square/self-test/notification` | **Owner**. `{ answer: 'yes' \| 'no' \| 'unknown' }` → `SquareStatusDto`: did the client get Square's confirmation for the test booking (stored as `capabilities.squareNotifiesApiBookings`; drives the change dialog's notification sentence). 409 before any self-test |
 | POST | `/api/webhooks/square` | Public, no CSRF. HMAC-SHA256 of `notification URL + raw body` (timing-safe); invalid → 401 and not stored; valid → stored once per `event_id` as a minimal envelope (`event_id`, `type`, `merchant_id`, `created_at`, `data: { type, id }`; Square's copy of the object is dropped) and `webhook.process` queued; 404 when `SQUARE_WEBHOOK_SIGNATURE_KEY` is unset |
 
-Jobs (worker, all read-only towards Square): `square.sync { reason: connect|schedule|manual|reconcile }` (token status,
+Jobs (worker; all read-only towards Square except `square.booking_change`): `square.sync { reason: connect|schedule|manual|reconcile }` (token status,
 snapshot, bookings in ≤ 31-day windows, reconcile, customers, then `square.attendance`; `stately`; crons every 10
 minutes, key `every-10-minutes`, and 2:47 am, key `nightly-reconcile`), `square.refresh { entity, squareId }` (from a
 webhook), `square.attendance { squareCustomerId?, fromIso?, toIso? }` (payment matching; every 30 minutes),
 `square.availability { searchId }`, `square.token_refresh {}` (3:13 am daily), `square.revoke { merchantId,
 environment }`. The `webhook.process` handler for provider `square` ignores other merchants (`merchant_mismatch`) and
 only queues `square.refresh`.
+
+Tier 1 jobs (WP6b): `square.booking_change { changeId }` is **the only code that writes to Square** (2 retries 20 s
+apart, 5 minutes each): claim (`queued|checking` and no `submitted_at`) → gate (the live connection is the approved
+`merchant_id` and environment; checklist) → Square's plan flag (refused → `not_allowed`, pause `plan`) → the service
+re-read from the catalogue (bookable at the confirmed version, barber offers it) → the booking (same version, ACCEPTED,
+future; else `changed_in_square`) → a fresh SearchAvailability for that Melbourne day (same start and barber; else
+`slot_unavailable` with up to 20 nearest `fresh_slots`) → `submitted_at` set under the connection row's `FOR SHARE`
+lock → one CreateBooking / UpdateBooking / CancelBooking with idempotency key `sabc_<id>` → `confirmed` (mirrored,
+double-booking warning) or Square's 4xx stored verbatim (`not_allowed` pauses changes; 409 → `changed_in_square`;
+other 4xx → `rejected` and the service becomes "Book in Square"). Time-outs and 5xx retry with the same key; after the
+last attempt `unknown`, settled by the next `square.sync` (found → `confirmed`; not found after 24 hours → "probably not
+made"). Statuses: `queued, checking, submitted, confirmed, slot_unavailable, changed_in_square, not_allowed, rejected,
+unknown, failed` (Square unreachable while checking; nothing sent), `cancelled`. `square.self_test { selfTestId }` (2
+retries, 10 minutes) runs the three steps through the same routine, resumes at the first unfinished step, always
+attempts the cancel, and stores `selfTestStatus/At/Environment/MerchantId/Failure` (a test booking that may be left in
+Square is named with its time). No cron ever queues either job.
 
 ## Email and reviews (Stage C, WP7)
 

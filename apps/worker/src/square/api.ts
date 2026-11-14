@@ -2,9 +2,10 @@ import { SquareClient, SquareEnvironment, SquareError, SquareTimeoutError, type 
 import { CancelledError, isRfc3339Instant, mapSquareError, noShowFeeFrom, type MatchPayment, type SquareBusinessProfileSnapshot, type SquareErrorEntry, type SquareErrorKind, type SquareServiceSnapshot } from '@studio/core';
 
 /**
- * The narrow, read-only view of Square this module uses (design §7.2), so handlers never touch the SDK directly and
- * tests can point the real SDK at a local fake server. Every call carries the run's AbortSignal, a 20 s time limit
- * and no SDK retries (pg-boss owns retries). Booking changes are not part of this interface (WP6b).
+ * The narrow view of Square this module uses (design §7.2), so handlers never touch the SDK directly and tests can
+ * point the real SDK at a local fake server. Every call carries the run's AbortSignal, a 20 s time limit and no SDK
+ * retries (pg-boss owns retries). The three booking writes (WP6b) are called only by `square/change.ts`, the
+ * booking-change routine; everything else only reads.
  */
 export interface SquareApi {
   retrieveTokenStatus(): Promise<{ scopes: string[]; expiresAt: string | null; merchantId: string | null }>;
@@ -27,6 +28,36 @@ export interface SquareApi {
   getPayment(paymentId: string): Promise<MatchPayment | null>;
   /** Order id → catalogue object ids of its line items. */
   batchGetOrderLines(locationId: string, orderIds: string[]): Promise<Record<string, string[]>>;
+  /** One service variation read fresh from the catalogue just before a change (null when Square no longer has it). */
+  getServiceVariation(variationId: string): Promise<SquareFreshServiceData | null>;
+  /** Free times to move an existing booking to (SearchAvailability with the `booking_id` filter). */
+  searchAvailabilityForBooking(filter: { startAt: string; endAt: string; bookingId: string }): Promise<SquareSlotData[]>;
+  /** CreateBooking (seller level). Only the booking-change routine calls it. */
+  createBooking(input: { idempotencyKey: string; locationId: string; startAt: string; customerId: string; sellerNote: string | null; segment: SquareWriteSegment }): Promise<SquareBookingData>;
+  /** UpdateBooking: moves a booking to a new start (and segment). Only the booking-change routine calls it. */
+  updateBooking(input: { bookingId: string; idempotencyKey: string; version: number; startAt: string; segment: SquareWriteSegment }): Promise<SquareBookingData>;
+  /** CancelBooking (seller level). Only the booking-change routine calls it. */
+  cancelBooking(input: { bookingId: string; idempotencyKey: string; version: number }): Promise<SquareBookingData>;
+}
+
+/** The one appointment segment a booking change sends (copied from the slot Square returned). */
+export interface SquareWriteSegment {
+  teamMemberId: string;
+  serviceVariationId: string;
+  serviceVariationVersion: string | null;
+  durationMinutes: number;
+}
+
+/** A service variation as Square answers it now (the catalogue re-check of a booking change). */
+export interface SquareFreshServiceData {
+  variationId: string;
+  version: string;
+  availableForBooking: boolean;
+  teamMemberIds: string[];
+  /** The variation or its item is archived or deleted (when Square sent the item). */
+  archived: boolean;
+  durationMinutes: number | null;
+  noShowFeeSeen: { amount: string; currency: string } | null;
 }
 
 /** One appointment segment of a booking. */
@@ -79,6 +110,8 @@ export class SquareApiError extends Error {
     message: string,
     readonly statusCode: number | null,
     readonly errors: SquareErrorEntry[],
+    /** Square's response body as it arrived (JSON-safe), kept verbatim for a refused booking change. */
+    readonly body: unknown = null,
   ) {
     super(message);
     this.name = 'SquareApiError';
@@ -221,7 +254,7 @@ export function toSquareApiError(err: unknown, op: 'read' | 'write' = 'read'): E
   if (err instanceof SquareError) {
     const errors = (err.errors ?? []).map((e) => ({ category: String(e.category), code: String(e.code), ...(e.detail ? { detail: e.detail } : {}) }));
     const mapped = mapSquareError({ statusCode: err.statusCode ?? null, errors }, op);
-    return new SquareApiError(mapped.kind, mapped.code, mapped.message, err.statusCode ?? null, errors);
+    return new SquareApiError(mapped.kind, mapped.code, mapped.message, err.statusCode ?? null, errors, toJsonSafe(err.body ?? { errors }));
   }
   if (err instanceof SquareTimeoutError) return new SquareApiError('transient', 'TIMEOUT', 'Square didn’t answer in time. Trying again shortly.', null, []);
   const mapped = mapSquareError({ statusCode: null, errors: null }, op);
@@ -261,6 +294,26 @@ export function createSdkSquareApi(options: SdkSquareApiOptions): SquareApi {
       throw toSquareApiError(err);
     }
   };
+  const write = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (options.signal.aborted) throw options.signal.reason instanceof Error ? options.signal.reason : new CancelledError();
+    try {
+      return await fn();
+    } catch (err) {
+      if (options.signal.aborted) throw options.signal.reason instanceof Error ? options.signal.reason : new CancelledError();
+      throw toSquareApiError(err, 'write');
+    }
+  };
+  const written = (b: Square.Booking | undefined): SquareBookingData => {
+    const out = b ? bookingFromSdk(b, options.onSkip) : null;
+    if (!out) throw new SquareApiError('transient', 'EMPTY_BOOKING', 'Square answered without the booking. Checking again shortly.', null, []);
+    return out;
+  };
+  const segmentFor = (seg: SquareWriteSegment): Square.AppointmentSegment => ({
+    teamMemberId: seg.teamMemberId,
+    serviceVariationId: seg.serviceVariationId,
+    durationMinutes: seg.durationMinutes,
+    ...(seg.serviceVariationVersion !== null && /^\d+$/.test(seg.serviceVariationVersion) ? { serviceVariationVersion: BigInt(seg.serviceVariationVersion) } : {}),
+  });
   const orNull = async <T>(fn: () => Promise<T>): Promise<T | null> => {
     try {
       return await call(fn);
@@ -375,6 +428,48 @@ export function createSdkSquareApi(options: SdkSquareApiOptions): SquareApi {
         const p = (await client.payments.get({ paymentId }, ro)).payment;
         return p ? paymentFromSdk(p) : null;
       }),
+    getServiceVariation: (variationId) =>
+      orNull(async () => {
+        const r = await client.catalog.object.get({ objectId: variationId, includeRelatedObjects: true }, ro);
+        const v = r.object;
+        if (!v || v.type !== 'ITEM_VARIATION' || !v.id) return null;
+        const vd = v.itemVariationData;
+        const item = (r.relatedObjects ?? []).find((o) => o.type === 'ITEM' && o.id === vd?.itemId);
+        const durationMs = vd?.serviceDuration !== undefined && vd?.serviceDuration !== null ? Number(vd.serviceDuration) : null;
+        return {
+          variationId: v.id,
+          version: bigStr(v.version) ?? '0',
+          availableForBooking: vd?.availableForBooking === true,
+          teamMemberIds: vd?.teamMemberIds ?? [],
+          archived: v.isDeleted === true || (item ? item.isDeleted === true || (item.type === 'ITEM' && item.itemData?.isArchived === true) : false),
+          durationMinutes: durationMs !== null && Number.isFinite(durationMs) ? Math.round(durationMs / 60_000) : null,
+          noShowFeeSeen: noShowFeeFrom(vd as Record<string, unknown> | undefined),
+        };
+      }),
+    searchAvailabilityForBooking: (f) =>
+      call(async () => {
+        const r = await client.bookings.searchAvailability({ query: { filter: { startAtRange: { startAt: f.startAt, endAt: f.endAt }, bookingId: f.bookingId } } }, ro);
+        return (r.availabilities ?? []).filter((a) => isRfc3339Instant(a.startAt)).map((a) => ({ startAt: a.startAt as string, locationId: a.locationId ?? '', segments: segmentsOf(a.appointmentSegments) }));
+      }),
+    createBooking: (input) =>
+      write(async () =>
+        written(
+          (
+            await client.bookings.create(
+              {
+                idempotencyKey: input.idempotencyKey,
+                booking: { locationId: input.locationId, startAt: input.startAt, customerId: input.customerId, ...(input.sellerNote ? { sellerNote: input.sellerNote } : {}), appointmentSegments: [segmentFor(input.segment)] },
+              },
+              ro,
+            )
+          ).booking,
+        ),
+      ),
+    updateBooking: (input) =>
+      write(async () =>
+        written((await client.bookings.update({ bookingId: input.bookingId, idempotencyKey: input.idempotencyKey, booking: { version: input.version, startAt: input.startAt, appointmentSegments: [segmentFor(input.segment)] } }, ro)).booking),
+      ),
+    cancelBooking: (input) => write(async () => written((await client.bookings.cancel({ bookingId: input.bookingId, idempotencyKey: input.idempotencyKey, bookingVersion: input.version }, ro)).booking)),
     batchGetOrderLines: (locationId, orderIds) =>
       call(async () => {
         const out: Record<string, string[]> = {};

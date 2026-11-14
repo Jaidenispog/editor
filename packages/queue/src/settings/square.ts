@@ -3,13 +3,17 @@ import { QUEUE_HEARTBEAT_SECONDS } from './studio.js';
 import type { QueueSettingsMap } from './types.js';
 
 /**
- * Queue settings for the Square appointments module's job types (WP6; WP6b adds booking changes and the self-test).
+ * Queue settings for the Square appointments module's job types (WP6 reads; WP6b booking changes and the self-test).
  * - `square.sync`: 3 retries 30 s apart, 15 minutes per attempt, `stately` (one queued and one active sync).
  * - `square.refresh`: 5 retries 10 s apart, 2½ minutes per attempt.
  * - `square.attendance`: 3 retries 30 s apart, 10 minutes per attempt.
  * - `square.availability`: 1 retry after 5 s, 2½ minutes per attempt (the owner is waiting for it).
  * - `square.token_refresh`: 3 retries 5 minutes apart, 2½ minutes per attempt.
  * - `square.revoke`: 3 retries 60 s apart, 2½ minutes per attempt.
+ * - `square.booking_change` (WP6b): 2 retries 20 s apart, 5 minutes per attempt. Retries re-send with the same
+ *   idempotency key; the authoritative guard is the conditional update on the change row, not the queue key.
+ * - `square.self_test` (WP6b): 2 retries 30 s apart, 10 minutes per attempt, so a test interrupted by a worker crash
+ *   resumes at its first unfinished step.
  * The design's 60 s sync heartbeat is replaced by the shared 30 s one; every attempt outlives four heartbeats.
  */
 export const SQUARE_QUEUE_SETTINGS = {
@@ -19,4 +23,6 @@ export const SQUARE_QUEUE_SETTINGS = {
   [JOB_TYPES.SQUARE_AVAILABILITY]: { retryLimit: 1, retryDelay: 5, retryBackoff: false, expireInSeconds: 2 * 60 + 30, heartbeatSeconds: QUEUE_HEARTBEAT_SECONDS },
   [JOB_TYPES.SQUARE_TOKEN_REFRESH]: { retryLimit: 3, retryDelay: 5 * 60, retryBackoff: false, expireInSeconds: 2 * 60 + 30, heartbeatSeconds: QUEUE_HEARTBEAT_SECONDS },
   [JOB_TYPES.SQUARE_REVOKE]: { retryLimit: 3, retryDelay: 60, retryBackoff: false, expireInSeconds: 2 * 60 + 30, heartbeatSeconds: QUEUE_HEARTBEAT_SECONDS },
+  [JOB_TYPES.SQUARE_BOOKING_CHANGE]: { retryLimit: 2, retryDelay: 20, retryBackoff: false, expireInSeconds: 5 * 60, heartbeatSeconds: QUEUE_HEARTBEAT_SECONDS },
+  [JOB_TYPES.SQUARE_SELF_TEST]: { retryLimit: 2, retryDelay: 30, retryBackoff: false, expireInSeconds: 10 * 60, heartbeatSeconds: QUEUE_HEARTBEAT_SECONDS },
 } as const satisfies QueueSettingsMap;

@@ -373,7 +373,7 @@ its process alive, and five clips sat on "Waiting to be analysed" with no hint w
      worker: within about 60 s `GET /api/health` reports `"worker":{"alive":false,…}` (still 200) and a project with
      a waiting clip shows "The background worker isn't running" above the clips.
 
-## Square appointments (Stage C, WP6)
+## Square appointments (Stage C, WP6 and WP6b)
 
 - Unit: `packages/core/test/square.test.ts` (scopes, every card state incl. environment switch and stale sync,
   `classifyVariation` incl. passthrough `no_show_fee`, the Tier 1 checklist, the six statuses, attendance and
@@ -409,6 +409,30 @@ its process alive, and five clips sat on "Waiting to be analysed" with no hint w
   every page. The write checks belong to WP6b.
 - Only verifiable with the owner's accounts: `session=false` and the code lifetime, webhook delivery to the production
   URL, payment-match quality, the location time zone and the Dashboard deep links.
+- Booking changes (WP6b; Tier 1 is switched on in these tests only through the test-only `tier1Available` option):
+  `packages/core/test/square-changes.test.ts` (the gate both sides apply, the self-test needing lines 1–3 only,
+  `bookingActions` per role and state, stable idempotency keys, nothing "done" before Square confirmed, the notification
+  sentence, nearest alternatives); `apps/worker/test/square-changes-db.test.ts` against the fake of Square, which
+  accepts writes only when a test sets `acceptWrites`, honours idempotency keys and versions, and can drop a response
+  after applying a write (a time-out after Square made it): off by default with nothing sent; the gate (plan flag,
+  permissions, a fee-bearing service, an unconfirmed service, the plan flag gone at write time pauses changes); create
+  happy path (one write with the stored key, mirrored, audited); slot taken → `slot_unavailable` with alternatives;
+  version changed → `changed_in_square`; a time-out retried with the same key → one booking; a crash after
+  `submitted_at`; every attempt timing out → `unknown`, then the next sync confirms it; "probably not made" after 24 h;
+  a 4xx stored verbatim with the service becoming "Book in Square"; a 403 plan refusal pausing changes; the
+  double-booking warning; refusal after a disconnect or another account; the self-test resuming after a crash without
+  booking twice, a failed move still cancelling, and a failed cancel naming the test booking left in Square.
+  `apps/web/test/square-changes-routes.integration.test.ts` (every Tier 1 route refused while off; staff refused; the
+  recorded request and job; stale search, slot not offered, unconfirmed service, client from the other environment,
+  past time, version mismatch, PENDING booking, one change at a time, pause and switch-off; booking detail actions;
+  self-test refusals, three fixed step rows, live acknowledgement; the switch needing lines 1–4 and clearing a pause;
+  the notification answer; a cancelled job closing its change; disconnect withdrawing queued changes) and
+  `apps/web/test/square-changes.test.ts` (the change DTO never shows the key or Square ids, AEDT/AEST labels, the
+  switch rule, ref ids and job labels, `verified` only after a live self-test).
+- Still to run with a Square sandbox account before Tier 1 is switched on (design §11.3 steps 3–4, developer-run): the
+  three no-show set-ups with create, reschedule and cancel of a fee-free and a fee-bearing service, a seller-level
+  cancel of a PENDING booking, and the Free-plan write error; record them in `docs/research/square-sandbox-results.md`
+  and update `mapSquareError` before setting `SQUARE_TIER1_AVAILABLE = true`.
 
 ## Email and review requests (Stage C, WP7)
 

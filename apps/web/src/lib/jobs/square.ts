@@ -11,6 +11,10 @@ export const squareRefId: RefIdResolver = (type, payload) => {
       return pick('searchId');
     case 'square.refresh':
       return pick('squareId');
+    case 'square.booking_change':
+      return pick('changeId');
+    case 'square.self_test':
+      return pick('selfTestId');
     case 'square.sync':
     case 'square.attendance':
     case 'square.token_refresh':

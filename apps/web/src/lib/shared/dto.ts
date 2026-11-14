@@ -64,6 +64,8 @@ const JOB_LABELS = {
   'square.availability': 'Finding free times in Square',
   'square.token_refresh': 'Renewing Square access',
   'square.revoke': 'Revoking Square access',
+  'square.booking_change': 'Making a booking change in Square',
+  'square.self_test': 'Running the Square booking-changes self-test',
   'email.automation.sweep': 'Preparing automatic emails',
   'email.campaign.expand': 'Preparing campaign emails',
   'email.dispatch': 'Handing approved emails to Postmark',

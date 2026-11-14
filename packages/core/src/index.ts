@@ -34,6 +34,7 @@ export * from './settings/publishing.js';
 export * from './hashtag-watch.js';
 export * from './square.js';
 export * from './jobs/square.js';
+export * from './square-changes.js';
 export * from './email.js';
 export * from './reviews.js';
 export * from './jobs/email.js';
