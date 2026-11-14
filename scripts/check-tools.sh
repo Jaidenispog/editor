@@ -24,6 +24,8 @@ MIN_NODE_MAJOR=22
 MIN_NODE_MINOR=12
 MIN_PNPM_MAJOR=10
 MIN_FFMPEG_MAJOR=6
+# Homebrew's plain 'ffmpeg' formula no longer includes libass, zimg or freetype; 'ffmpeg-full' (keg-only) does.
+MAC_FFMPEG_HINT="brew install ffmpeg-full, then put it on PATH: echo 'export PATH=\"\$(brew --prefix ffmpeg-full)/bin:\$PATH\"' >> ~/.zprofile && source ~/.zprofile (Homebrew's plain 'ffmpeg' lacks libass and zscale)"
 FFMPEG="${FFMPEG_PATH:-ffmpeg}"
 FFPROBE="${FFPROBE_PATH:-ffprobe}"
 
@@ -64,7 +66,8 @@ check_pnpm() {
     return
   fi
   local version major
-  version="$(pnpm --version 2>/dev/null)"
+  # The first pnpm call through Corepack may ask before downloading the pinned pnpm; never wait on a hidden prompt.
+  version="$(COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm --version 2>/dev/null)"
   major="${version%%.*}"
   if [[ ! "$major" =~ ^[0-9]+$ ]] || (( major < MIN_PNPM_MAJOR )); then
     bad "pnpm $MIN_PNPM_MAJOR or newer (found '$version')" "Run 'corepack enable' so the version pinned in package.json (pnpm@10.28.0) is used."
@@ -75,7 +78,7 @@ check_pnpm() {
 
 check_ffmpeg() {
   if ! command -v "$FFMPEG" >/dev/null 2>&1; then
-    bad "FFmpeg $MIN_FFMPEG_MAJOR or newer ($FFMPEG)" "$(os_hint 'sudo apt-get install ffmpeg (Ubuntu 24.04 / Debian 13 ship 6.1 / 7.1)' 'brew install ffmpeg') or set FFMPEG_PATH."
+    bad "FFmpeg $MIN_FFMPEG_MAJOR or newer ($FFMPEG)" "$(os_hint 'sudo apt-get install ffmpeg (Ubuntu 24.04 / Debian 13 ship 6.1 / 7.1)' "$MAC_FFMPEG_HINT") or set FFMPEG_PATH."
     return
   fi
   local first version major
@@ -102,7 +105,7 @@ check_ffmpeg() {
   local name
   for name in libx264 aac mjpeg; do
     if grep -Eq "^ [A-Z.]{6} $name " <<<"$encoders"; then ok "encoder $name"
-    else bad "FFmpeg encoder '$name'" "Install an FFmpeg build with $name (the Ubuntu/Debian/Homebrew packages include it)."; fi
+    else bad "FFmpeg encoder '$name'" "$(os_hint "Install an FFmpeg build with $name (the Ubuntu/Debian packages include it)." "$MAC_FFMPEG_HINT")"; fi
   done
   for name in hevc h264; do
     if grep -Eq "^ [A-Z.]{6} $name " <<<"$decoders"; then ok "decoder $name"
@@ -114,8 +117,8 @@ check_ffmpeg() {
     if grep -Eq "^ [A-Z.]{2,3} $name " <<<"$filters"; then ok "filter $name"
     else
       case "$name" in
-        ass) bad "FFmpeg filter 'ass' (libass, used for on-video text)" "Install an FFmpeg build with --enable-libass (the Ubuntu/Debian/Homebrew packages include it)." ;;
-        zscale) bad "FFmpeg filter 'zscale' (libzimg, used to convert iPhone HDR to SDR)" "Install an FFmpeg build with --enable-libzimg (Ubuntu/Debian packages and 'brew install ffmpeg' include it)." ;;
+        ass) bad "FFmpeg filter 'ass' (libass, used for on-video text)" "$(os_hint 'Install an FFmpeg build with --enable-libass (the Ubuntu/Debian packages include it).' "$MAC_FFMPEG_HINT")" ;;
+        zscale) bad "FFmpeg filter 'zscale' (libzimg, used to convert iPhone HDR to SDR)" "$(os_hint 'Install an FFmpeg build with --enable-libzimg (the Ubuntu/Debian packages include it).' "$MAC_FFMPEG_HINT")" ;;
         *) bad "FFmpeg filter '$name'" "Install FFmpeg $MIN_FFMPEG_MAJOR or newer from your package manager." ;;
       esac
     fi
@@ -126,8 +129,15 @@ check_ffmpeg() {
 }
 
 check_psql() {
-  if command -v psql >/dev/null 2>&1; then
-    ok "psql $(psql --version | awk '{print $3}')"
+  # Homebrew's postgresql@16 is keg-only, so psql may not be on PATH even when it is installed.
+  local psql_cmd="" d
+  if command -v psql >/dev/null 2>&1; then psql_cmd="$(command -v psql)"; else
+    for d in /opt/homebrew/opt/postgresql@{19,18,17,16}/bin /usr/local/opt/postgresql@{19,18,17,16}/bin /usr/lib/postgresql/{19,18,17,16}/bin; do
+      if [[ -z "$psql_cmd" && -x "$d/psql" ]]; then psql_cmd="$d/psql"; fi
+    done
+  fi
+  if [[ -n "$psql_cmd" ]]; then
+    ok "psql $("$psql_cmd" --version | awk '{print $3}')"
   else
     warn "psql (PostgreSQL client)" "Needed for scripts/local-postgres.sh and backups: $(os_hint 'sudo apt-get install postgresql-16 (server) or postgresql-client-16' 'brew install postgresql@16'). Not needed if you only use Docker Compose or Supabase."
   fi

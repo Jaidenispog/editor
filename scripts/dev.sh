@@ -87,7 +87,8 @@ PIDS=()
 cleanup() {
   trap - INT TERM EXIT
   local pid
-  for pid in "${PIDS[@]}"; do
+  # ${PIDS[@]+...}: an empty array under set -u is an error on bash before 4.4 (macOS ships bash 3.2).
+  for pid in ${PIDS[@]+"${PIDS[@]}"}; do
     # Each service runs in its own process group (set -m below), so signal the whole group.
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   done
@@ -95,12 +96,12 @@ cleanup() {
   local waited=0
   while (( waited < 250 )); do
     local alive=0
-    for pid in "${PIDS[@]}"; do kill -0 "$pid" 2>/dev/null && alive=1; done
+    for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill -0 "$pid" 2>/dev/null && alive=1; done
     (( alive )) || break
     sleep 0.2
     waited=$((waited + 1))
   done
-  for pid in "${PIDS[@]}"; do kill -KILL -- "-$pid" 2>/dev/null || true; done
+  for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill -KILL -- "-$pid" 2>/dev/null || true; done
 }
 trap cleanup EXIT
 trap 'printf "\nStopping web and worker...\n"; cleanup; exit 130' INT

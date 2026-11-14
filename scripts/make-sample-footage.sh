@@ -4,7 +4,10 @@
 set -euo pipefail
 OUT="${1:-./data/samples}"
 mkdir -p "$OUT"
-FONT="${SAMPLE_FONT:-/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf}"
+# DejaVu on Debian/Ubuntu (unchanged output there); elsewhere (macOS) the Inter font that ships with the repository.
+DEFAULT_FONT=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+[[ -f "$DEFAULT_FONT" ]] || DEFAULT_FONT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/assets/fonts/Inter-Bold.otf"
+FONT="${SAMPLE_FONT:-$DEFAULT_FONT}"
 label() { # $1 text
   echo "drawtext=fontfile=$FONT:text='$1':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.5:boxborderw=20"
 }
