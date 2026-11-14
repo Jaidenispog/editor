@@ -11,6 +11,10 @@ export interface RevisionHints {
   music: 'keep' | 'quieter' | 'louder' | 'none';
   originalSound: 'keep' | 'on' | 'off';
   opening: SegmentLabel | null;
+  /** Colour look asked for ("more natural colour", "punchier colours", "moodier", "brighter and cleaner"). */
+  colour?: 'keep' | 'natural' | 'clean' | 'cinematic' | 'punchy';
+  /** Cutting to the music's beat: "cut to the beat" (on) or "ignore the beat" (off). */
+  beatSync?: 'keep' | 'on' | 'off';
   /** Sentences the rules-based parser could not interpret (passed to the AI planner verbatim). */
   unparsed: string[];
 }
@@ -71,6 +75,8 @@ export function parseRevisionInstruction(instruction: string): RevisionHints {
     music: 'keep',
     originalSound: 'keep',
     opening: null,
+    colour: 'keep',
+    beatSync: 'keep',
     unparsed: [],
   };
   const sentences = instruction
@@ -96,6 +102,19 @@ export function parseRevisionInstruction(instruction: string): RevisionHints {
       understood = true;
     }
 
+    const colour = readColour(s);
+    if (colour) {
+      hints.colour = colour;
+      understood = true;
+    }
+    if (/\b(?:ignore|forget|don'?t (?:follow|cut to)|stop cutting (?:to|on)|not on|off) the beats?\b|\bno beat[- ]?sync\b|\bnatural (?:cut|shot) lengths\b/.test(s)) {
+      hints.beatSync = 'off';
+      understood = true;
+    } else if (/\b(?:cut|cuts|cutting|edit|sync|time|timed|match)\b[^.]*\b(?:to|on|with) the beats?\b|\bon the beat\b|\bbeat[- ]?sync(?:ed)?\b/.test(s)) {
+      hints.beatSync = 'on';
+      understood = true;
+    }
+
     const mentionsTransitions = /\b(flashy|fancy|wipes?|slides?|transitions?|effects?|zooms?|spins?|whips?|glitch(es)?|flashes)\b/.test(s);
     if (mentionsTransitions && /\b(remove|no|without|drop|kill|lose|ditch|get rid of|less|fewer|tone down|calm down|simpler?|simple cuts|hard cuts|too much|cheesy|distracting|over the top)\b/.test(s)) {
       // Only a blanket request ("no transitions", "hard cuts only") removes every transition. Naming a kind of
@@ -106,7 +125,7 @@ export function parseRevisionInstruction(instruction: string): RevisionHints {
     } else if (/\b(hard|straight|plain|simple) cuts only\b|\bjust (hard |straight )?cuts\b|\bonly (hard |straight )?cuts\b/.test(s)) {
       hints.transitions = 'none';
       understood = true;
-    } else if (/\b(?:keep|make) it (?:simple|clean|minimal|plain|understated|subtle|classic)\b|\b(?:simpler|cleaner|more minimal|less busy|too busy|too much going on|tone it down)\b/.test(s)) {
+    } else if (!colour && /\b(?:keep|make) it (?:simple|clean|minimal|plain|understated|subtle|classic)\b|\b(?:simpler|cleaner|more minimal|less busy|too busy|too much going on|tone it down)\b/.test(s)) {
       hints.transitions = 'restrained';
       understood = true;
     }
@@ -168,6 +187,18 @@ export function parseRevisionInstruction(instruction: string): RevisionHints {
     if (!understood) hints.unparsed.push(raw);
   }
   return hints;
+}
+
+/**
+ * The colour look a sentence asks for, or null. "Cleaner" or "brighter" only count as colour when they describe the
+ * look or the colour, so "keep it cleaner" still means simpler transitions.
+ */
+function readColour(s: string): RevisionHints['colour'] | null {
+  if (/\b(?:more natural|natural(?:-looking)?) (?:colou?rs?|look|grade|tones?)\b|\bless (?:edited|filtered|graded)\b|\bno filter\b/.test(s)) return 'natural';
+  if (/\bmoodier\b|\bmoody\b|\bcinematic\b|\bfilm(?:ic)? look\b/.test(s)) return 'cinematic';
+  if (/\bmore contrast\b|\bpunch(?:y|ier) (?:colou?rs?|look|grade)\b|\bmore vivid\b|\bmore saturat\w*\b|\bmore colourful\b|\bcolou?rs? (?:pop|punchier)\b/.test(s)) return 'punchy';
+  if (/\bbrighter and cleaner\b|\bcleaner and brighter\b|\b(?:clean|cleaner|brighter) (?:colou?rs?|look|grade)\b/.test(s)) return 'clean';
+  return null;
 }
 
 const WORD_NUMBERS: Record<string, number> = {

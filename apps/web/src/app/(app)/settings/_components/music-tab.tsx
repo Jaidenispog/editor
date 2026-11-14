@@ -1,8 +1,9 @@
 'use client';
 
-import { FileCheck2, Music, Trash2, Upload } from 'lucide-react';
+import { FileCheck2, Music, Tags, Trash2, Upload } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useId, useState, useSyncExternalStore, type FormEvent } from 'react';
+import { LICENCE_STATE_LABELS, type LicenceState } from '@studio/core';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -10,43 +11,56 @@ import { Dialog } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/ui/empty-state';
 import { StatusPill } from '@/components/ui/status-pill';
 import { useToast } from '@/components/ui/toast';
-import { LICENCE_KINDS, LICENCE_PLACES, LicenceFields, RightsConfirmation, licenceDraftFrom, licenceFromDraft, type LicenceDraft } from '@/components/studio/licence-form';
+import { Input } from '@/components/ui/field';
 import { MusicUploadDialog, type MusicUploadRequest } from '@/components/studio/music-upload-dialog';
 import { UploadList } from '@/components/studio/upload-zone';
 import { apiRequest } from '@/lib/client/api-client';
 import { ChunkedUploader, type UploadItem } from '@/lib/client/uploader';
 import { formatBytes, formatDate, formatSeconds } from '@/lib/format';
 import type { MusicTrackSummary } from '@/lib/music';
+import {
+  LICENCE_PLACES,
+  LicencePassportForm,
+  RightsConfirmation,
+  licenceDraftFrom,
+  licenceFromDraft,
+  licenceKindLabel,
+  licenceStepError,
+  parseTags,
+  stepTitle,
+  type LicenceDraft,
+} from './licence-passport-form';
+import { MusicReferences } from './music-references';
 
 const EMPTY_UPLOADS: UploadItem[] = [];
 /** How often the list refreshes while a track is still being analysed. */
 const ANALYSING_REFRESH_MS = 5000;
 
-type LicenceState = 'confirmed' | 'unconfirmed' | 'expired';
-
-function licenceState(t: MusicTrackSummary): LicenceState {
-  if (!t.licenceConfirmed) return 'unconfirmed';
-  if (t.licence.expiresAt && new Date(t.licence.expiresAt).getTime() < Date.now()) return 'expired';
-  return 'confirmed';
-}
-
-const LICENCE_STATE_TEXT: Record<LicenceState, { label: string; tone: 'success' | 'warning' | 'danger'; help: string }> = {
-  confirmed: { label: 'Licence confirmed', tone: 'success', help: '' },
-  unconfirmed: { label: 'Licence not confirmed', tone: 'warning', help: 'Open “Licence details” and confirm your rights before this track can be used in edits.' },
-  expired: { label: 'Licence expired', tone: 'danger', help: 'The licence end date has passed. Update the details if you renewed it.' },
+const LICENCE_STATE_TEXT: Record<LicenceState, { tone: 'success' | 'warning' | 'danger' | 'info'; help: string }> = {
+  confirmed: { tone: 'success', help: '' },
+  not_confirmed: { tone: 'warning', help: 'Open “Licence details” and confirm your rights before this track can be used in edits.' },
+  expired: { tone: 'danger', help: 'The licence end date has passed. Update the details if you renewed it.' },
+  meta_only: { tone: 'info', help: 'Videos with this track are marked “For Instagram/Facebook upload only”.' },
 };
 
-/** "Licence details": edit the licence record of a track and confirm (or withdraw) the owner's rights. */
+/** "Licence details": the licence passport of a track in three steps, and confirming (or withdrawing) the owner's rights. */
 function LicenceDetailsDialog({ track, onClose, onSaved }: { track: MusicTrackSummary; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
   const formId = useId();
   const [draft, setDraft] = useState<LicenceDraft>(() => licenceDraftFrom(track.licence));
+  const [step, setStep] = useState<1 | 2 | 3>(1);
   const [confirmed, setConfirmed] = useState(track.licenceConfirmed);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
+    if (step < 3) {
+      const problem = licenceStepError(draft, step);
+      if (problem) return setError(problem);
+      setError(null);
+      return setStep(step === 1 ? 2 : 3);
+    }
     const built = licenceFromDraft(draft);
     if ('error' in built) return setError(built.error);
     setSaving(true);
@@ -68,26 +82,85 @@ function LicenceDetailsDialog({ track, onClose, onSaved }: { track: MusicTrackSu
       open
       onClose={onClose}
       title={`Licence details: ${track.title}`}
-      description={
+      description={`${stepTitle(step)}${stepTitle(step).endsWith('?') ? '' : '.'} ${
         track.licence.confirmedByOwnerAt
           ? `You confirmed your rights on ${formatDate(track.licence.confirmedByOwnerAt)}. Saving changed details with the box ticked confirms them again.`
           : 'Record where this track came from and where you may use it, then confirm your rights so it can be used in edits.'
+      }`}
+      footer={
+        <>
+          {step > 1 ? (
+            <Button variant="ghost" onClick={() => setStep(step === 3 ? 2 : 1)}>
+              Back
+            </Button>
+          ) : (
+            <Button variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+          )}
+          <Button type="submit" form={formId} loading={saving} disabled={draft.kind === 'cc_by_nc'}>
+            {step < 3 ? 'Next' : 'Save licence details'}
+          </Button>
+        </>
       }
+    >
+      <form id={formId} onSubmit={save} className="space-y-4" noValidate>
+        <LicencePassportForm draft={draft} onChange={setDraft} step={step} disabled={saving} />
+        {step === 3 ? <RightsConfirmation checked={confirmed} onChange={setConfirmed} disabled={saving} /> : null}
+        {step === 3 && !confirmed ? <p className="text-sm text-amber-800">Without this confirmation the track cannot be used in new edits.</p> : null}
+        {error ? (
+          <p role="alert" className="text-sm text-red-600">
+            {error}
+          </p>
+        ) : null}
+      </form>
+    </Dialog>
+  );
+}
+
+/** "Genres and moods" of one track (they guide "Suggested for you" in the Studio). */
+function TagsDialog({ track, onClose, onSaved }: { track: MusicTrackSummary; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast();
+  const formId = useId();
+  const [genres, setGenres] = useState(track.genres.join(', '));
+  const [moods, setMoods] = useState(track.moods.join(', '));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      await apiRequest(`/api/music/${track.id}`, { method: 'PATCH', body: { genres: parseTags(genres), moods: parseTags(moods) } });
+      toast.success('Tags saved');
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The tags could not be saved.');
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Genres and moods: ${track.title}`}
+      description="Used to suggest tracks from your own library in the Video Studio. Nothing is searched outside your library."
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
           <Button type="submit" form={formId} loading={saving}>
-            Save licence details
+            Save tags
           </Button>
         </>
       }
     >
       <form id={formId} onSubmit={save} className="space-y-4" noValidate>
-        <LicenceFields draft={draft} onChange={setDraft} disabled={saving} />
-        <RightsConfirmation checked={confirmed} onChange={setConfirmed} disabled={saving} />
-        {!confirmed ? <p className="text-sm text-amber-800">Without this confirmation the track cannot be used in new edits.</p> : null}
+        <Input label="Genres" hint="Separate with commas, e.g. hip hop, R&B, lo-fi" value={genres} onChange={(e) => setGenres(e.target.value)} maxLength={500} />
+        <Input label="Moods" hint="e.g. upbeat, calm, cinematic" value={moods} onChange={(e) => setMoods(e.target.value)} maxLength={500} />
         {error ? (
           <p role="alert" className="text-sm text-red-600">
             {error}
@@ -99,14 +172,16 @@ function LicenceDetailsDialog({ track, onClose, onSaved }: { track: MusicTrackSu
 }
 
 /**
- * Music library: every track with its licence status, a "Licence details" form with the explicit rights
- * confirmation, and uploading new licensed tracks with the same resumable uploader as the Video Studio.
+ * Music library: every track with its licence passport chips (licence state, origin, destinations, genres and
+ * moods), "Licence details" with the explicit rights confirmation, uploading new licensed tracks with the same
+ * resumable uploader as the Video Studio, and the private Spotify references.
  */
 export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary[]; maxUploadBytes: number }) {
   const router = useRouter();
   const toast = useToast();
   const [confirmDelete, setConfirmDelete] = useState<MusicTrackSummary | null>(null);
   const [editing, setEditing] = useState<MusicTrackSummary | null>(null);
+  const [tagging, setTagging] = useState<MusicTrackSummary | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -149,6 +224,7 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
   };
 
   return (
+    <div className="space-y-6">
     <Card>
       <CardHeader
         title="Music library"
@@ -175,9 +251,9 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
         ) : (
           <ul className="divide-y divide-charcoal-100">
             {tracks.map((t) => {
-              const state = licenceState(t);
+              const state = t.licenceState;
               const info = LICENCE_STATE_TEXT[state];
-              const places = LICENCE_PLACES.filter(([key]) => t.licence.permitted[key]).map(([, label]) => label);
+              const places = LICENCE_PLACES.filter(([key]) => key !== 'promotionalUse' && t.licence.permitted[key]).map(([, label]) => label);
               return (
                 <li key={t.id} className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start">
                   <div className="min-w-0 flex-1">
@@ -190,10 +266,21 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
                     </p>
                     {t.status === 'failed' && t.statusMessage ? <p className="mt-1 text-sm text-red-600">{t.statusMessage}</p> : null}
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      <Badge tone={info.tone}>{info.label}</Badge>
-                      <Badge>{LICENCE_KINDS.find((k) => k.value === t.licence.kind)?.label ?? 'Not sure'}</Badge>
-                      {t.licence.licenceName ? <Badge>{t.licence.licenceName}</Badge> : null}
+                      <Badge tone={info.tone}>{LICENCE_STATE_LABELS[state]}</Badge>
+                      <Badge>{licenceKindLabel(t.licence.kind)}</Badge>
+                      {t.licence.planName ? <Badge>{t.licence.planName}</Badge> : t.licence.licenceName ? <Badge>{t.licence.licenceName}</Badge> : null}
+                      {places.map((p) => (
+                        <Badge key={p} tone="info">
+                          {p}
+                        </Badge>
+                      ))}
+                      {[...t.genres, ...t.moods].map((g) => (
+                        <Badge key={`tag-${g}`} tone="accent">
+                          {g}
+                        </Badge>
+                      ))}
                     </div>
+                    {!t.licence.permitted.promotionalUse ? <p className="mt-1 text-xs text-amber-800">Not ticked for promoting the business, so exports with this track are blocked.</p> : null}
                     <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs text-charcoal-600 sm:grid-cols-2">
                       <div>
                         <dt className="inline font-medium text-charcoal-700">Allowed for: </dt>
@@ -218,9 +305,12 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
                     </dl>
                     {info.help ? <p className="mt-2 text-sm text-charcoal-600">{info.help}</p> : null}
                   </div>
-                  <div className="flex shrink-0 gap-1.5">
-                    <Button variant={state === 'confirmed' ? 'ghost' : 'secondary'} size="sm" onClick={() => setEditing(t)} aria-label={`Licence details for ${t.title}`}>
+                  <div className="flex shrink-0 flex-wrap gap-1.5">
+                    <Button variant={state === 'confirmed' || state === 'meta_only' ? 'ghost' : 'secondary'} size="sm" onClick={() => setEditing(t)} aria-label={`Licence details for ${t.title}`}>
                       <FileCheck2 className="size-4" aria-hidden="true" /> Licence details
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => setTagging(t)} aria-label={`Genres and moods for ${t.title}`}>
+                      <Tags className="size-4" aria-hidden="true" /> Tags
                     </Button>
                     <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(t)} aria-label={`Remove ${t.title}`}>
                       <Trash2 className="size-4" aria-hidden="true" /> Remove
@@ -233,6 +323,7 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
         )}
       </CardBody>
       {editing ? <LicenceDetailsDialog key={editing.id} track={editing} onClose={() => setEditing(null)} onSaved={() => router.refresh()} /> : null}
+      {tagging ? <TagsDialog key={tagging.id} track={tagging} onClose={() => setTagging(null)} onSaved={() => router.refresh()} /> : null}
       <MusicUploadDialog open={uploadOpen} onClose={() => setUploadOpen(false)} onSubmit={startUpload} />
       <Dialog
         open={confirmDelete !== null}
@@ -251,5 +342,7 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
         }
       />
     </Card>
+    <MusicReferences />
+    </div>
   );
 }

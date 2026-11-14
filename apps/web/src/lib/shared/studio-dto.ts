@@ -1,4 +1,4 @@
-import type { GenerationSettings, MusicLicence, StyleId } from '@studio/core';
+import type { GenerationSettings, LicenceState, MusicClearance, MusicLicence, SpotifyItemType, StyleId } from '@studio/core';
 import type { JobDto } from './dto.js';
 import type { EnergyCurve } from './music-curve.js';
 
@@ -73,6 +73,105 @@ export interface MusicOptionDto {
   licenceSummary: string;
   /** Loudness over the track for the start-point picker (shrunk to a few hundred points), once analysed. */
   energy: EnergyCurve | null;
+  /** Genres the owner tagged (filled where the status payload provides them). */
+  genres?: string[];
+  /** Moods the owner tagged (filled where the status payload provides them). */
+  moods?: string[];
+}
+
+/** One track in GET /api/music/suggestions ("Suggested for you" in the Studio form). */
+export interface MusicSuggestionDto {
+  id: string;
+  score: number;
+  /** 1–3 for suggested tracks, null otherwise. */
+  rank: number | null;
+  reasons: string[];
+  usable: boolean;
+  unusableReason?: string;
+}
+
+/** Response of GET /api/music/suggestions. */
+export interface MusicSuggestionsDto {
+  tracks: MusicSuggestionDto[];
+  /** "None of your tracks are by …" notes for liked artists without a match. */
+  notes: string[];
+}
+
+/** State of the music-free export of one version. */
+export interface VariantExportDto {
+  status: 'none' | 'queued' | 'rendering' | 'ready' | 'failed';
+  message: string;
+  byteSize: number | null;
+}
+
+/**
+ * GET /api/music/versions/[id]: the music of one version for the card's licence banner, the Sound panel and the
+ * export dialog (track, licence, clearance, the plan's current sound settings and the music-free export).
+ */
+export interface VersionMusicDto {
+  versionId: string;
+  styleId: StyleId;
+  /** True when the style has a finished-result shot (the reveal option is offered). */
+  hasResultShot: boolean;
+  /** True when at least one clip in the edit has its own sound. */
+  clipsHaveSound: boolean;
+  /** Length of the version in seconds. */
+  durationSec: number;
+  track: null | {
+    id: string;
+    title: string;
+    artist: string;
+    durationSec: number | null;
+    bpm: number | null;
+    beatTimesSec: number[];
+    energy: EnergyCurve | null;
+    licenceState: LicenceState;
+    /** False when the track was removed from the library. */
+    available: boolean;
+  };
+  sound: {
+    hasMusic: boolean;
+    startOffsetSec: number | null;
+    volume: number | null;
+    fadeInSec: number | null;
+    fadeOutSec: number | null;
+    duckUnderOriginal: boolean | null;
+    originalSound: 'off' | 'under_music' | 'only';
+    originalVolume: number;
+    beatAligned: boolean;
+  };
+  clearance: MusicClearance;
+  /** Plain line for the export dialog, e.g. "Music cleared for: Instagram and TikTok." */
+  clearanceSummary: string;
+  /** "For Instagram/Facebook upload only" for Meta-locked music, else null. */
+  downloadLabel: string | null;
+  noMusicExport: VariantExportDto;
+}
+
+/** One private Spotify reference (URL, type, id and the owner's notes only). */
+export interface MusicReferenceDto {
+  id: string;
+  url: string;
+  itemType: SpotifyItemType;
+  externalId: string;
+  notes: string;
+  /** The official embed address, present only when embed mode is on and allowed. */
+  embedUrl: string | null;
+  createdAt: string;
+}
+
+/** Response of GET /api/music/references. */
+export interface MusicReferencesDto {
+  /** The mode in force: `embed` only when it is switched on and everything it needs exists. */
+  mode: 'link_only' | 'embed';
+  /** The stored choice (may be `embed` while something it needs is missing). */
+  storedMode: 'link_only' | 'embed';
+  canEmbed: boolean;
+  /** What is still needed before the embed can be shown, in plain words. */
+  missing: string[];
+  termsAcknowledged: boolean;
+  notice: string;
+  references: MusicReferenceDto[];
 }
 
 /**

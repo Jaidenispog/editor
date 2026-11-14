@@ -1,6 +1,29 @@
 import 'server-only';
 import { and, eq, inArray, isNull, max, sql } from 'drizzle-orm';
-import { AppError, GenerationSettingsSchema, STYLES, STYLE_IDS, formatSeconds, newId, type GenerationSettings, type StyleId } from '@studio/core';
+import {
+  AppError,
+  GenerationSettingsSchema,
+  META_ONLY_FILE_SUFFIX,
+  META_ONLY_LABEL,
+  STYLES,
+  STYLE_IDS,
+  clearanceSummary,
+  computeTimeline,
+  formatSeconds,
+  isEmptyAudioPatch,
+  licenceStateOf,
+  missingTrackClearance,
+  musicClearanceFor,
+  needsRecut,
+  newId,
+  originalSoundModeOf,
+  type AudioPatch,
+  type EditPlan,
+  type ExportVariant,
+  type GenerationSettings,
+  type MusicClearance,
+  type StyleId,
+} from '@studio/core';
 import { schema, type Edit, type EditVersion, type Generation } from '@studio/db';
 import { z } from 'zod';
 import type { SessionUser } from './auth.js';
@@ -11,6 +34,8 @@ import { downloadNameFor, signedUrlFor } from './media-links.js';
 import { getLogger } from './logger.js';
 import { getSettings, updateSettings } from './settings.js';
 import { getAccessibleEdit, getAccessibleProject, getAccessibleVersion } from './studio-access.js';
+import { downsampleEnergy } from './shared/music-curve.js';
+import type { VariantExportDto, VersionMusicDto } from './shared/studio-dto.js';
 
 /** Generation states that mean a previous press of "Generate" is still being planned. */
 const GENERATION_PLANNING = ['queued', 'planning'] as const;
@@ -154,17 +179,32 @@ export async function setFavourite(editId: string, user: SessionUser, value: boo
   return { isFavourite: value };
 }
 
+/** Checks a Sound panel track choice: a library track that is analysed and whose licence the owner confirmed. */
+async function assertTrackUsable(trackId: string): Promise<void> {
+  const track = await getDb().query.musicTracks.findFirst({
+    where: and(eq(schema.musicTracks.id, trackId), isNull(schema.musicTracks.deletedAt), isNull(schema.musicTracks.projectId)),
+  });
+  if (!track) throw new AppError('VALIDATION', 'That music track is no longer in the library. Choose another one.', { details: [{ path: 'audio.trackId', message: 'Not found' }] });
+  if (track.status !== 'ready') throw new AppError('CONFLICT', 'That music track is still being analysed. Wait for it to finish or choose another one.');
+  if (!track.licence.confirmedByOwnerAt) throw new AppError('VALIDATION', 'Confirm the licence for that track in Settings → Music before using it.');
+}
+
 /**
- * Creates a new version of an edit (revise with an instruction, or a fresh regenerate). The previous version
- * is kept untouched; the new one becomes current and edits.revise plans it.
+ * Creates a new version of an edit (revise with an instruction and/or a Sound panel change, or a fresh
+ * regenerate). The previous version is kept untouched; the new one becomes current and edits.revise plans it. A
+ * sound change alone that needs no re-cut runs in `audio` mode: same cuts, new sound.
  */
 export async function createEditVersion(
   editId: string,
   user: SessionUser,
-  input: { mode: 'revise' | 'regenerate'; instruction: string },
+  input: { mode: 'revise' | 'regenerate'; instruction: string; audio?: AudioPatch | undefined },
 ): Promise<{ version: EditVersion; jobId: string }> {
   const { edit } = await getAccessibleEdit(editId, user);
   const db = getDb();
+  const audio = input.mode === 'revise' && input.audio && !isEmptyAudioPatch(input.audio) ? input.audio : undefined;
+  if (input.mode === 'revise' && !audio && input.instruction.trim().length < 2) throw new AppError('VALIDATION', 'Tell the editor what to change.');
+  if (audio?.trackId) await assertTrackUsable(audio.trackId);
+  const jobMode: 'revise' | 'regenerate' | 'audio' = audio && !needsRecut(audio) && !input.instruction.trim() ? 'audio' : input.mode;
   if (edit.currentVersionId) {
     const current = await db.query.editVersions.findFirst({ columns: { status: true }, where: eq(schema.editVersions.id, edit.currentVersionId) });
     if (current && (current.status === 'planning' || current.status === 'planned' || current.status === 'rendering_preview')) {
@@ -187,7 +227,7 @@ export async function createEditVersion(
         origin: input.mode,
         instruction: input.instruction,
         status: 'planning',
-        statusMessage: input.mode === 'revise' ? 'Waiting to apply your changes' : 'Waiting to make a fresh take',
+        statusMessage: jobMode === 'audio' ? 'Waiting to change the sound' : input.mode === 'revise' ? 'Waiting to apply your changes' : 'Waiting to make a fresh take',
       })
       .returning();
     await tx.update(schema.edits).set({ currentVersionId: versionId, updatedAt: new Date() }).where(eq(schema.edits.id, editId));
@@ -199,13 +239,13 @@ export async function createEditVersion(
       editVersionId: versionId,
       styleId: edit.styleId,
       type: input.mode,
-      data: input.instruction ? { instruction: input.instruction } : {},
+      data: { ...(input.instruction ? { instruction: input.instruction } : {}), ...(audio ? { audioPatch: audio } : {}) },
     });
     if (!row) throw new AppError('INTERNAL', 'The new version could not be recorded.');
     return row;
   });
   try {
-    const job = await createTrackedJob({ type: 'edits.revise', payload: { editId, projectId: edit.projectId, newVersionId: versionId, mode: input.mode } });
+    const job = await createTrackedJob({ type: 'edits.revise', payload: { editId, projectId: edit.projectId, newVersionId: versionId, mode: jobMode, ...(audio ? { audio } : {}) } });
     return { version, jobId: job.id };
   } catch (err) {
     await db.update(schema.editVersions).set({ status: 'failed', statusMessage: 'Could not start. Please try again.', updatedAt: new Date() }).where(eq(schema.editVersions.id, versionId));
@@ -225,30 +265,69 @@ export async function setCurrentVersion(editId: string, user: SessionUser, versi
 /** Export status as sent back by the export route. */
 export interface ExportStateDto {
   versionId: string;
+  /** Which file: the standard export or the music-free one. */
+  variant: ExportVariant;
   exportStatus: EditVersion['exportStatus'];
   exportMessage: string;
   jobId: string | null;
+  /** What the version's music is cleared for (for the standard file; `no_music` for the music-free one). */
+  musicClearance: MusicClearance;
+}
+
+/** The current licence check of a plan's music (no music, a removed track, or the track's licence passport). */
+export async function clearanceForPlan(plan: EditPlan | null): Promise<MusicClearance> {
+  // Plans always carry `audio`; the optional chaining only guards against rows written by hand.
+  const music = plan?.audio?.music;
+  if (!music) return musicClearanceFor(null);
+  const track = await getDb().query.musicTracks.findFirst({ where: eq(schema.musicTracks.id, music.trackId) });
+  if (!track || track.deletedAt) return missingTrackClearance();
+  return musicClearanceFor(track.licence);
+}
+
+/** The 409 message for an export whose music is not cleared. */
+export function exportBlockedMessage(clearance: MusicClearance): string {
+  const reason = (clearance.reasons[0] ?? 'the licence could not be checked.').replace(/\.$/, '');
+  return `This version's music isn't cleared for business use: ${reason}. Make a music-free version, or confirm the licence in Settings → Music.`;
+}
+
+/** The music-free export's state as the browser sees it. */
+export function variantExportDto(version: Pick<EditVersion, 'variantExports'>): VariantExportDto {
+  const v = version.variantExports?.no_music;
+  return v ? { status: v.status, message: v.message, byteSize: v.byteSize } : { status: 'none', message: '', byteSize: null };
 }
 
 /**
- * Queues the full-quality 1080×1920 render of one version. Idempotent: while an export is queued or
- * rendering (or already ready) the current state is returned and no second render is queued.
+ * Queues a full-quality 1080×1920 render of one version: the standard file (its music must be cleared by the
+ * licence passport, otherwise 409 with the reasons) or the music-free `no_music` file of the same version (same
+ * cuts, text and colour; never needs clearance). Idempotent per variant: while it is queued or rendering (or
+ * already ready) the current state is returned and no second render is queued.
  */
-export async function requestExport(versionId: string, user: SessionUser): Promise<ExportStateDto> {
+export async function requestExport(versionId: string, user: SessionUser, variant: ExportVariant = 'standard'): Promise<ExportStateDto> {
   const { version, edit } = await getAccessibleVersion(versionId, user);
+  if (variant === 'no_music') return requestMusicFreeExport(version, edit.projectId, user);
   const db = getDb();
+  const clearance = await clearanceForPlan(version.plan);
   const activeJob = async () =>
     (
       await db.query.jobs.findFirst({
         columns: { id: true },
-        where: and(eq(schema.jobs.refId, versionId), eq(schema.jobs.type, 'render.export'), inArray(schema.jobs.status, [...ACTIVE_JOB_STATUSES])),
+        where: and(
+          eq(schema.jobs.refId, versionId),
+          eq(schema.jobs.type, 'render.export'),
+          inArray(schema.jobs.status, [...ACTIVE_JOB_STATUSES]),
+          sql`coalesce(${schema.jobs.payload}->>'variant', 'standard') = 'standard'`,
+        ),
       })
     )?.id ?? null;
   if (version.exportStatus === 'queued' || version.exportStatus === 'rendering' || version.exportStatus === 'ready') {
-    return { versionId, exportStatus: version.exportStatus, exportMessage: version.exportMessage, jobId: await activeJob() };
+    return { versionId, variant, exportStatus: version.exportStatus, exportMessage: version.exportMessage, jobId: await activeJob(), musicClearance: clearance };
   }
   if (version.status !== 'preview_ready' || !version.plan) {
     throw new AppError('CONFLICT', 'This version is not ready yet. Wait for its preview, then export.');
+  }
+  if (clearance.state === 'blocked') {
+    await writeAudit({ userId: user.id, action: 'music.export_blocked', entityType: 'edit_version', entityId: versionId, data: { reasons: clearance.reasons } });
+    throw new AppError('CONFLICT', exportBlockedMessage(clearance), { details: { musicClearance: clearance } });
   }
   const claimed = await db
     .update(schema.editVersions)
@@ -257,11 +336,11 @@ export async function requestExport(versionId: string, user: SessionUser): Promi
     .returning({ exportStatus: schema.editVersions.exportStatus, exportMessage: schema.editVersions.exportMessage });
   if (claimed.length === 0) {
     const latest = await db.query.editVersions.findFirst({ columns: { exportStatus: true, exportMessage: true }, where: eq(schema.editVersions.id, versionId) });
-    return { versionId, exportStatus: latest?.exportStatus ?? 'queued', exportMessage: latest?.exportMessage ?? '', jobId: await activeJob() };
+    return { versionId, variant, exportStatus: latest?.exportStatus ?? 'queued', exportMessage: latest?.exportMessage ?? '', jobId: await activeJob(), musicClearance: clearance };
   }
   try {
-    const job = await createTrackedJob({ type: 'render.export', payload: { editVersionId: versionId, projectId: edit.projectId }, singletonKey: `export:${versionId}` });
-    return { versionId, exportStatus: 'queued', exportMessage: 'Waiting to export', jobId: job.id };
+    const job = await createTrackedJob({ type: 'render.export', payload: { editVersionId: versionId, projectId: edit.projectId, variant: 'standard' }, singletonKey: `export:${versionId}:standard` });
+    return { versionId, variant, exportStatus: 'queued', exportMessage: 'Waiting to export', jobId: job.id, musicClearance: clearance };
   } catch (err) {
     await db
       .update(schema.editVersions)
@@ -271,21 +350,142 @@ export async function requestExport(versionId: string, user: SessionUser): Promi
   }
 }
 
-/** Expiring link to a version's full-quality export (default) or its preview, with a friendly file name. */
-export async function downloadLink(versionId: string, user: SessionUser, kind: 'export' | 'preview'): Promise<{ url: string; filename: string; expiresInSeconds?: number }> {
+/** Queues the music-free file of a version (claimed with a conditional update so two clicks queue one render). */
+async function requestMusicFreeExport(version: EditVersion, projectId: string, user: SessionUser): Promise<ExportStateDto> {
+  const db = getDb();
+  const clearance = musicClearanceFor(null);
+  const toStatus = (s: VariantExportDto['status']): EditVersion['exportStatus'] => (s === 'none' ? 'none' : s);
+  const activeJob = async () =>
+    (
+      await db.query.jobs.findFirst({
+        columns: { id: true },
+        where: and(eq(schema.jobs.refId, version.id), eq(schema.jobs.type, 'render.export'), inArray(schema.jobs.status, [...ACTIVE_JOB_STATUSES]), sql`${schema.jobs.payload}->>'variant' = 'no_music'`),
+      })
+    )?.id ?? null;
+  const current = variantExportDto(version);
+  if (current.status === 'queued' || current.status === 'rendering' || current.status === 'ready') {
+    return { versionId: version.id, variant: 'no_music', exportStatus: toStatus(current.status), exportMessage: current.message, jobId: await activeJob(), musicClearance: clearance };
+  }
+  if (version.status !== 'preview_ready' || !version.plan) throw new AppError('CONFLICT', 'This version is not ready yet. Wait for its preview, then make the music-free version.');
+  const queued = JSON.stringify({ no_music: { status: 'queued', key: null, byteSize: null, message: 'Waiting to make the music-free version', updatedAt: new Date().toISOString() } });
+  const claimed = await db
+    .update(schema.editVersions)
+    .set({ variantExports: sql`${schema.editVersions.variantExports} || ${queued}::jsonb`, updatedAt: new Date() })
+    .where(and(eq(schema.editVersions.id, version.id), sql`coalesce(${schema.editVersions.variantExports}->'no_music'->>'status', 'none') not in ('queued', 'rendering', 'ready')`))
+    .returning({ variantExports: schema.editVersions.variantExports });
+  if (claimed.length === 0) {
+    const latest = await db.query.editVersions.findFirst({ columns: { variantExports: true }, where: eq(schema.editVersions.id, version.id) });
+    const state = variantExportDto({ variantExports: latest?.variantExports ?? {} });
+    return { versionId: version.id, variant: 'no_music', exportStatus: toStatus(state.status), exportMessage: state.message, jobId: await activeJob(), musicClearance: clearance };
+  }
+  try {
+    const job = await createTrackedJob({ type: 'render.export', payload: { editVersionId: version.id, projectId, variant: 'no_music' }, singletonKey: `export:${version.id}:no_music` });
+    await writeAudit({ userId: user.id, action: 'music.no_music_export_requested', entityType: 'edit_version', entityId: version.id });
+    return { versionId: version.id, variant: 'no_music', exportStatus: 'queued', exportMessage: 'Waiting to make the music-free version', jobId: job.id, musicClearance: clearance };
+  } catch (err) {
+    const failed = JSON.stringify({ no_music: { status: 'failed', key: null, byteSize: null, message: 'The music-free version could not start. Please try again.', updatedAt: new Date().toISOString() } });
+    await db.update(schema.editVersions).set({ variantExports: sql`${schema.editVersions.variantExports} || ${failed}::jsonb` }).where(eq(schema.editVersions.id, version.id));
+    throw err;
+  }
+}
+
+/** Result of GET /api/edit-versions/[id]/download. */
+export interface DownloadLinkDto {
+  url: string;
+  filename: string;
+  expiresInSeconds?: number;
+  /** "For Instagram/Facebook upload only" for a standard export with Meta-locked music. */
+  label?: string | null;
+  /** What the music in this file is cleared for. */
+  musicClearance?: MusicClearance;
+}
+
+/**
+ * Expiring link to a version's full-quality export (default), its music-free export or its preview, with a
+ * friendly file name. A standard export whose music is locked to Meta destinations is labelled and named
+ * `…-instagram-facebook-only.mp4`.
+ */
+export async function downloadLink(versionId: string, user: SessionUser, kind: 'export' | 'export_no_music' | 'preview'): Promise<DownloadLinkDto> {
   const { version, edit, project } = await getAccessibleVersion(versionId, user);
   const styleName = STYLES[edit.styleId as StyleId]?.name ?? edit.styleId;
+  if (kind === 'export_no_music') {
+    const nm = version.variantExports?.no_music;
+    if (nm?.status !== 'ready' || !nm.key) throw new AppError('CONFLICT', 'The music-free version is not ready yet. Press "Make a music-free version" first.');
+    const filename = downloadNameFor([project.title, styleName, `v${version.versionNo}`, 'no-music'], 'mp4');
+    const url = await signedUrlFor(nm.key, { downloadName: filename, contentType: 'video/mp4' });
+    await recordDownload(user, project.id, edit, versionId, 'no_music');
+    return { url, filename, label: null, musicClearance: musicClearanceFor(null) };
+  }
   if (kind === 'preview') {
     if (version.status !== 'preview_ready' || !version.previewKey) throw new AppError('CONFLICT', 'The preview for this version is not ready yet.');
     const filename = downloadNameFor([project.title, styleName, `v${version.versionNo}`, 'preview'], 'mp4');
     return { url: await signedUrlFor(version.previewKey, { downloadName: filename, contentType: 'video/mp4' }), filename };
   }
   if (version.exportStatus !== 'ready' || !version.exportKey) throw new AppError('CONFLICT', 'The full-quality video is not ready yet. Press "Export full quality" first.');
-  const filename = downloadNameFor([project.title, styleName, `v${version.versionNo}`], 'mp4');
+  const clearance = await clearanceForPlan(version.plan);
+  const metaOnly = clearance.destinationLock === 'meta_only';
+  const filename = downloadNameFor([project.title, styleName, `v${version.versionNo}`, ...(metaOnly ? [META_ONLY_FILE_SUFFIX] : [])], 'mp4');
   const url = await signedUrlFor(version.exportKey, { downloadName: filename, contentType: 'video/mp4' });
+  await recordDownload(user, project.id, edit, versionId, 'standard');
+  return { url, filename, label: metaOnly ? META_ONLY_LABEL : null, musicClearance: clearance };
+}
+
+async function recordDownload(user: SessionUser, projectId: string, edit: Edit, versionId: string, variant: ExportVariant): Promise<void> {
   await getDb()
     .insert(schema.feedbackEvents)
-    .values({ id: newId(), userId: user.id, projectId: project.id, editId: edit.id, editVersionId: versionId, styleId: edit.styleId, type: 'download' })
+    .values({ id: newId(), userId: user.id, projectId, editId: edit.id, editVersionId: versionId, styleId: edit.styleId, type: 'download', data: variant === 'standard' ? {} : { variant } })
     .catch((err: unknown) => getLogger().warn({ err, versionId }, 'could not record download feedback'));
-  return { url, filename };
+}
+
+/**
+ * The music of one version for its card (licence banner, Sound panel, export dialog): the track and its licence
+ * chip, the clearance, the plan's current sound settings, beats and loudness for the song-section strip, and the
+ * music-free export's state.
+ */
+export async function versionMusic(versionId: string, user: SessionUser): Promise<VersionMusicDto> {
+  const { version, edit } = await getAccessibleVersion(versionId, user);
+  const plan = version.plan;
+  const db = getDb();
+  const assetIds = plan ? [...new Set(plan.segments.map((s) => s.assetId))] : [];
+  const assets = assetIds.length ? await db.query.mediaAssets.findMany({ columns: { id: true, analysis: true, probe: true }, where: inArray(schema.mediaAssets.id, assetIds) }) : [];
+  const withSound = new Set(assets.filter((a) => (a.analysis ? a.analysis.audio.hasAudio : a.probe ? a.probe.audio !== null : false)).map((a) => a.id));
+  const trackId = plan?.audio.music?.trackId ?? null;
+  const track = trackId ? await db.query.musicTracks.findFirst({ where: eq(schema.musicTracks.id, trackId) }) : null;
+  const clearance = !plan?.audio.music ? musicClearanceFor(null) : !track || track.deletedAt ? missingTrackClearance() : musicClearanceFor(track.licence);
+  const m = plan?.audio.music ?? null;
+  return {
+    versionId,
+    styleId: edit.styleId as StyleId,
+    hasResultShot: Boolean(plan?.segments.some((s) => s.role === 'result')),
+    clipsHaveSound: plan ? plan.segments.some((s) => withSound.has(s.assetId)) : false,
+    durationSec: plan ? computeTimeline(plan).totalDurationSec : 0,
+    track: track
+      ? {
+          id: track.id,
+          title: track.title,
+          artist: track.artist,
+          durationSec: track.durationSec,
+          bpm: track.bpm,
+          beatTimesSec: track.beats?.beatTimesSec ?? [],
+          energy: track.beats ? downsampleEnergy(track.beats.energy, track.beats.energyStepSec) : null,
+          licenceState: licenceStateOf(track.licence),
+          available: !track.deletedAt && track.status === 'ready',
+        }
+      : null,
+    sound: {
+      hasMusic: Boolean(m),
+      startOffsetSec: m?.startOffsetSec ?? null,
+      volume: m?.volume ?? null,
+      fadeInSec: m?.fadeInSec ?? null,
+      fadeOutSec: m?.fadeOutSec ?? null,
+      duckUnderOriginal: m?.duckUnderOriginal ?? null,
+      originalSound: plan ? originalSoundModeOf(plan) : 'off',
+      originalVolume: plan?.audio.originalSound.volume ?? 1,
+      beatAligned: Boolean(plan?.audio.beatAlignment && plan.audio.beatAlignment.alignedCutTimesSec.length > 0),
+    },
+    clearance,
+    clearanceSummary: clearanceSummary(clearance),
+    downloadLabel: clearance.destinationLock === 'meta_only' ? META_ONLY_LABEL : null,
+    noMusicExport: variantExportDto(version),
+  };
 }

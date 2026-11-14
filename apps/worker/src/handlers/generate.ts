@@ -3,6 +3,10 @@ import {
   AppError,
   CancelledError,
   JOB_TYPES,
+  applyAudioPatch,
+  needsRecut,
+  validateEditPlan,
+  type AudioPatch,
   STYLES,
   evaluateStyleSupport,
   computeTimeline,
@@ -130,11 +134,21 @@ export async function handleGenerateEdits(ctx: WorkerContext, run: TrackedRun, p
   }
 }
 
-/** Plans a new version of one edit from an instruction (revise) or a fresh take (regenerate). */
+/** The parts of a Sound panel patch that never need a re-cut (applied after re-planning). */
+function fastPartOf(patch: AudioPatch): AudioPatch {
+  const { trackId: _trackId, startSec: _startSec, ...rest } = patch;
+  return { ...rest, keepCuts: true, beatSync: 'keep', revealOnBeat: 'keep' };
+}
+
+/**
+ * Plans a new version of one edit: from an instruction (revise), a fresh take (regenerate), or a Sound panel change
+ * (`audio`: the parent plan with only its sound changed, no re-planning). A revise that carries a Sound panel patch
+ * needing a re-cut plans to the patch's track, song section and beat options, then applies its other sound changes.
+ */
 export async function handleReviseEdit(
   ctx: WorkerContext,
   run: TrackedRun,
-  payload: { editId: string; projectId: string; newVersionId: string; mode: 'revise' | 'regenerate' },
+  payload: { editId: string; projectId: string; newVersionId: string; mode: 'revise' | 'regenerate' | 'audio'; audio?: AudioPatch | undefined },
 ): Promise<void> {
   const edit = await ctx.db.query.edits.findFirst({ where: eq(schema.edits.id, payload.editId) });
   if (!edit) throw new AppError('NOT_FOUND', 'This edit no longer exists');
@@ -146,15 +160,63 @@ export async function handleReviseEdit(
   const footage = await loadProjectFootage(ctx, payload.projectId);
   if (!footage || footage.assets.length === 0) throw new AppError('UNSUPPORTED', 'No processed clips are available in this project.');
   const settings = await loadSettings(ctx);
-  const music = await loadMusic(ctx, generation.settings.musicTrackId);
+  const previousPlan = parent?.plan ?? null;
+  const patch = payload.audio;
+  // A new version keeps the music of the version it came from (the Sound panel may have changed or removed it);
+  // only a version without a parent plan falls back to the generation's choice.
+  const trackId = patch?.trackId ?? (previousPlan ? (previousPlan.audio.music?.trackId ?? null) : generation.settings.musicTrackId);
+  const music = await loadMusic(ctx, trackId);
   const styleId = edit.styleId as StyleId;
 
   const fail = async (message: string) =>
     ctx.db.update(schema.editVersions).set({ status: 'failed', statusMessage: message, updatedAt: new Date() }).where(eq(schema.editVersions.id, version.id));
 
+  if (payload.mode === 'audio') {
+    if (version.plan) {
+      // A retry after the plan was stored: only the preview is left to queue (idempotent by its singleton key).
+      if (version.status === 'planned') await enqueueTracked(ctx, JOB_TYPES.RENDER_PREVIEW, { editVersionId: version.id, projectId: payload.projectId }, { singletonKey: `preview:${version.id}` });
+      return;
+    }
+    try {
+      if (!previousPlan) throw new AppError('UNSUPPORTED', 'The version this change was based on has no edit plan.');
+      if (!patch || needsRecut(patch)) throw new AppError('VALIDATION', 'This sound change needs the edit to be re-cut.');
+      await run.progress(0.2, 'Changing the sound');
+      const patched = applyAudioPatch(previousPlan, patch, {
+        assets: footage.planAssets,
+        music: music ? { trackId: music.track.id, durationSec: music.durationSec, beatTimesSec: music.beatTimesSec } : null,
+      });
+      if (!patched.ok) throw new AppError('UNSUPPORTED', patched.message);
+      const total = Math.round(computeTimeline(previousPlan).totalDurationSec) || generation.settings.durationSec;
+      const result = validateEditPlan(patched.plan, validationContextFor(footage, patched.plan.audio.music ? music : null, total));
+      if (!result.ok || !result.plan) throw new AppError('UNSUPPORTED', `The sound change could not be applied: ${result.errors[0]?.message ?? 'the edit no longer matches its clips'}.`);
+      await ctx.db
+        .update(schema.editVersions)
+        .set({
+          plan: result.plan,
+          validation: { ok: true, errors: [], warnings: result.warnings },
+          planSource: 'manual',
+          plannerModel: null,
+          status: 'planned',
+          statusMessage: 'Sound changed · cuts kept',
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.editVersions.id, version.id));
+      await enqueueTracked(ctx, JOB_TYPES.RENDER_PREVIEW, { editVersionId: version.id, projectId: payload.projectId }, { singletonKey: `preview:${version.id}` });
+      await run.progress(1, 'Sound changed');
+    } catch (err) {
+      const outcome = err instanceof CancelledError ? await stopOutcome(run) : null;
+      if (outcome === 'cancelled') await ctx.db.update(schema.editVersions).set({ status: 'cancelled', statusMessage: 'Cancelled', updatedAt: new Date() }).where(eq(schema.editVersions.id, version.id));
+      else if (outcome === 'resume') await ctx.db.update(schema.editVersions).set({ statusMessage: INTERRUPTED_MESSAGE, updatedAt: new Date() }).where(eq(schema.editVersions.id, version.id));
+      else await fail(friendlyFailure(err));
+      throw err;
+    }
+    return;
+  }
+
   try {
+    if (patch?.trackId && !music) throw new AppError('UNSUPPORTED', 'That music track is not ready yet. Wait for it to finish analysing, then try again.');
     await run.progress(0.1, payload.mode === 'revise' ? 'Applying your changes' : 'Creating a fresh take');
-    const previousPlan = parent?.plan ?? null;
+    const recut = patch && needsRecut(patch) ? patch : null;
     const hints: RevisionHints | undefined = payload.mode === 'revise' ? parseRevisionInstruction(version.instruction) : undefined;
     let targetDurationSec = generation.settings.durationSec;
     if (previousPlan) targetDurationSec = Math.round(computeTimeline(previousPlan).totalDurationSec) || targetDurationSec;
@@ -164,28 +226,46 @@ export async function handleReviseEdit(
       else targetDurationSec = hints.targetDurationSec;
     }
     const attempt = payload.mode === 'regenerate' ? Math.max(1, version.versionNo - 1) : 0;
+    // A re-cut to a chosen song section starts the music there; a new version otherwise keeps the earlier start
+    // (the planner snaps to it), and only a first plan uses the start chosen in the generation form.
+    const musicStartSec = recut ? (recut.startSec ?? null) : previousPlan ? null : generation.settings.musicStartSec;
     const input = buildPlannerInput({
       styleId,
-      settings: { ...generation.settings, durationSec: targetDurationSec },
+      settings: { ...generation.settings, durationSec: targetDurationSec, musicStartSec },
       footage,
       music,
       appSettings: settings,
       attempt,
       ...(previousPlan ? { previousPlan } : {}),
       ...(payload.mode === 'revise' ? { revisionInstruction: version.instruction, revisionHints: hints } : {}),
+      ...(recut ? { beatSync: recut.beatSync === 'keep' ? ('auto' as const) : recut.beatSync, revealOnBeat: recut.revealOnBeat === 'on' } : {}),
     });
     const vctx = validationContextFor(footage, music, targetDurationSec, hints?.transitions === 'restrained' || hints?.transitions === 'none');
     const outcome = await planWithFallback(ctx.ai.planner, ctx.ai.rulesPlanner, input, vctx, ctx.logger, run.signal);
     for (const u of outcome.usages) await recordAiUsage(ctx, payload.projectId, `${payload.mode}:${styleId}`, u);
+    let plan = outcome.plan;
+    let warnings = outcome.validation.warnings;
+    if (patch) {
+      // The Sound panel's other changes (volume, fades, original sound) apply to the re-cut plan.
+      const patched = applyAudioPatch(plan, fastPartOf(patch), {
+        assets: footage.planAssets,
+        music: music ? { trackId: music.track.id, durationSec: music.durationSec, beatTimesSec: music.beatTimesSec } : null,
+      });
+      if (!patched.ok) throw new AppError('UNSUPPORTED', patched.message);
+      const checked = validateEditPlan(patched.plan, { ...vctx, music: patched.plan.audio.music ? vctx.music : null });
+      if (!checked.ok || !checked.plan) throw new AppError('UNSUPPORTED', `The sound change could not be applied: ${checked.errors[0]?.message ?? 'the plan is not valid'}.`);
+      plan = checked.plan;
+      warnings = checked.warnings;
+    }
     await ctx.db
       .update(schema.editVersions)
       .set({
-        plan: outcome.plan,
-        validation: { ok: true, errors: [], warnings: outcome.validation.warnings },
+        plan,
+        validation: { ok: true, errors: [], warnings },
         planSource: outcome.source,
         plannerModel: outcome.model,
         status: 'planned',
-        statusMessage: outcome.fallbackReason ? `Planned with the rules-based editor (${outcome.fallbackReason})` : 'Planned · rendering preview',
+        statusMessage: outcome.fallbackReason ? `Planned with the rules-based editor (${outcome.fallbackReason})` : recut ? 'Re-cut to the music' : 'Planned · rendering preview',
         updatedAt: new Date(),
       })
       .where(eq(schema.editVersions.id, version.id));
@@ -228,6 +308,8 @@ export function buildPlannerInput(args: {
   previousPlan?: EditPlan;
   revisionInstruction?: string;
   revisionHints?: RevisionHints | undefined;
+  beatSync?: 'auto' | 'on' | 'off';
+  revealOnBeat?: boolean;
 }): PlannerInput {
   const { styleId, settings, footage, music, appSettings, attempt } = args;
   return {
@@ -248,6 +330,8 @@ export function buildPlannerInput(args: {
     ...(args.previousPlan ? { previousPlan: args.previousPlan } : {}),
     ...(args.revisionInstruction ? { revisionInstruction: args.revisionInstruction } : {}),
     ...(args.revisionHints ? { revisionHints: args.revisionHints } : {}),
+    ...(args.beatSync ? { beatSync: args.beatSync } : {}),
+    ...(args.revealOnBeat !== undefined ? { revealOnBeat: args.revealOnBeat } : {}),
   };
 }
 

@@ -101,3 +101,15 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
 - **Docker images not built or scanned.** The images were not built or scanned for vulnerabilities in this
   sandbox, which had no Docker daemon. Build and scan them (for example with `docker scout` or Trivy) before
   production.
+
+## Music controls and licence passport (Stage B, WP1)
+
+- Owner only: licence changes and confirmation, removing tracks, Spotify references and the embed switch. Staff may
+  tag tracks (genres, moods), use the Sound panel and make music-free versions in projects they can open.
+- New audit actions: `music.reference_added`, `music.reference_removed`, `music.spotify_mode_changed`,
+  `music.export_blocked` (web and worker), `music.no_music_export_requested`; `music.licence_updated` now records the
+  licence kind.
+- Spotify: only the URL, type, id and notes are stored; no Spotify request, oEmbed fetch or credential exists. When a
+  Content-Security-Policy is written it must allow `frame-src https://open.spotify.com` for the optional embed.
+- The usage ledger keeps a licence snapshot per export; ledger rows reference the track with `ON DELETE RESTRICT`
+  (tracks are soft-deleted, so this never blocks a removal).

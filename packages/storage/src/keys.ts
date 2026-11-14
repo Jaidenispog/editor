@@ -7,6 +7,9 @@ export const storageKeys = {
   assetPrefix: (projectId: string, assetId: string) => `projects/${projectId}/assets/${assetId}`,
   editPreview: (projectId: string, editId: string, versionNo: number) => `projects/${projectId}/edits/${editId}/v${versionNo}/preview.mp4`,
   editExport: (projectId: string, editId: string, versionNo: number) => `projects/${projectId}/edits/${editId}/v${versionNo}/export.mp4`,
+  /** An extra export file of one version, e.g. the music-free render (`export-no-music.mp4`). */
+  editExportVariant: (projectId: string, editId: string, versionNo: number, variant: 'no_music') =>
+    `projects/${projectId}/edits/${editId}/v${versionNo}/export-${variant.replace(/_/g, '-')}.mp4`,
   editPrefix: (projectId: string, editId: string) => `projects/${projectId}/edits/${editId}`,
   projectPrefix: (projectId: string) => `projects/${projectId}`,
   musicOriginal: (trackId: string, ext: string) => `music/${trackId}/original.${ext}`,

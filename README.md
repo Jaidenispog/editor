@@ -83,3 +83,12 @@ docs/             Architecture, API, deployment, costs, testing, security, resea
 - [docs/security.md](docs/security.md): auth, cookies, CSRF, media links, encryption, known gaps.
 - [docs/research/](docs/research/): platform policy research (Instagram, TikTok, Spotify, Square, music licensing…).
 - [docs/HANDOVER.md](docs/HANDOVER.md): where development stands and what comes next.
+
+## Music controls and licence passport (Stage B, WP1)
+
+Built and tested on synthetic footage and a synthetic 120 BPM track: the three-step licence passport (CC BY-NC
+refused, Meta Sound Collection locked to Instagram/Facebook, CC BY credit), the export clearance gate and usage
+ledger, the music-free export of any version, the Sound panel (volume, fades, original sound, song section, beat
+options), "Suggested for you" from the owner's own library, and private Spotify references (link-only by default).
+No music library API is connected (none is built in Phase 1); tracks are downloaded from a business-eligible library
+and uploaded with their licence details.

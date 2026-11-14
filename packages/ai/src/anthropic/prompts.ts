@@ -40,6 +40,7 @@ Timing rules
 - Text overlays and captions end before the edit ends; two overlays in the same placement never overlap in time; captions never overlap each other.
 - With music: cut on the provided beat times (output time t plays music time startOffsetSec + t), start the music on a beat, and keep startOffsetSec + total length within the track. List the cut times that land on beats in audio.beatAlignment.
 - When music.fixedStartOffsetSec is given, the owner chose where the music starts: audio.music.startOffsetSec must be exactly that value, and the beat times to cut on are the ones at or after it.
+- music.beatSync says how to treat the beat: "auto" lets the style decide, "on" puts every cut on a beat where the footage allows, "off" keeps natural shot lengths (the beat montage always cuts on the beat). When music.revealOnBeat is true, the first shot of the finished result starts on a beat (a downbeat if one is close), within 0.25 s.
 - Without music: audio.music is null, and the original sound stays on (audio.originalSound.enabled = true) unless the owner turned it off, so the video is not silent.
 
 Editorial quality
@@ -170,6 +171,8 @@ export function buildPlannerUserContent(input: PlannerInput): Array<{ type: 'tex
           beatTimesSec: input.music.beatTimesSec.slice(0, MAX_PLANNER_BEATS).map(r2),
           volume: r2(s.musicVolume),
           ...(fixedStart !== null ? { fixedStartOffsetSec: fixedStart } : {}),
+          beatSync: input.beatSync ?? 'auto',
+          revealOnBeat: input.revealOnBeat ?? false,
         }
       : null,
     preferences: {

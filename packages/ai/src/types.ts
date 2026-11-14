@@ -102,6 +102,13 @@ export interface PlannerInput {
    * Planners snap it to the first beat at or after this point and treat it as fixed.
    */
   musicStartSec?: number | null;
+  /**
+   * Cutting to the music: `auto` (the style decides), `on` (cuts land on beats where the footage allows) or `off`
+   * (natural shot lengths; the beat montage always cuts on the beat). Absent = auto.
+   */
+  beatSync?: 'auto' | 'on' | 'off';
+  /** Start the first shot of the finished result on a beat (within ±0.25 s), when there is music. */
+  revealOnBeat?: boolean;
   preferences: EditingPreferences;
   brand: BrandConfig;
   businessName: string;
