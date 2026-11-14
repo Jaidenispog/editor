@@ -1,0 +1,28 @@
+# Keep the build context small and free of secrets and local data.
+.git
+.github
+**/node_modules
+**/.next
+**/dist
+**/coverage
+**/*.tsbuildinfo
+**/test-results
+**/playwright-report
+*.log
+**/.DS_Store
+
+# Local settings and secrets: pass them at run time (env_file / provider secrets), never bake them into images.
+.env
+.env.*
+!.env.example
+
+# Local runtime data: media, scratch renders, the local PostgreSQL cluster
+data
+tmp
+.pg
+.pnpm-store
+
+# Docker files themselves
+docker-compose*.yml
+Dockerfile*
+.dockerignore

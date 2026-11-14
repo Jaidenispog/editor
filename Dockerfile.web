@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1
+# Studio Assistant web app (Next.js 16, standalone output). Build from the repository root:
+#   docker build -f Dockerfile.web -t studio-assistant-web .
+# Runs `node apps/web/server.js` as a non-root user on port 3000. All settings come from the environment at
+# run time; nothing secret is baked into the image (next build does not read .env or need a database).
+
+ARG NODE_IMAGE=node:22-bookworm-slim
+
+# ---- base: Node + pnpm (the version pinned in package.json) ----------------------------------------------
+FROM ${NODE_IMAGE} AS base
+ENV PNPM_HOME=/pnpm \
+    PATH=/pnpm:$PATH \
+    NEXT_TELEMETRY_DISABLED=1 \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
+WORKDIR /app
+
+# ---- deps: download every package in the lockfile (cached until pnpm-lock.yaml changes) ------------------
+FROM base AS deps
+COPY pnpm-lock.yaml pnpm-workspace.yaml .npmrc package.json ./
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm fetch --frozen-lockfile --store-dir /pnpm/store
+
+# ---- build: install the web app and its workspace packages offline, then next build ----------------------
+FROM deps AS build
+COPY . .
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm install --offline --frozen-lockfile --store-dir /pnpm/store --filter "@studio/web..."
+# apps/web/public may be empty (git does not keep empty folders); the runtime stage copies it.
+RUN mkdir -p apps/web/public \
+ && pnpm --filter @studio/web build \
+ && test -f apps/web/.next/standalone/apps/web/server.js
+
+# ---- runtime: only the traced standalone server, static assets and public files --------------------------
+FROM ${NODE_IMAGE} AS runtime
+ARG APP_UID=1001
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+WORKDIR /app
+# The base image's "node" user (uid 1000) is removed so APP_UID=1000 can be used for bind-mounted folders.
+RUN userdel --remove node 2>/dev/null; groupdel node 2>/dev/null; \
+    groupadd --system --gid "${APP_UID}" studio \
+ && useradd --system --uid "${APP_UID}" --gid studio --home-dir /app --shell /usr/sbin/nologin studio
+# The standalone output keeps the monorepo layout: /app/apps/web/server.js plus /app/node_modules and the
+# traced workspace packages. Static files and public/ are not part of it and must be copied next to it.
+COPY --from=build --chown=studio:studio /app/apps/web/.next/standalone ./
+COPY --from=build --chown=studio:studio /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=build --chown=studio:studio /app/apps/web/public ./apps/web/public
+# Marks /app as the repository root, so relative paths such as STORAGE_LOCAL_ROOT=./data/storage resolve to
+# /app/data/storage exactly as they do in the worker image (server.js changes directory to apps/web).
+COPY --from=build /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
+RUN mkdir -p /app/data && chown studio:studio /app/data
+USER studio
+EXPOSE 3000
+# /api/health answers 503 when the database or queue is unreachable.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+CMD ["node", "apps/web/server.js"]

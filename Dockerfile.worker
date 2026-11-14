@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+# Studio Assistant background worker (pg-boss jobs: ingest, planning, FFmpeg renders). Build from the repository root:
+#   docker build -f Dockerfile.worker -t studio-assistant-worker .
+# Runs the TypeScript source with tsx (no build step) as a non-root user, under tini so SIGTERM reaches Node and
+# running jobs get their graceful-stop window. Give the container at least 45 s to stop (stop_grace_period).
+#
+# Base image: Debian 13 "trixie" rather than Debian 12 "bookworm", because the renderer needs FFmpeg 6 or newer
+# and bookworm's package is FFmpeg 5.1. The build fails early (scripts/check-tools.sh --worker) if the
+# distribution's FFmpeg lacks libx264, libass, zscale or any other filter the renderer uses.
+
+ARG NODE_IMAGE=node:22-trixie-slim
+
+# ---- base: Node + pnpm (the version pinned in package.json) ----------------------------------------------
+FROM ${NODE_IMAGE} AS base
+ENV PNPM_HOME=/pnpm \
+    PATH=/pnpm:$PATH \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
+WORKDIR /app
+
+# ---- deps: production dependencies of the worker and the workspace packages it uses ----------------------
+FROM base AS deps
+COPY pnpm-lock.yaml pnpm-workspace.yaml .npmrc package.json ./
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm fetch --prod --frozen-lockfile --store-dir /pnpm/store
+COPY . .
+# tsx is a regular dependency of @studio/worker, so --prod keeps it.
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm install --offline --prod --frozen-lockfile --store-dir /pnpm/store --filter "@studio/worker..." \
+ && test -x apps/worker/node_modules/.bin/tsx
+
+# ---- runtime ------------------------------------------------------------------------------------------------
+FROM ${NODE_IMAGE} AS runtime
+ARG APP_UID=1001
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg fontconfig tini ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+# The base image's "node" user (uid 1000) is removed so APP_UID=1000 can be used for bind-mounted folders.
+RUN userdel --remove node 2>/dev/null; groupdel node 2>/dev/null; \
+    groupadd --system --gid "${APP_UID}" studio \
+ && useradd --system --uid "${APP_UID}" --gid studio --home-dir /app --shell /usr/sbin/nologin studio
+ENV NODE_ENV=production \
+    FFMPEG_PATH=ffmpeg \
+    FFPROBE_PATH=ffprobe \
+    STORAGE_LOCAL_ROOT=/app/data/storage \
+    WORKER_TMP_DIR=/app/tmp/worker
+WORKDIR /app
+# Same /app path as the deps stage, so pnpm's relative node_modules links stay valid. Includes the vendored
+# video fonts (assets/fonts), which the renderer passes to libass.
+COPY --from=deps /app /app
+RUN bash scripts/check-tools.sh --worker --quiet \
+ && mkdir -p /app/data/storage /app/tmp/worker \
+ && chown -R studio:studio /app/data /app/tmp
+USER studio
+WORKDIR /app/apps/worker
+ENTRYPOINT ["/usr/bin/tini", "--"]
+# One Node process (tsx loaded as an import hook) so signals go straight to the worker.
+CMD ["node", "--import", "tsx", "src/main.ts"]
