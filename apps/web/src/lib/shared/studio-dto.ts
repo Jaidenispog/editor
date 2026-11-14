@@ -1,6 +1,7 @@
 import type { GenerationSettings, LicenceState, MusicClearance, MusicLicence, ReferenceStyleProfile, SpotifyItemType, StyleId } from '@studio/core';
 import type { JobDto } from './dto.js';
 import type { EnergyCurve } from './music-curve.js';
+import type { WorkerStatusDto } from './worker-notice.js';
 
 /**
  * Browser-facing shape of GET /api/projects/[id]/status (plain JSON). Media links are short-lived signed
@@ -39,6 +40,11 @@ export interface StudioStatusDto {
   limits: { maxUploadBytes: number; partSize: number; mediaLinkTtlSeconds: number };
   /** True while anything is queued or working, so the page polls faster. */
   busy: boolean;
+  /**
+   * Whether a background worker is running (its heartbeat is under 60 s old); null when it was not checked. The page
+   * shows a notice above the clips when no worker runs while something is waiting.
+   */
+  worker: WorkerStatusDto | null;
   generatedAt: string;
 }
 

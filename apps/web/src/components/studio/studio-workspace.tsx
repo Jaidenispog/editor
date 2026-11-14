@@ -12,6 +12,7 @@ import { ChunkedUploader, type UploadItem } from '@/lib/client/uploader';
 import { formatDateTime } from '@/lib/format';
 import { cn } from '@/lib/shared/cn';
 import type { GenerationDto, StudioStatusDto, StyleOptionDto } from '@/lib/shared/studio-dto';
+import { workerNotice } from '@/lib/shared/worker-notice';
 import { ClipList } from './clip-list';
 import { EditGrid } from './edit-grid';
 import type { MusicUploadRequest } from './music-upload-dialog';
@@ -87,6 +88,8 @@ export function StudioWorkspace({ initialStatus }: { initialStatus: StudioStatus
   const ttl = status.limits.mediaLinkTtlSeconds;
   // "Hide this edit": hidden cards collapse into one row under the grid (nothing is deleted).
   const hiddenCount = shown ? shown.edits.filter((e) => e.dismissed).length : 0;
+  // No worker heartbeat while something waits: say so above the clips instead of leaving them on "Waiting".
+  const notice = workerNotice(status.worker, status.busy);
   const visible = useMemo(() => (shown && !showHidden ? { ...shown, edits: shown.edits.filter((e) => !e.dismissed) } : shown), [shown, showHidden]);
 
   return (
@@ -108,6 +111,12 @@ export function StudioWorkspace({ initialStatus }: { initialStatus: StudioStatus
         onCancel={(k) => void uploader.cancel(k)}
         onDismiss={(k) => uploader.dismiss(k)}
       />
+
+      {notice ? (
+        <Alert tone="warning" title={notice.title}>
+          {notice.body}
+        </Alert>
+      ) : null}
 
       <ClipList projectId={projectId} assets={status.assets} ttlSeconds={ttl} onChanged={changed} onStyles={onStyles} />
 

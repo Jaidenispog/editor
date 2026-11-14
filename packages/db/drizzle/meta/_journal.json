@@ -43,6 +43,13 @@
       "when": 1794649327249,
       "tag": "0005_publishing",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794654706623,
+      "tag": "0006_worker_heartbeats",
+      "breakpoints": true
     }
   ]
 }

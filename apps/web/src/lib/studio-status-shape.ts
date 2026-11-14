@@ -4,6 +4,7 @@ import { downsampleEnergy } from './shared/music-curve.js';
 import type { AssetDto, AssetShotsDto, EditDto, GenerationDto, MusicOptionDto, ReferenceDto, ShotDto, StudioStatusDto, StyleOptionDto, VersionDto } from './shared/studio-dto.js';
 import { ACTIVE_VERSION_STATUSES, PROCESSING_ASSET_STATUSES } from './shared/studio-dto.js';
 import type { JobDto } from './shared/dto.js';
+import type { WorkerStatusDto } from './shared/worker-notice.js';
 
 /** Turns a storage key into a short-lived link (or null when it cannot be signed). */
 export type LinkSigner = (key: string) => Promise<string | null>;
@@ -21,6 +22,8 @@ export interface StudioStatusRows {
   maxUploadBytes: number;
   partSize: number;
   mediaLinkTtlSeconds: number;
+  /** Background worker status (lib/worker-status.ts); left out, the payload says it was not checked (null). */
+  worker?: WorkerStatusDto | null;
   now?: Date;
 }
 
@@ -298,6 +301,7 @@ export async function shapeStudioStatus(rows: StudioStatusRows, sign: LinkSigner
     references,
     limits: { maxUploadBytes: rows.maxUploadBytes, partSize: rows.partSize, mediaLinkTtlSeconds: rows.mediaLinkTtlSeconds },
     busy: isStudioBusy(partial),
+    worker: rows.worker ?? null,
     generatedAt: (rows.now ?? new Date()).toISOString(),
   };
 }

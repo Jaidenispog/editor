@@ -18,7 +18,7 @@ Content Library apply the same rule.
 | POST | `/api/auth/login` | `{ email, password }` → sets `sa_session`; rate limited |
 | POST | `/api/auth/logout` | clears the session |
 | POST | `/api/auth/change-password` | `{ currentPassword, newPassword }` |
-| GET | `/api/health` | `{ ok, db, queue, storage }` |
+| GET | `/api/health` | `{ ok, db, queue, storage, worker: { alive, lastSeenAt } }` — `ok` (200, else 503) covers only what the web app itself needs (database, queue, storage). `worker` is information: `alive` is true when a background worker recorded a heartbeat in the last 60 s (database clock), `lastSeenAt` is the newest heartbeat (ISO) or `null` when none is recorded (never started, or stopped cleanly). A stopped worker never makes this 503. |
 
 ## Settings and integrations
 | Method | Route | Notes |
@@ -35,7 +35,7 @@ Content Library apply the same rule.
 | GET / PATCH / DELETE | `/api/projects/[id]` | DELETE removes rows **and** stored media (permanent); 404 for staff on someone else's project |
 | GET | `/api/projects/[id]/jobs` | recent background jobs of the project, newest first |
 | POST | `/api/projects/[id]/assets/order` | `{ assetIds: string[] }` (each id once, all clips of this project) → `{ assets: [{ id, sortOrder }] }`; renumbers every clip in one transaction (listed clips first, unlisted clips keep their relative order after them); 400 for ids from another project or duplicates |
-| GET | `/api/projects/[id]/status` | polling payload: project, assets, generations, edits with versions, active jobs |
+| GET | `/api/projects/[id]/status` | polling payload: project, assets, generations, edits with versions, active jobs, `busy`, and `worker: { alive, lastSeenAt, startHint }` (`startHint` is `dev` or `service`; the page shows "The background worker isn't running" above the clips when `alive` is false while `busy`) |
 | POST | `/api/projects/[id]/uploads` | `{ filename, size, mimeType, kind }` → `{ uploadId, partSize, partCount, receivedParts }` |
 | PUT | `/api/uploads/[id]/parts/[n]` | raw bytes of part `n` (1-based); idempotent |
 | GET | `/api/uploads/[id]` | `{ receivedParts }` for resuming after a page reload |

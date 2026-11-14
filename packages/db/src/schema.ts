@@ -48,6 +48,7 @@ export * from './schema/square.js';
 export * from './schema/email.js';
 export * from './schema/website.js';
 export * from './schema/business_profile.js';
+export * from './schema/workers.js';
 
 // ---------------------------------------------------------------------------------------------
 // Identity & access
