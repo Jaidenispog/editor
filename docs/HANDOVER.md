@@ -15,6 +15,11 @@ History of the background runs:
    in parallel with web foundation → Video Studio UI, then an end-to-end browser test. The research run was resumed
    for its three missing topics plus critique and synthesis.
 
+3. Also on 2026-11-14, `docs/handover/stage-a-hardening-workflow.js` started three agents in **separate git worktrees**
+   (safe zone + export preset; Studio gaps + music start point; Deepgram transcription + queue/db tuning). Each
+   commits on its own worktree branch and reports the branch and SHA; the lead session merges them into
+   `claude/blissful-lamport-f1lndn` after the end-to-end browser test agent (main checkout) has finished.
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
