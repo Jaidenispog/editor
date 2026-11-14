@@ -19,5 +19,6 @@ export function createBlobStore(env: Env): BlobStore {
       forcePathStyle: env.S3_FORCE_PATH_STYLE,
     });
   }
-  return new LocalDiskStore({ rootDir: env.STORAGE_LOCAL_ROOT, appUrl: env.APP_URL, secret: env.APP_SECRET });
+  // Root-relative signed links: the browser resolves them against whatever origin served the page.
+  return new LocalDiskStore({ rootDir: env.STORAGE_LOCAL_ROOT, secret: env.APP_SECRET });
 }

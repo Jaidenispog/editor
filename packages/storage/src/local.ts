@@ -9,8 +9,11 @@ import { signMediaLink } from './signing.js';
 
 export interface LocalDiskStoreOptions {
   rootDir: string;
-  /** Base URL of the web app that serves /api/media/<token>. */
-  appUrl: string;
+  /**
+   * Optional absolute base URL for signed links. Leave unset (the default) so links are root-relative
+   * ("/api/media/<token>") and work on any hostname, behind proxies and in preview panes.
+   */
+  appUrl?: string;
   secret: string;
 }
 
@@ -128,7 +131,8 @@ export class LocalDiskStore implements BlobStore {
       },
       this.options.secret,
     );
-    return `${this.options.appUrl.replace(/\/$/, '')}/api/media/${token}`;
+    const base = this.options.appUrl ? this.options.appUrl.replace(/\/$/, '') : '';
+    return `${base}/api/media/${token}`;
   }
 
   // --- multipart: parts are staged next to the target and concatenated on completion
