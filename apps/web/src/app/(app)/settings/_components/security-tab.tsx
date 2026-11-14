@@ -9,7 +9,8 @@ import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { Input } from '@/components/ui/field';
 import { useToast } from '@/components/ui/toast';
 import { ApiClientError, apiRequest } from '@/lib/client/api-client';
-import { formatDateTime, formatRelative } from '@/lib/format';
+import { RelativeTime } from '@/components/ui/relative-time';
+import { formatDateTime } from '@/lib/format';
 
 /** One active session for the list. */
 export interface SessionRow {
@@ -129,7 +130,7 @@ export function SecurityTab({ user, sessions }: { user: { email: string; display
                     {s.current ? <Badge tone="success">This device</Badge> : null}
                   </p>
                   <p className="text-xs text-charcoal-500" title={formatDateTime(s.lastSeenAt)}>
-                    Last active {formatRelative(s.lastSeenAt)} · signed in {formatDateTime(s.createdAt)}
+                    Last active <RelativeTime date={s.lastSeenAt} /> · signed in {formatDateTime(s.createdAt)}
                     {s.ipAddress ? ` · ${s.ipAddress}` : ''}
                   </p>
                 </div>

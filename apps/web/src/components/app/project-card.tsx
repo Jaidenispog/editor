@@ -1,7 +1,7 @@
 import { Clapperboard, Film } from 'lucide-react';
 import Link from 'next/link';
 import { StatusPill } from '@/components/ui/status-pill';
-import { formatRelative } from '@/lib/format';
+import { RelativeTime } from '@/components/ui/relative-time';
 import type { ProjectSummaryDto } from '@/lib/shared/dto';
 
 /** Plain-language summary of where a project is up to. */
@@ -32,7 +32,7 @@ export function ProjectCard({ project }: { project: ProjectSummaryDto }) {
       </h3>
       {project.clientName ? <p className="truncate text-sm text-charcoal-500">{project.clientName}</p> : null}
       <p className="mt-3 text-sm text-charcoal-600">{projectProgressText(project)}</p>
-      <p className="mt-1 text-xs text-charcoal-400">Updated {formatRelative(project.updatedAt)}</p>
+      <p className="mt-1 text-xs text-charcoal-400">Updated <RelativeTime date={project.updatedAt} /></p>
     </Link>
   );
 }

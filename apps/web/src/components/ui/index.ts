@@ -12,3 +12,4 @@ export { StatusPill, statusLabel, toneForStatus } from './status-pill';
 export { Switch } from './switch';
 export { Tabs, type TabItem } from './tabs';
 export { ToastProvider, useToast, type ToastInput, type ToastTone } from './toast';
+export { RelativeTime } from './relative-time';

@@ -1,5 +1,5 @@
 import 'server-only';
-import { createBlobStore, LocalDiskStore, type BlobStore } from '@studio/storage';
+import { createBlobStore, type BlobStore } from '@studio/storage';
 import { getEnv, resolveConfiguredPath } from './env.js';
 
 const globalForStore = globalThis as unknown as { __studioWebStore?: BlobStore };
@@ -13,8 +13,12 @@ export function getBlobStore(): BlobStore {
   return globalForStore.__studioWebStore;
 }
 
-/** The local-disk store when that driver is active (used by the media route), otherwise null. */
-export function getLocalDiskStore(): LocalDiskStore | null {
+/**
+ * The store when the local-disk driver is active (the media route serves its files), otherwise null.
+ * Checks the driver tag rather than the class: bundlers can load @studio/storage more than once (webpack dev does),
+ * and then `instanceof` fails for a store created by another copy of the module, so every link would 404.
+ */
+export function getLocalDiskStore(): BlobStore | null {
   const store = getBlobStore();
-  return store instanceof LocalDiskStore ? store : null;
+  return store.driver === 'local' ? store : null;
 }

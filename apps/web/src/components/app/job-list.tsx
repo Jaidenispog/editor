@@ -8,7 +8,8 @@ import { Button } from '@/components/ui/button';
 import { StatusPill } from '@/components/ui/status-pill';
 import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
-import { formatProgress, formatRelative } from '@/lib/format';
+import { RelativeTime } from '@/components/ui/relative-time';
+import { formatProgress } from '@/lib/format';
 import { JOB_TYPE_LABELS, type JobDto } from '@/lib/shared/dto';
 
 /**
@@ -54,7 +55,15 @@ export function JobList({ jobs, showProject = false, onChanged }: { jobs: JobDto
                     {' · '}
                   </>
                 ) : null}
-                {job.status === 'failed' && job.error ? job.error : job.message || `Started ${formatRelative(job.createdAt)}`}
+                {job.status === 'failed' && job.error ? (
+                  job.error
+                ) : job.message ? (
+                  job.message
+                ) : (
+                  <>
+                    Started <RelativeTime date={job.createdAt} />
+                  </>
+                )}
                 {job.attempts > 1 ? ` · attempt ${job.attempts} of ${job.maxAttempts}` : ''}
               </p>
               {active ? (
