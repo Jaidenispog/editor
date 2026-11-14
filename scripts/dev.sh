@@ -102,7 +102,9 @@ cleanup() {
   done
   for pid in "${PIDS[@]}"; do kill -KILL -- "-$pid" 2>/dev/null || true; done
 }
-trap cleanup INT TERM EXIT
+trap cleanup EXIT
+trap 'printf "\nStopping web and worker...\n"; cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 set -m
 ( pnpm --filter @studio/web dev 2>&1 | prefix "$WEB_TAG" ) &
