@@ -346,6 +346,7 @@ not allow it for this app setup, the card says "Not available" and everything el
   `graph.facebook.com` once per connect for the code exchange).
 - Register `https://<app address>/api/integrations/instagram/callback` in the configuration and under Valid OAuth
   Redirect URIs, and the published `/privacy` and `/data-deletion` pages in the Meta app settings.
-- `META_GRAPH_BASE_URL` / `META_RUPLOAD_BASE_URL` are for tests only and are ignored unless `NODE_ENV=test`.
+- `META_GRAPH_BASE_URL` / `META_RUPLOAD_BASE_URL` / `META_DIALOG_BASE_URL` are for tests only and are ignored unless
+  `NODE_ENV=test` (the login dialog then stays on `https://www.facebook.com`).
   `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` are not used (no direct TikTok API for a private app).
 - The worker schedules `publish.dispatch` every minute and `social.check` daily at 4:23 am Melbourne time.

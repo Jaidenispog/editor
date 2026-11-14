@@ -119,6 +119,8 @@ export const EnvSchema = z.object({
   // Test only: local fake servers. Honoured only when NODE_ENV=test.
   META_GRAPH_BASE_URL: optionalUrl(),
   META_RUPLOAD_BASE_URL: optionalUrl(),
+  /** Host of Meta's login dialog (normally https://www.facebook.com); a local fake in the Stage B browser test. */
+  META_DIALOG_BASE_URL: optionalUrl(),
   SQUARE_API_BASE_URL: optionalUrl(),
 });
 

@@ -971,9 +971,15 @@ export async function publishBadgesFor(versionIds: string[], user: SessionUser):
 // Instagram (Meta Unified Login) connect, account ID, check and disconnect
 // ---------------------------------------------------------------------------------------------
 
-/** Meta's login dialog with `config_id` and no `scope` (memo §4). */
-export function buildMetaAuthUrl(input: { version: string; appId: string; configId: string; redirectUri: string; state: string }): string {
-  const u = new URL(`https://www.facebook.com/${input.version}/dialog/oauth`);
+/** Host of Meta's login dialog. */
+export const META_DIALOG_HOST = 'https://www.facebook.com';
+
+/**
+ * Meta's login dialog with `config_id` and no `scope` (memo §4). `dialogBase` replaces the host only for a local fake
+ * (the caller passes `testOnlyBaseUrl(env, env.META_DIALOG_BASE_URL)`, which is null unless NODE_ENV=test).
+ */
+export function buildMetaAuthUrl(input: { version: string; appId: string; configId: string; redirectUri: string; state: string; dialogBase?: string | null }): string {
+  const u = new URL(`${input.dialogBase ?? META_DIALOG_HOST}/${input.version}/dialog/oauth`);
   u.searchParams.set('client_id', input.appId);
   u.searchParams.set('redirect_uri', input.redirectUri);
   u.searchParams.set('config_id', input.configId);

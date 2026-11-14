@@ -50,6 +50,15 @@ describe('rankTracksForPreferences', () => {
     expect(list.every((t) => t.usable || t.rank === null)).toBe(true);
   });
 
+  it('treats an "I\'m not sure" track as unusable even when the rights box was ticked', () => {
+    const unsure = MusicLicenceSchema.parse({ kind: 'unknown', permitted: { promotionalUse: true, instagram: true, tiktok: true }, confirmedByOwnerAt: '2026-11-01T00:00:00.000Z' });
+    const list = rankTracksForPreferences([track('unsure', { genres: ['hip hop'], moods: ['upbeat'], licence: unsure }), track('fine')], taste, { durationSec: 25, now: NOW });
+    const byId = Object.fromEntries(list.map((t) => [t.id, t]));
+    expect(byId['unsure']).toMatchObject({ usable: false, rank: null, unusableReason: 'Confirm its licence in Settings → Music first.' });
+    // Matching the taste never lifts an unusable track above a usable one.
+    expect(list.map((t) => t.id)).toEqual(['fine', 'unsure']);
+  });
+
   it('never suggests anything without a match, and is deterministic', () => {
     const tracks = [track('b'), track('a')];
     const one = rankTracksForPreferences(tracks, { genres: [], moods: [], artists: [] }, { durationSec: 20, now: NOW });

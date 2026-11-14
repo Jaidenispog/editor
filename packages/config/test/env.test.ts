@@ -74,6 +74,10 @@ describe('loadEnv', () => {
     expect(testOnlyBaseUrl({ NODE_ENV: 'production' }, 'http://127.0.0.1:4010')).toBeNull();
     expect(testOnlyBaseUrl({ NODE_ENV: 'development' }, 'http://127.0.0.1:4010')).toBeNull();
     expect(testOnlyBaseUrl({ NODE_ENV: 'test' }, undefined)).toBeNull();
+    // The login dialog host follows the same rule (Stage B browser test only).
+    expect(loadEnv({ ...base, META_DIALOG_BASE_URL: 'http://127.0.0.1:4555' }).META_DIALOG_BASE_URL).toBe('http://127.0.0.1:4555');
+    expect(loadEnv({ ...base, META_DIALOG_BASE_URL: '' }).META_DIALOG_BASE_URL).toBeUndefined();
+    expect(() => loadEnv({ ...base, META_DIALOG_BASE_URL: 'not a url' })).toThrow(/META_DIALOG_BASE_URL/);
   });
 
   it('reads optional pool sizes as whole numbers', () => {
