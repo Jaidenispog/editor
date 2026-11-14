@@ -128,9 +128,8 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   const fresh = STYLE_BUILDERS[input.styleId](ctx);
   const recipe = fresh.recipe;
   let drafts = fresh.drafts;
-  let revisedText: TextOverlay[] | null = null;
   if (previous && !recipe.exact) {
-    const mapped = draftsFromPlan(ctx, previous, recipe);
+    const mapped = draftsFromPlan(ctx, previous);
     if (mapped) {
       drafts = mapped;
       applyRevisionHints(ctx, drafts, recipe);
@@ -162,12 +161,11 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   if (!recipe.exact) fit();
   recipe.finish(drafts);
 
-  const keepPreviousText = Boolean(previous && previous.textOverlays.length > 0 && s.text !== 'none');
+  const keepPreviousText = Boolean(previous && !recipe.exact && previous.textOverlays.length > 0 && s.text !== 'none');
   const textFor = (list: Draft[]): TextOverlay[] => {
     if (s.text === 'none') return [];
     if (keepPreviousText && previous) {
-      revisedText = retimeOverlays(previous, list);
-      let out = revisedText;
+      let out = retimeOverlays(previous, list);
       if (s.text === 'less') out = out.slice(0, 1);
       if (s.text === 'more') {
         const extra = recipe.extraText(list);
@@ -249,7 +247,7 @@ function makeFillerAdder(recipe: Recipe): (drafts: Draft[], allowReuse: boolean)
 // ---------------------------------------------------------------- revisions
 
 /** Maps an earlier plan's segments back onto the current footage so a revision keeps its choices. */
-function draftsFromPlan(ctx: BuildContext, prev: EditPlan, recipe: Recipe): Draft[] | null {
+function draftsFromPlan(ctx: BuildContext, prev: EditPlan): Draft[] | null {
   const { footage, s } = ctx;
   const style = s.style;
   const drafts: Draft[] = [];
@@ -306,8 +304,6 @@ function draftsFromPlan(ctx: BuildContext, prev: EditPlan, recipe: Recipe): Draf
     if (s.emphasise.includes(d.role)) d.weight = Math.max(d.weight, 8);
     if (s.deemphasise.includes(d.role) && !d.pinned) d.weight = 0;
   }
-  // Fillers in a revision get the style's own transition; kept segments keep theirs.
-  void recipe;
   return drafts;
 }
 
@@ -496,7 +492,8 @@ function compose(
   let musicPlan: AudioPlan['music'] = null;
   if (music) {
     const prevMusic = previous?.audio.music;
-    const volume = prevMusic && s.revisionHints?.music === 'keep' ? prevMusic.volume : s.musicVolume;
+    const change = s.revisionHints?.music === 'quieter' ? 0.7 : s.revisionHints?.music === 'louder' ? 1.25 : 1;
+    const volume = prevMusic ? prevMusic.volume * change : s.musicVolume;
     const offset = clamp(state.musicOffset, 0, Math.max(0, music.durationSec - total - 0.1));
     musicPlan = {
       trackId: music.trackId,

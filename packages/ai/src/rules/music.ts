@@ -35,7 +35,7 @@ function cleanBeats(music: PlannerMusic): number[] {
  * Builds the beat grid for an edit of `lengthSec`. With music, playback starts on a beat chosen per take
  * (bar-sized steps) so that the whole edit fits inside the track; without music a 120 BPM grid is used.
  */
-export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt: number): BeatGrid {
+export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt: number, preferStartSec?: number): BeatGrid {
   const horizon = lengthSec + 8;
   if (!music) return { startOffsetSec: 0, beats: synthetic(0, FALLBACK_INTERVAL, horizon), interval: FALLBACK_INTERVAL, bpm: null, fromMusic: false };
 
@@ -54,7 +54,11 @@ export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt:
   const fits = beats.map((t, i) => ({ t, i })).filter(({ t }) => t + lengthSec <= music.durationSec - 0.1);
   const barStarts = fits.filter(({ i }) => i % 4 === 0);
   const pool = barStarts.length > 0 ? barStarts : fits;
-  const chosen = pool.length > 0 ? pool[Math.min(pool.length - 1, attempt % Math.max(1, Math.min(pool.length, 4)))]! : { t: beats[0]!, i: 0 };
+  let chosen = pool.length > 0 ? pool[Math.min(pool.length - 1, attempt % Math.max(1, Math.min(pool.length, 4)))]! : { t: beats[0]!, i: 0 };
+  if (preferStartSec !== undefined && fits.length > 0) {
+    // A revision keeps the music where it was, snapped to the nearest beat that still fits.
+    chosen = fits.reduce((best, f) => (Math.abs(f.t - preferStartSec) < Math.abs(best.t - preferStartSec) ? f : best), fits[0]!);
+  }
   const startOffsetSec = chosen.t;
   const out: number[] = [];
   for (let k = chosen.i; k < beats.length; k++) out.push(round(beats[k]! - startOffsetSec, 3));
