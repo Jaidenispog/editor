@@ -85,6 +85,13 @@
       "when": 1794678687246,
       "tag": "0011_square_changes",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794678719726,
+      "tag": "0012_business_profile",
+      "breakpoints": true
     }
   ]
 }
