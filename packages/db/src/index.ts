@@ -7,6 +7,7 @@ export {
   WORKER_HEARTBEAT_INTERVAL_MS,
   WORKER_HEARTBEAT_PRUNE_AFTER_MS,
   WORKER_STALE_AFTER_MS,
+  hasWorkerHeartbeatsTable,
   isHeartbeatFresh,
   pruneWorkerHeartbeats,
   readWorkerStatus,

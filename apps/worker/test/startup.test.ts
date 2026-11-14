@@ -1,4 +1,6 @@
+import { createServer } from 'node:net';
 import { describe, expect, it } from 'vitest';
+import { probeDatabase } from '@studio/db';
 import {
   EXIT_CONFIG,
   StartupAbortedError,
@@ -69,6 +71,27 @@ describe('classifyStartupError', () => {
     expect(classifyStartupError(new TypeError('cannot read properties of undefined'))).toBe('fatal');
     // A wrong password stays fatal even when wrapped together with a retryable error.
     expect(classifyStartupError(new AggregateError([coded('ECONNREFUSED'), coded('28P01')]))).toBe('fatal');
+  });
+});
+
+/** A local port nothing listens on (bound once, then released). */
+async function closedPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+describe('classifyStartupError with a real driver error', () => {
+  it('retries the error pg gives for a database that is not running', async () => {
+    const port = await closedPort();
+    const err = await probeDatabase(`postgres://postgres:s3cret-pass@127.0.0.1:${port}/studio_assistant`, { timeoutMs: 2_000 }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).not.toBeNull();
+    expect(classifyStartupError(err)).toBe('retry');
   });
 });
 

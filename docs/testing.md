@@ -82,6 +82,8 @@ Then open http://localhost:3000/setup and create the owner account. Upload the s
 `bash scripts/dev.sh migrate`, or export `DATABASE_URL` first.
 
 To run the worker alone: `pnpm --filter @studio/worker dev` (watch mode) or `pnpm --filter @studio/worker start`.
+`dev.sh` runs the worker without watch mode and restarts it when it stops; `bash scripts/dev.sh --watch` uses
+watch mode instead (a crash then waits for the next code change, and only the app's notice shows it).
 The `start` script uses `exec`, so Ctrl+C or SIGTERM reaches the worker itself.
 
 Useful checks while it runs:
@@ -244,3 +246,35 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   whether `business_management` is needed, the resumable size limit, quota and token expiry, `thumb_offset` with
   resumable upload, Sound Collection copyright matching, Web Share on iOS. The first verification post is a real public
   reel the owner chooses.
+
+## Worker start-up and liveness (14 Nov 2026 incident)
+
+The owner started `bash scripts/dev.sh` before the database. The worker died in `pg-boss` start, `tsx watch` kept
+its process alive, and five clips sat on "Waiting to be analysed" with no hint why. What now covers it:
+
+- Unit, no database and no real sleeps: `apps/worker/test/startup.test.ts`. `classifyStartupError` retries
+  `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ETIMEDOUT`, 57P03 "starting up" and connection timeouts (also wrapped in
+  `AggregateError` or `cause`, and the real error `pg` throws for a closed local port), and fails fast on a wrong
+  password (28P01/28000), a missing database (3D000), an invalid URL, a missing handler or anything unknown.
+  `backoffDelayMs` is 1 → 2 → 4 → 8 → 15 s (capped). `waitForDatabase` runs with an injected `sleep`: one plain
+  waiting line however many attempts fail, no retry of configuration errors, and SIGINT/SIGTERM (an aborted
+  signal) stops the wait. `reportStartupFailure` never prints the connection password and exits 78 for configuration
+  problems, the status `scripts/dev.sh` does not restart.
+- Database-backed (`TEST_DATABASE_URL`): `apps/worker/test/worker-heartbeat-db.test.ts`. Writing and refreshing a
+  heartbeat row, the 60 s staleness rule against the database clock (59 s alive, 61 s not), one live worker being
+  enough when another died, pruning rows older than a day, `startWorkerHeartbeat` beating on its interval and
+  deleting its row on stop, and the start-up check that the table exists (a database that was not migrated).
+- Web: `apps/web/test/worker-notice.test.ts` (the notice only when no worker is alive **and** something is waiting;
+  nothing when the worker runs or when the status was not checked; the dashboard's quieter wording; a hosted server
+  pointed at its worker service instead of `dev.sh`; a heartbeat that cannot be read counts as "not running") and
+  `apps/web/test/studio-status-shape.test.ts` (the status payload carries `worker`).
+- Live check (by hand, on a throwaway cluster, e.g. `LOCAL_PG_PORT=55891 LOCAL_PG_DIR=/var/tmp/wl/pg`):
+  1. With the database stopped, run `bash scripts/dev.sh --no-check`. The `[worker]` lines show
+     `Waiting for the database at 127.0.0.1:55891. Start it with: bash scripts/local-postgres.sh start` once, and
+     `GET /api/health` is 503 with `worker.alive` false.
+  2. Start the database and run `bash scripts/dev.sh migrate`. The worker logs `The database is reachable now` and
+     `worker started` without being restarted; an uploaded clip is analysed.
+  3. `kill -9` the worker's node process. `dev.sh` says `The background worker stopped unexpectedly` and starts it
+     again. To see the notice, run the web app and `pnpm --filter @studio/worker start` separately and `kill -9` the
+     worker: within about 60 s `GET /api/health` reports `"worker":{"alive":false,…}` (still 200) and a project with
+     a waiting clip shows "The background worker isn't running" above the clips.

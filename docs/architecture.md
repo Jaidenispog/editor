@@ -38,8 +38,9 @@ packages/config Typed environment (Zod). Secrets never leave the server.
   backoff 1 s → 2 → 4 → 8 → 15 s (capped) and **one** plain log line, e.g. `Waiting for the database at
   127.0.0.1:5433. Start it with: bash scripts/local-postgres.sh start`. SIGINT/SIGTERM stop the wait. Configuration
   problems are not retried: an address that is not `postgres://`, a refused password (28P01/28000), a missing
-  database (3D000), an invalid environment or a job type without its handler print one plain message and exit with
-  status 78 (EX_CONFIG). Messages carry only host and port; passwords and connection strings are redacted.
+  database (3D000), a database that was not migrated for this version (no `worker_heartbeats` table: "Run: bash
+  scripts/dev.sh migrate"), an invalid environment or a job type without its handler print one plain message and
+  exit with status 78 (EX_CONFIG). Messages carry only host and port; passwords and connection strings are redacted.
 - **`scripts/dev.sh` supervises the worker.** It runs the worker without watch mode (`tsx src/main.ts`): `tsx watch`
   keeps its process alive after a crash, waiting for a file change, so a dead worker was invisible (14 Nov 2026
   incident: clips sat on "Waiting to be analysed"). When the worker exits, dev.sh says so in plain words and starts it

@@ -67,3 +67,13 @@ export async function readWorkerStatus(db: Database, staleAfterMs = WORKER_STALE
   const lastSeenAt = row?.last_seen_at ? new Date(row.last_seen_at) : null;
   return { alive: isHeartbeatFresh(lastSeenAt, now, staleAfterMs), lastSeenAt };
 }
+
+/**
+ * Whether the `worker_heartbeats` table exists, i.e. the database has the migrations this version needs. The worker
+ * checks it at start-up so a database that was not migrated after an update fails with a plain message instead of
+ * a crash loop.
+ */
+export async function hasWorkerHeartbeatsTable(db: Database): Promise<boolean> {
+  const result = await db.execute<{ t: string | null }>(sql`select to_regclass('public.worker_heartbeats')::text as t`);
+  return Boolean(result.rows[0]?.t);
+}

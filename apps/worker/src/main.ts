@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
 import { loadEnv } from '@studio/config';
-import { DEFAULT_DB_POOL_MAX, createDatabase, probeDatabase, pruneWorkerHeartbeats } from '@studio/db';
+import { DEFAULT_DB_POOL_MAX, createDatabase, hasWorkerHeartbeatsTable, probeDatabase, pruneWorkerHeartbeats } from '@studio/db';
 import { createBlobStore } from '@studio/storage';
 import { createQueue } from '@studio/queue';
 import { createAiProviders } from '@studio/ai';
@@ -156,6 +156,10 @@ export async function startWorker(options: StartWorkerOptions = {}): Promise<{ c
         await probeDatabase(env.DATABASE_URL, { applicationName: 'studio-worker' });
         if (env.QUEUE_DATABASE_URL && env.QUEUE_DATABASE_URL !== env.DATABASE_URL) await probeDatabase(env.QUEUE_DATABASE_URL, { applicationName: 'studio-worker' });
         await queue.start();
+        // Reachable but not migrated (an update was pulled without `dev.sh migrate`): waiting will not fix that.
+        if (!(await hasWorkerHeartbeatsTable(dbHandle.db))) {
+          throw new StartupConfigError('The database has not been updated for this version of the app. Run: bash scripts/dev.sh migrate, then start the app again.');
+        }
       },
     });
   } catch (err) {

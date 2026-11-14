@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
-import { WORKER_STALE_AFTER_MS, isHeartbeatFresh, pruneWorkerHeartbeats, readWorkerStatus, recordWorkerHeartbeat, removeWorkerHeartbeat, schema, type DatabaseHandle } from '@studio/db';
+import { WORKER_STALE_AFTER_MS, hasWorkerHeartbeatsTable, isHeartbeatFresh, pruneWorkerHeartbeats, readWorkerStatus, recordWorkerHeartbeat, removeWorkerHeartbeat, schema, type DatabaseHandle } from '@studio/db';
 import { startWorkerHeartbeat } from '../src/lib/worker-heartbeat.js';
 import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 
@@ -38,6 +38,10 @@ describe.skipIf(skip)('worker heartbeat (database-backed)', () => {
   });
   afterAll(async () => {
     await drop?.();
+  });
+
+  it('finds the heartbeat table on a migrated database (the start-up check)', async () => {
+    expect(await hasWorkerHeartbeatsTable(handle.db)).toBe(true);
   });
 
   it('reports no worker before any heartbeat', async () => {
