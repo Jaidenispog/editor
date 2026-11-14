@@ -74,6 +74,25 @@ History of the background runs:
      checkboxes not pre-ticked by learned order (style-controls.tsx), logo copy key belongs in packages/storage,
      nothing tested against real Meta accounts.
 
+10. 2026-11-14 afternoon: G3 (WP5 Instagram hashtag watch) merged and pushed (838ab1f; 780 tests, 12/12, 51/51).
+    The local-dev hardening branch merged and pushed (8c999aa; 783 tests, 12/12, 51/51): settings writes only under
+    the row lock (logo routes could overwrite learned preferences), `next dev` bound to 127.0.0.1 (opt-in
+    `WEB_HOST=0.0.0.0`), `apps/web/next-env.d.ts` untracked, `NEXT_TELEMETRY_DISABLED=1` in `.env.example`, owner
+    command via `OWNER_EMAIL`/`OWNER_PASSWORD`. Also e6d59b1: `local-postgres.sh` now reads Homebrew's
+    "17.11 (Homebrew)" version string (found by the owner on their Mac).
+    - **The owner is running the app on their Mac** (Apple silicon, Homebrew, already had postgresql@17 and node
+      linked). Real incident: they started `dev.sh` before the database; the worker (`tsx watch`) died silently and
+      five real clips sat on "Waiting to be analysed". Workaround given: run `pnpm dev:worker` in a second tab.
+    - Two runs were stopped by the 5-hour usage limit and **relaunched with `resumeWorktree`** after saving WIP
+      commits: worker liveness (`.claude/worktrees/wf_ffdb3376-fd0-1`, WIP c8a002b; worker waits for the database,
+      dev.sh surfaces a dead worker, `worker_heartbeats` migration 0006 + "background worker isn't running" notice +
+      `/api/health` worker field) and Stage B acceptance (`.claude/worktrees/wf_d9dca0d1-b5f-1`, WIP 0af31f8;
+      `apps/web/e2e/run-stage-b.sh` + `stage-b.e2e.mjs` with a local Meta fake). Merge each after its review passes,
+      re-run all checks, push, then update the README status table, recapture the showcase and republish the
+      progress page. The workflow scripts accept `{resumeWorktree, resumeBranch}`.
+    - Next after that: Stage C, G4 = WP6 (square) ∥ WP7 (email_reviews) ∥ WP8 (website). Migration numbers start
+      after 0006 if worker liveness lands first.
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
