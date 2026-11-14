@@ -75,13 +75,15 @@ test before Stages B/C. Never present simulated data as real; show honest "needs
 | `packages/db` — Drizzle schema (29 tables incl. Stage B/C), `drizzle/0000_init.sql`, client, migrate, seed, AES-GCM token crypto | **Done, tested** | migration applied to local PG; 3 tests |
 | `packages/storage` — BlobStore: LocalDiskStore + S3Store (Supabase/R2/S3), HMAC signed links, multipart | **Done, tested** | 5 tests |
 | `packages/queue` — pg-boss 12 wrapper (per-type retry/expiry/heartbeat) | Done | typechecks; verified against installed types |
-| `packages/media` — ffmpeg runner/ffprobe (mine) + `src/analysis/**` and `src/render/**` (**written by background agents**, see §3) | typecheck OK, **63 tests pass (6 files)** at handover | agents were still adding tests/fixes |
-| `apps/worker` — job tracker (heartbeat, cancel, restart recovery), handlers: ingest, generate/revise, render, music, cleanup; integration test | Written by me; **cannot typecheck until `@studio/ai` exists** (all 14 errors are the missing package) | 8 unit tests pass (job tracker against real PG) |
-| `packages/ai` | **NOT STARTED** (agent never got a slot) | spec in `docs/handover/phase1-implementation-workflow.js` → `AI` prompt |
-| `apps/web` | **NOT STARTED** beyond `package.json` | spec in the same file → `WEB_FOUNDATION` prompt; API contract in `docs/api.md` |
-| Dev-ops/docs (`docker-compose.yml`, Dockerfiles, `.env.example`, `scripts/local-postgres.sh`, `docs/deployment.md`, `docs/operating-costs.md`, `docs/testing.md`, `docs/security.md`, `README.md`) | **NOT STARTED** | spec → `DEVOPS_DOCS` prompt |
+| `packages/media` — ffmpeg/ffprobe, analysis, renderer | **Done, tested** | 64 tests; cut-then-transition fix |
+| `apps/worker` — job tracker, handlers, recovery | **Done, tested** | 11 unit + 12 integration tests (synthetic footage, incl. music beat alignment); kill -9 recovery verified |
+| `packages/ai` — rules planner, Anthropic planner/labeller, transcription | **Done, tested** | 60 tests; real Anthropic/OpenAI APIs not yet called (no keys) |
+| `apps/web` — shell, auth, settings, Video Studio, API | **Done, tested** | 77 tests; build passes; end-to-end browser test 51/51 (`apps/web/e2e/run-stage-a.sh`) |
+| Dev-ops/docs — compose, Dockerfiles, scripts, docs | Done | scripts tested; Docker images not built (no daemon here) |
 | Research | **Complete** (12 topics, critique, 8 follow-ups). Read `docs/research/platform-constraints.md` (supersedes `decisions-summary.md` where they differ) | memo + raw findings in `docs/research/` |
 | CI | `.github/workflows/ci.yml` written (untested in GitHub) | |
+
+**Stage A status (2026-11-14): passes its acceptance checks on synthetic footage only. It has NOT been validated on the owner's real haircut clips, and no AI key has been used yet.** Screenshots: `docs/screenshots/`.
 
 ## 3. Background agents that were running when the session ended
 
