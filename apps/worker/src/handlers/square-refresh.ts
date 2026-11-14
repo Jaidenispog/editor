@@ -30,9 +30,10 @@ export async function handleSquareRefresh(ctx: WorkerContext, run: TrackedRun, p
     if (payload.entity === 'booking') {
       const b = await s.api.getBooking(payload.squareId);
       if (isMalformedBooking(b)) {
-        // Square still has it but sent a time we can't read: the stored copy stays exactly as it is.
+        // Square still has it but sent a copy we can't read (bad time, missing fields or no booking in the answer):
+        // the stored copy stays exactly as it is. The specific reason goes to the log, not the owner's message.
         ctx.logger.warn({ squareBookingId: b.id, reason: b.reason }, 'left a Square booking as stored: its copy from Square could not be read');
-        await run.progress(1, "Square sent this booking with a time we couldn't read, so it was left as it was.");
+        await run.progress(1, "Square sent this booking in a form we couldn't read, so it was left as it was.");
         return;
       }
       if (!b) {
