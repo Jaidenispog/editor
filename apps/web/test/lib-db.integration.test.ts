@@ -5,6 +5,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runMigrations } from '@studio/db';
+import { dropTestDatabase } from './helpers/test-database';
 
 /**
  * Exercises the database-backed helpers (auth, settings, trends, projects, jobs) against a throwaway database
@@ -37,10 +38,7 @@ suite('database-backed helpers', () => {
     const g = globalThis as unknown as { __studioWebDb?: { close(): Promise<void> }; __studioWebQueue?: Promise<{ stop(graceful?: boolean): Promise<void> }> };
     if (g.__studioWebQueue) await (await g.__studioWebQueue).stop(false).catch(() => undefined);
     if (g.__studioWebDb) await g.__studioWebDb.close();
-    const admin = new pg.Client({ connectionString: base });
-    await admin.connect();
-    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    await admin.end();
+    await dropTestDatabase(base ?? '', dbName);
     if (storageRoot) await rm(storageRoot, { recursive: true, force: true });
   }, 60_000);
 
