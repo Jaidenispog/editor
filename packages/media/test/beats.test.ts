@@ -1,5 +1,4 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { execa } from 'execa';
 import { ensureSamples, hasFfmpeg, noiseSource, samplePath } from './analysis-fixtures.js';
 import { probeMedia } from '../src/ffprobe.js';
 import { analyseMusic, BEAT_DETECTION, detectBeats } from '../src/analysis/index.js';
