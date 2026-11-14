@@ -2,10 +2,18 @@ import { execa } from 'execa';
 import { stat } from 'node:fs/promises';
 import { AssetProbeSchema, type AssetProbe } from '@studio/core';
 
-interface FfprobeStream {
+/** One stream as `ffprobe -show_streams -print_format json` reports it (the fields the pipeline reads). */
+export interface FfprobeStream {
   index: number;
   codec_type: string;
   codec_name?: string;
+  /** e.g. "High" for H.264, "LC" for AAC. */
+  profile?: string;
+  /** H.264 level_idc, e.g. 41 for level 4.1. */
+  level?: number;
+  /** e.g. "progressive". */
+  field_order?: string;
+  nb_frames?: string;
   width?: number;
   height?: number;
   pix_fmt?: string;
@@ -25,11 +33,13 @@ interface FfprobeStream {
   disposition?: Record<string, number>;
 }
 
-interface FfprobeOutput {
+/** The JSON `ffprobe -show_format -show_streams` prints. */
+export interface FfprobeOutput {
   streams: FfprobeStream[];
   format: { format_name?: string; duration?: string; size?: string; bit_rate?: string; tags?: Record<string, string> };
 }
 
+/** Runs ffprobe on a file and returns its raw JSON report (streams and format). */
 export async function ffprobeRaw(filePath: string, ffprobePath = 'ffprobe'): Promise<FfprobeOutput> {
   const result = await execa(
     ffprobePath,

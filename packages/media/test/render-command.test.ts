@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { computeTimeline } from '@studio/core';
-import { atempoChain, buildRenderCommand, escapeFilterPath, formatNumber, segmentFrameCount, type RenderInputs } from '../src/render/index.js';
+import { AppError, computeTimeline } from '@studio/core';
+import {
+  MAX_RENDER_DURATION_SEC,
+  assertRenderableDuration,
+  atempoChain,
+  buildRenderCommand,
+  escapeFilterPath,
+  exportLevelFor,
+  formatNumber,
+  segmentFrameCount,
+  videoCodecArgs,
+  type RenderInputs,
+} from '../src/render/index.js';
 import { ASSET_IDS, FONTS_DIR, MUSIC_TRACK_ID, SAMPLE_FILES, TEST_BRAND, fakeProbe, samplePlan } from './render-fixtures.js';
 
 function baseInputs(overrides: Partial<RenderInputs> = {}): RenderInputs {
@@ -86,7 +97,8 @@ describe('buildRenderCommand', () => {
     expect(fc).not.toContain('[o_3]');
     const { args } = command;
     expect(args).toContain('[aout]');
-    expect(args.slice(args.indexOf('[aout]') + 1, args.indexOf('[aout]') + 9)).toEqual(['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2']);
+    expect(args.slice(args.indexOf('[aout]') + 1, args.indexOf('[aout]') + 11)).toEqual(['-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '192k', '-ar', '48000', '-ac', '2']);
+    expect(command.hasAudio).toBe(true);
     expect(args).not.toContain('-an');
   });
 
@@ -98,18 +110,66 @@ describe('buildRenderCommand', () => {
     expect(noText.args).toContain('[vout]');
   });
 
-  it('encodes previews fast and exports at full quality', () => {
+  it('encodes previews fast with the same frame-rate, GOP and colour settings as exports', () => {
     const preview = command.args;
-    expect(preview).toEqual(expect.arrayContaining(['-preset', 'veryfast', '-crf', '27', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60', '-bf', '2', '-movflags', '+faststart']));
-    expect(preview.slice(preview.indexOf('-colorspace'), preview.indexOf('-colorspace') + 6)).toEqual(['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709']);
+    const shared = ['-pix_fmt', 'yuv420p', '-field_order', 'progressive', '-r', '30', '-fps_mode', 'cfr', '-g', '60', '-keyint_min', '60', '-sc_threshold', '0', '-flags', '+cgop', '-bf', '2'];
+    const colour = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv'];
+    const at = (args: string[], seq: string[]) => args.slice(args.indexOf(seq[0]!), args.indexOf(seq[0]!) + seq.length);
+    expect(preview.slice(preview.indexOf('-c:v'), preview.indexOf('-c:v') + 8)).toEqual(['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '27', '-profile:v', 'high']);
+    expect(at(preview, shared)).toEqual(shared);
+    expect(at(preview, colour)).toEqual(colour);
+    expect(preview).not.toContain('-level:v');
+    expect(preview).not.toContain('-maxrate');
+    expect(preview.slice(preview.indexOf('-movflags'), preview.indexOf('-movflags') + 2)).toEqual(['-movflags', '+faststart']);
     expect(preview).not.toContain('-threads');
     expect(preview).not.toContain('-filter_threads');
 
     const exportCommand = buildRenderCommand(baseInputs({ quality: 'export', threads: 2 }), '/tmp/out/export.mp4', null);
-    expect(exportCommand.args).toEqual(expect.arrayContaining(['-preset', 'slow', '-crf', '18', '-level', '4.2', '-filter_threads', '2', '-threads', '2']));
+    const args = exportCommand.args;
+    expect(args.slice(args.indexOf('-c:v'), args.indexOf('-c:v') + 14)).toEqual(['-c:v', 'libx264', '-preset', 'slow', '-crf', '18', '-maxrate', '20M', '-bufsize', '40M', '-profile:v', 'high', '-level:v', '4.1']);
+    expect(at(args, shared)).toEqual(shared);
+    expect(at(args, colour)).toEqual(colour);
+    expect(args).toEqual(expect.arrayContaining(['-filter_threads', '2', '-threads', '2', '-movflags', '+faststart']));
     expect(exportCommand.filterComplex).toContain('scale=1080:1920:force_original_aspect_ratio=increase');
     expect(exportCommand.filterComplex).toContain('s=1080x1920');
-    expect(exportCommand.args.indexOf('-filter_threads')).toBe(0);
+    expect(args.indexOf('-filter_threads')).toBe(0);
+  });
+
+  it('uses level 4.2 and a 2 s GOP at 60 fps, and a lower peak rate for long edits', () => {
+    expect(exportLevelFor(24)).toBe('4.1');
+    expect(exportLevelFor(30)).toBe('4.1');
+    expect(exportLevelFor(50)).toBe('4.2');
+    expect(exportLevelFor(60)).toBe('4.2');
+    const sixty = videoCodecArgs('export', 60, 20);
+    expect(sixty).toEqual(expect.arrayContaining(['-level:v', '4.2', '-maxrate', '24M', '-bufsize', '48M', '-r', '60', '-g', '120', '-keyint_min', '120']));
+    const long = videoCodecArgs('export', 30, 120);
+    expect(long).toEqual(expect.arrayContaining(['-maxrate', '12M', '-bufsize', '24M', '-level:v', '4.1']));
+    expect(videoCodecArgs('preview', 60)).toEqual(expect.arrayContaining(['-g', '120', '-keyint_min', '120', '-fps_mode', 'cfr']));
+  });
+
+  it('refuses edits longer than three minutes', () => {
+    expect(MAX_RENDER_DURATION_SEC).toBe(180);
+    expect(() => assertRenderableDuration(180)).not.toThrow();
+    const err = (() => {
+      try {
+        assertRenderableDuration(181.2);
+        return null;
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).code).toBe('VALIDATION');
+    expect((err as AppError).message).toBe('This edit runs for 181 seconds. Videos for Instagram and TikTok can be at most 3 minutes, so shorten it and try again.');
+
+    // buildRenderCommand applies the same cap.
+    const plan = samplePlan();
+    plan.targetDurationSec = 190;
+    plan.segments = [{ ...plan.segments[2]!, transitionIn: null, inSec: 0, outSec: 190 }];
+    plan.textOverlays = [];
+    const longClip = baseInputs({ plan });
+    longClip.assets[ASSET_IDS.c] = { path: SAMPLE_FILES.c, probe: fakeProbe({ durationSec: 200, hasAudio: false }) };
+    expect(() => buildRenderCommand(longClip, '/tmp/out/long.mp4', null)).toThrow(/at most 3 minutes/);
   });
 
   it('omits audio entirely when nothing in the plan makes a sound', () => {
@@ -119,6 +179,7 @@ describe('buildRenderCommand', () => {
     plan.audio.music = null;
     const silent = buildRenderCommand(baseInputs({ plan, music: null }), '/tmp/out/silent.mp4', null);
     expect(silent.args).toContain('-an');
+    expect(silent.hasAudio).toBe(false);
     expect(silent.args).not.toContain('[aout]');
     expect(silent.filterComplex).not.toContain('amix');
     expect(silent.filterComplex).not.toContain('loudnorm');
