@@ -25,7 +25,7 @@ import {
 } from '@studio/media';
 import { HeuristicLabeler, type FrameForLabelling, type VisionLabeler } from '@studio/ai';
 import type { WorkerContext } from '../context.js';
-import type { TrackedRun } from '../lib/job-tracker.js';
+import { INTERRUPTED_MESSAGE, stopOutcome, type TrackedRun } from '../lib/job-tracker.js';
 import { createJobTempDir, removeTempDir } from '../lib/temp.js';
 import { applyManualLabels } from '@studio/core';
 import { recordAiUsage } from '../lib/plan-context.js';
@@ -180,8 +180,15 @@ export async function handleIngestAsset(ctx: WorkerContext, run: TrackedRun, pay
     await refreshProjectReadiness(ctx, project.id);
     await run.progress(1, 'Clip ready');
   } catch (err) {
-    if (err instanceof CancelledError) {
+    const outcome = err instanceof CancelledError ? await stopOutcome(run) : null;
+    if (outcome === 'cancelled') {
       await setAsset({ status: 'uploaded', statusMessage: 'Processing cancelled' });
+    } else if (outcome === 'resume') {
+      // The queue runs this job again (worker restart or time limit); keep the clip in "processing".
+      await setAsset({ status: 'processing', statusMessage: INTERRUPTED_MESSAGE });
+    } else if (outcome === 'failed') {
+      await setAsset({ status: 'failed', statusMessage: 'Processing stopped before it could finish. Try re-uploading the clip.' });
+      await refreshProjectReadiness(ctx, project.id);
     } else {
       await setAsset({ status: 'failed', statusMessage: err instanceof AppError ? err.message : 'This clip could not be processed. Try re-uploading it.' });
       await refreshProjectReadiness(ctx, project.id);

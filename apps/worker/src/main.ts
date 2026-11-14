@@ -22,6 +22,8 @@ type Handler<T extends JobType> = (ctx: WorkerContext, run: TrackedRun, payload:
 
 /** How often rows left "running" by a dead worker are looked for after start-up. */
 const STALE_SWEEP_MS = 30_000;
+/** After the queue stops, how long interrupted handlers get to write their state before connections close. */
+const SHUTDOWN_SETTLE_MS = 10_000;
 
 /**
  * Local development keeps one .env at the repository root that the web app and the worker share.
@@ -84,33 +86,40 @@ export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => P
   sweep.unref();
 
   const registered: JobType[] = [];
+  // Attempts in progress, so a shutdown can let interrupted handlers record their state before the pool closes.
+  const inFlight = new Set<Promise<void>>();
   const register = async <T extends JobType>(type: T, handler: Handler<T>, concurrency: number) => {
     await queue.work(
       type,
       async (job) => {
         const payload = JOB_PAYLOAD_SCHEMAS[type].parse(job.data) as JobPayload<T>;
         const projectId = (payload as { projectId?: string }).projectId ?? null;
+        const attempt = runTracked(
+          ctx.db,
+          logger,
+          {
+            type,
+            bossJobId: job.id,
+            trackingJobId: job.data.trackingJobId,
+            projectId,
+            refId: refIdFor(type, payload as Record<string, unknown>),
+            payload: payload as Record<string, unknown>,
+            retryCount: job.retryCount,
+            bossSignal: job.signal,
+            workerId: ctx.workerId,
+          },
+          (run) => handler(ctx, run, payload),
+        );
+        inFlight.add(attempt);
         try {
-          await runTracked(
-            ctx.db,
-            logger,
-            {
-              type,
-              bossJobId: job.id,
-              trackingJobId: job.data.trackingJobId,
-              projectId,
-              refId: refIdFor(type, payload as Record<string, unknown>),
-              payload: payload as Record<string, unknown>,
-              retryCount: job.retryCount,
-              bossSignal: job.signal,
-              workerId: ctx.workerId,
-            },
-            (run) => handler(ctx, run, payload),
-          );
+          await attempt;
         } catch (err) {
-          // A cancellation is a normal outcome, not a failure the queue should retry.
+          // The owner's cancellation is a normal outcome, not a failure the queue should retry. An interruption
+          // by the queue (JobInterruptedError) is rethrown so pg-boss records the attempt and retries it.
           if (err instanceof CancelledError) return;
           throw err;
+        } finally {
+          inFlight.delete(attempt);
         }
       },
       concurrency,
@@ -139,7 +148,12 @@ export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => P
     clearInterval(sweep);
     logger.info('worker stopping (waiting for active jobs)');
     try {
+      // pg-boss waits up to 30 s for active jobs, then fails them (they are retried later) and aborts them.
       await queue.stop(true);
+      if (inFlight.size > 0) {
+        logger.info({ active: inFlight.size }, 'letting interrupted jobs record their state');
+        await Promise.race([Promise.allSettled([...inFlight]), new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_SETTLE_MS).unref())]);
+      }
     } finally {
       await dbHandle.close();
     }

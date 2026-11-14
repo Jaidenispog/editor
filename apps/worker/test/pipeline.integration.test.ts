@@ -1,7 +1,8 @@
 /**
  * Stage A acceptance test at the worker level, on SYNTHETIC footage (scripts/make-sample-footage.sh):
  * ingest (incl. rotated HEVC HLG and a silent clip) → manual tags → five planned styles → preview renders →
- * revise one edit without losing the others → full-quality export → interrupted job → owner-uploaded music
+ * revise one edit without losing the others → full-quality export → cancelled job → job interrupted by a worker
+ * shutdown (waits to resume, then finishes) → owner-uploaded music
  * (tempo detection, beat-aligned cuts, stereo soundtrack) → incomplete footage.
  * Requires ffmpeg and TEST_DATABASE_URL. Synthetic footage is not a substitute for real haircut clips.
  */
@@ -20,7 +21,7 @@ import { LocalDiskStore, storageKeys } from '@studio/storage';
 import { probeMedia, segmentFrameCount } from '@studio/media';
 import { createAiProviders } from '@studio/ai';
 import type { WorkerContext } from '../src/context.js';
-import type { TrackedRun } from '../src/lib/job-tracker.js';
+import { INTERRUPTED_MESSAGE, type TrackedRun } from '../src/lib/job-tracker.js';
 import { handleIngestAsset, refreshProjectReadiness } from '../src/handlers/ingest.js';
 import { handleGenerateEdits, handleReviseEdit } from '../src/handlers/generate.js';
 import { handleRender } from '../src/handlers/render.js';
@@ -31,15 +32,18 @@ const REPO = path.resolve(import.meta.dirname, '..', '..', '..');
 const SAMPLES = path.join(REPO, 'data', 'samples');
 const skip = !testDatabaseUrl();
 
-function fakeRun(signal: AbortSignal = new AbortController().signal): TrackedRun {
+/** A TrackedRun without the queue. `stoppedBy` says who aborts the signal: the owner (cancel) or the queue (shutdown). */
+function fakeRun(signal: AbortSignal = new AbortController().signal, stoppedBy: 'owner' | 'queue' = 'owner'): TrackedRun {
   return {
     jobId: newId(),
     signal,
+    willRetry: true,
     progress: async () => {},
     message: async () => {},
     checkCancelled: () => {
       if (signal.aborted) throw new CancelledError();
     },
+    cancelledByOwner: async () => stoppedBy === 'owner' && signal.aborted,
   };
 }
 
@@ -261,6 +265,25 @@ describe.skipIf(skip)('worker pipeline on synthetic footage', () => {
     expect(v?.exportKey).toBeNull();
     expect(v?.status).toBe('preview_ready');
   }, 120_000);
+
+  it('keeps an export that a worker shutdown interrupted waiting to resume, then finishes it', async () => {
+    const versionId = versionByStyle['process_story']!;
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new CancelledError('pg-boss shut down while active')), 1500);
+    await expect(handleRender(ctx, fakeRun(controller.signal, 'queue'), { editVersionId: versionId, projectId }, 'export')).rejects.toBeInstanceOf(CancelledError);
+    const interrupted = await handle.db.query.editVersions.findFirst({ where: eq(schema.editVersions.id, versionId) });
+    expect(interrupted?.exportStatus).toBe('rendering');
+    expect(interrupted?.exportMessage).toBe(INTERRUPTED_MESSAGE);
+    expect(interrupted?.exportKey).toBeNull();
+
+    // The queue's next attempt renders it from scratch.
+    await handleRender(ctx, fakeRun(), { editVersionId: versionId, projectId }, 'export');
+    const done = await handle.db.query.editVersions.findFirst({ where: eq(schema.editVersions.id, versionId) });
+    expect(done?.exportStatus).toBe('ready');
+    const probe = await probeMedia((ctx.store as LocalDiskStore).resolvePath(done!.exportKey!));
+    expect(probe.video).toMatchObject({ codec: 'h264', displayWidth: 1080, displayHeight: 1920 });
+    expect(Math.abs(probe.durationSec - computeTimeline(done!.plan!).totalDurationSec)).toBeLessThan(0.25);
+  }, 300_000);
 
   const musicTrackId = newId();
   const musicGenerationId = newId();

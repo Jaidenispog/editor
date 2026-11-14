@@ -1,10 +1,10 @@
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
-import { AppError } from '@studio/core';
+import { AppError, CancelledError } from '@studio/core';
 import { schema } from '@studio/db';
 import { analyseMusic, probeMedia } from '@studio/media';
 import type { WorkerContext } from '../context.js';
-import type { TrackedRun } from '../lib/job-tracker.js';
+import { INTERRUPTED_MESSAGE, stopOutcome, type TrackedRun } from '../lib/job-tracker.js';
 import { createJobTempDir, removeTempDir } from '../lib/temp.js';
 
 /** Probes an uploaded music track and detects its tempo/beat grid so cuts can be aligned to the music. */
@@ -34,9 +34,16 @@ export async function handleAnalyseMusic(ctx: WorkerContext, run: TrackedRun, pa
       .where(eq(schema.musicTracks.id, track.id));
     await run.progress(1, 'Track ready');
   } catch (err) {
+    const outcome = err instanceof CancelledError ? await stopOutcome(run) : null;
+    const values =
+      outcome === 'cancelled'
+        ? { status: 'uploaded' as const, statusMessage: 'Analysis cancelled' }
+        : outcome === 'resume'
+          ? { status: 'processing' as const, statusMessage: INTERRUPTED_MESSAGE }
+          : { status: 'failed' as const, statusMessage: err instanceof AppError ? err.message : 'The track could not be analysed' };
     await ctx.db
       .update(schema.musicTracks)
-      .set({ status: 'failed', statusMessage: err instanceof AppError ? err.message : 'The track could not be analysed', updatedAt: new Date() })
+      .set({ ...values, updatedAt: new Date() })
       .where(eq(schema.musicTracks.id, track.id));
     throw err;
   } finally {

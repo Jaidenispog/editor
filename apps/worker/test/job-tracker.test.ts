@@ -3,7 +3,7 @@ import pino from 'pino';
 import { eq } from 'drizzle-orm';
 import { CancelledError, JOB_TYPES, newId } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
-import { STALE_AFTER_MS, recoverStaleJobs, runTracked } from '../src/lib/job-tracker.js';
+import { INTERRUPTED_MESSAGE, JobInterruptedError, STALE_AFTER_MS, recoverStaleJobs, runTracked } from '../src/lib/job-tracker.js';
 import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 
 const logger = pino({ level: 'silent' });
@@ -75,19 +75,69 @@ describe.skipIf(skip)('runTracked', () => {
     expect(row?.message).toMatch(/could not be processed/);
   });
 
-  it('propagates the queue abort signal into the handler signal', async () => {
+  it('propagates the queue abort signal into the handler signal and reports an interruption, not a cancel', async () => {
+    const boss = new AbortController();
+    const bossJobId = newId();
+    let ownerCancel: boolean | null = null;
+    await expect(
+      runTracked(
+        handle.db,
+        logger,
+        { type: JOB_TYPES.RENDER_EXPORT, bossJobId, payload: {}, retryCount: 0, bossSignal: boss.signal, workerId: 'w1' },
+        async (run) => {
+          setTimeout(() => boss.abort(new CancelledError('expired')), 50);
+          await new Promise<void>((resolve, reject) => run.signal.addEventListener('abort', () => reject(run.signal.reason), { once: true })).catch(async (err: unknown) => {
+            ownerCancel = await run.cancelledByOwner();
+            throw err;
+          });
+        },
+      ),
+    ).rejects.toBeInstanceOf(JobInterruptedError);
+    expect(ownerCancel).toBe(false);
+    const row = await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.bossJobId, bossJobId) });
+    expect(row?.status).toBe('queued');
+    expect(row?.message).toBe(INTERRUPTED_MESSAGE);
+  });
+
+  it('treats a queue abort as the owner cancel when the cancel flag is set', async () => {
+    const id = newId();
+    const boss = new AbortController();
+    await handle.db.insert(schema.jobs).values({ id, type: JOB_TYPES.RENDER_EXPORT, payload: {}, status: 'queued' });
+    await expect(
+      runTracked(
+        handle.db,
+        logger,
+        { type: JOB_TYPES.RENDER_EXPORT, bossJobId: newId(), trackingJobId: id, payload: {}, retryCount: 0, bossSignal: boss.signal, workerId: 'w1' },
+        async (run) => {
+          // The web app sets the flag and cancels the queue job; the queue's abort can arrive first.
+          await handle.db.update(schema.jobs).set({ cancelRequested: true }).where(eq(schema.jobs.id, id));
+          boss.abort(new CancelledError('cancelled in the queue'));
+          expect(await run.cancelledByOwner()).toBe(true);
+          run.checkCancelled();
+        },
+      ),
+    ).rejects.toBeInstanceOf(CancelledError);
+    expect((await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.id, id) }))?.status).toBe('cancelled');
+  });
+
+  it('fails an interrupted job on its last attempt', async () => {
+    const bossJobId = newId();
     const boss = new AbortController();
     await expect(
       runTracked(
         handle.db,
         logger,
-        { type: JOB_TYPES.RENDER_EXPORT, bossJobId: newId(), payload: {}, retryCount: 0, bossSignal: boss.signal, workerId: 'w1' },
+        { type: JOB_TYPES.RENDER_EXPORT, bossJobId, payload: {}, retryCount: 2, bossSignal: boss.signal, workerId: 'w1' },
         async (run) => {
-          setTimeout(() => boss.abort(new CancelledError('expired')), 50);
-          await new Promise<void>((resolve, reject) => run.signal.addEventListener('abort', () => reject(run.signal.reason), { once: true }));
+          expect(run.willRetry).toBe(false);
+          boss.abort(new CancelledError('expired'));
+          run.checkCancelled();
         },
       ),
-    ).rejects.toBeInstanceOf(CancelledError);
+    ).rejects.toBeInstanceOf(JobInterruptedError);
+    const row = await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.bossJobId, bossJobId) });
+    expect(row?.status).toBe('failed');
+    expect(row?.finishedAt).not.toBeNull();
   });
 
   it('recovers stale running rows on startup', async () => {
@@ -160,7 +210,7 @@ describe.skipIf(skip)('runTracked', () => {
           run.checkCancelled();
         },
       ),
-    ).rejects.toBeInstanceOf(CancelledError);
+    ).rejects.toBeInstanceOf(JobInterruptedError);
     expect(lines.filter((l) => l.includes('queue aborted the job'))).toHaveLength(1);
   });
 });

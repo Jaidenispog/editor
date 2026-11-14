@@ -5,7 +5,7 @@ import { schema } from '@studio/db';
 import { storageKeys } from '@studio/storage';
 import { probeMedia, renderEditPlan } from '@studio/media';
 import type { WorkerContext } from '../context.js';
-import { friendlyFailure, type TrackedRun } from '../lib/job-tracker.js';
+import { INTERRUPTED_MESSAGE, friendlyFailure, stopOutcome, type TrackedRun } from '../lib/job-tracker.js';
 import { createJobTempDir, removeTempDir } from '../lib/temp.js';
 import { loadSettings } from '../lib/plan-context.js';
 
@@ -97,9 +97,14 @@ export async function handleRender(ctx: WorkerContext, run: TrackedRun, payload:
     }
     await run.progress(1, quality === 'preview' ? 'Preview ready' : 'Export ready');
   } catch (err) {
-    if (err instanceof CancelledError) {
+    const outcome = err instanceof CancelledError ? await stopOutcome(run) : null;
+    if (outcome === 'cancelled') {
       if (quality === 'preview') await setVersion({ status: 'cancelled', statusMessage: 'Preview cancelled' });
       else await setVersion({ exportStatus: 'none', exportMessage: 'Export cancelled' });
+    } else if (outcome === 'resume') {
+      // The queue renders this version again after a worker restart or time limit.
+      if (quality === 'preview') await setVersion({ statusMessage: INTERRUPTED_MESSAGE });
+      else await setVersion({ exportMessage: INTERRUPTED_MESSAGE });
     } else {
       const message = friendlyFailure(err);
       if (quality === 'preview') await setVersion({ status: 'failed', statusMessage: message });

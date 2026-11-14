@@ -20,7 +20,7 @@ import type { TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
 import { durationBoundsFor, loadMusic, loadProjectFootage, loadSettings, recordAiUsage, type LoadedFootage, type LoadedMusic } from '../lib/plan-context.js';
 import { planWithFallback } from '../lib/planning.js';
-import { friendlyFailure } from '../lib/job-tracker.js';
+import { INTERRUPTED_MESSAGE, friendlyFailure, stopOutcome } from '../lib/job-tracker.js';
 
 const PLANNING_CONCURRENCY = 2;
 
@@ -108,13 +108,20 @@ export async function handleGenerateEdits(ctx: WorkerContext, run: TrackedRun, p
     });
     await run.progress(1, 'Edits planned');
   } catch (err) {
-    if (err instanceof CancelledError) {
-      await setGeneration({ status: 'cancelled', statusMessage: 'Cancelled' });
+    const outcome = err instanceof CancelledError ? await stopOutcome(run) : null;
+    const editIds = async () => (await ctx.db.query.edits.findMany({ columns: { id: true }, where: eq(schema.edits.generationId, generation.id) })).map((e) => e.id);
+    if (outcome === 'cancelled' || outcome === 'failed') {
+      const cancelled = outcome === 'cancelled';
+      const message = cancelled ? 'Cancelled' : 'Planning stopped before it could finish. Please generate again.';
+      await setGeneration({ status: cancelled ? 'cancelled' : 'failed', statusMessage: message });
       await ctx.db
         .update(schema.editVersions)
-        .set({ status: 'cancelled', statusMessage: 'Cancelled', updatedAt: new Date() })
-        .where(and(inArray(schema.editVersions.editId, (await ctx.db.query.edits.findMany({ columns: { id: true }, where: eq(schema.edits.generationId, generation.id) })).map((e) => e.id)), eq(schema.editVersions.status, 'planning')));
+        .set({ status: cancelled ? 'cancelled' : 'failed', statusMessage: message, updatedAt: new Date() })
+        .where(and(inArray(schema.editVersions.editId, await editIds()), eq(schema.editVersions.status, 'planning')));
       await setProjectStatus('ready');
+    } else if (outcome === 'resume') {
+      // The queue runs planning again; versions already planned keep their plans (only "planning" ones are redone).
+      await setGeneration({ statusMessage: INTERRUPTED_MESSAGE });
     } else if (!(err instanceof AppError && err.code === 'PROCESSING_FAILED')) {
       await setGeneration({ status: 'failed', statusMessage: friendlyFailure(err) });
       await setProjectStatus('ready');
@@ -185,8 +192,13 @@ export async function handleReviseEdit(
     await enqueueTracked(ctx, JOB_TYPES.RENDER_PREVIEW, { editVersionId: version.id, projectId: payload.projectId }, { singletonKey: `preview:${version.id}` });
     await run.progress(1, 'New version planned');
   } catch (err) {
-    if (err instanceof CancelledError) {
+    const outcome = err instanceof CancelledError ? await stopOutcome(run) : null;
+    if (outcome === 'cancelled') {
       await ctx.db.update(schema.editVersions).set({ status: 'cancelled', statusMessage: 'Cancelled', updatedAt: new Date() }).where(eq(schema.editVersions.id, version.id));
+    } else if (outcome === 'resume') {
+      await ctx.db.update(schema.editVersions).set({ statusMessage: INTERRUPTED_MESSAGE, updatedAt: new Date() }).where(eq(schema.editVersions.id, version.id));
+    } else if (outcome === 'failed') {
+      await fail('This version stopped before it could finish. Please try again.');
     } else {
       await fail(friendlyFailure(err));
     }

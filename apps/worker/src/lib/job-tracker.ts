@@ -18,10 +18,37 @@ export interface TrackedRun {
   jobId: string;
   /** Combined signal: pg-boss expiry/cancel OR the owner's cancel request. */
   signal: AbortSignal;
+  /** True when the queue will run this job again if this attempt does not finish. */
+  willRetry: boolean;
   progress(fraction: number, message?: string): Promise<void>;
   message(message: string): Promise<void>;
   /** Throws CancelledError when cancellation was requested (call between steps). */
   checkCancelled(): void;
+  /** Whether a stop came from the owner's cancel request (as opposed to a worker shutdown or time limit). */
+  cancelledByOwner(): Promise<boolean>;
+}
+
+/**
+ * Thrown in place of CancelledError when the queue (not the owner) stopped an attempt: a worker shutdown that
+ * outlasted its grace period, the attempt's time limit, or a lost claim. pg-boss retries the job.
+ */
+export class JobInterruptedError extends Error {
+  constructor(message = 'The job was interrupted before it could finish') {
+    super(message);
+    this.name = 'JobInterruptedError';
+  }
+}
+
+/** Plain message shown while an interrupted job waits for the queue to run it again. */
+export const INTERRUPTED_MESSAGE = 'Interrupted when the worker stopped; it will resume automatically';
+
+/**
+ * What a handler should record when its work was stopped: the owner cancelled it, it will resume on the
+ * queue's next attempt, or it was interrupted on its last attempt and has failed.
+ */
+export async function stopOutcome(run: TrackedRun): Promise<'cancelled' | 'resume' | 'failed'> {
+  if (await run.cancelledByOwner()) return 'cancelled';
+  return run.willRetry ? 'resume' : 'failed';
 }
 
 export interface TrackedJobInput {
@@ -116,14 +143,28 @@ export async function runTracked<T>(
       .where(eq(schema.jobs.id, jobId));
   };
 
+  const attemptsLeft = input.retryCount + 1 < maxAttempts;
+  const cancelledByOwner = async (): Promise<boolean> => {
+    if (controller.signal.aborted) return true;
+    // The web app may also cancel the queue job, which can reach us as a queue abort before the flag check.
+    try {
+      const row = await db.query.jobs.findFirst({ columns: { cancelRequested: true }, where: eq(schema.jobs.id, jobId) });
+      return Boolean(row?.cancelRequested);
+    } catch (err) {
+      log.warn({ err }, 'could not read the cancel flag');
+      return false;
+    }
+  };
   const run: TrackedRun = {
     jobId,
     signal,
+    willRetry: attemptsLeft,
     progress: (fraction, message) => writeProgress(fraction, message, false),
     message: (message) => writeProgress(lastProgress, message, true),
     checkCancelled: () => {
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new CancelledError('Job cancelled');
     },
+    cancelledByOwner,
   };
 
   try {
@@ -141,15 +182,28 @@ export async function runTracked<T>(
   } catch (err) {
     clearInterval(heartbeat);
     listenerScope.abort();
-    const cancelled = err instanceof CancelledError || signal.aborted;
-    const attemptsLeft = input.retryCount + 1 < maxAttempts;
+    const stopped = err instanceof CancelledError || signal.aborted;
     const message = errorMessage(err);
-    if (cancelled) {
+    if (stopped && (await cancelledByOwner())) {
       await db
         .update(schema.jobs)
         .set({ status: 'cancelled', message: 'Cancelled', finishedAt: new Date(), error: message, updatedAt: new Date() })
         .where(eq(schema.jobs.id, jobId));
       log.info('job cancelled');
+    } else if (stopped) {
+      // The queue stopped this attempt (shutdown grace expired, time limit or lost claim) and retries it.
+      await db
+        .update(schema.jobs)
+        .set({
+          status: attemptsLeft ? 'queued' : 'failed',
+          message: attemptsLeft ? INTERRUPTED_MESSAGE : 'The job was stopped before it could finish. Please retry.',
+          error: message,
+          finishedAt: attemptsLeft ? null : new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.jobs.id, jobId));
+      log.warn({ attemptsLeft }, 'job interrupted by the queue');
+      throw new JobInterruptedError(message);
     } else {
       await db
         .update(schema.jobs)
@@ -200,6 +254,8 @@ export function friendlyFailure(err: unknown): string {
         return err.message;
       case 'RATE_LIMITED':
         return 'The AI service is busy. Please try again in a few minutes.';
+      case 'CANCELLED':
+        return 'This was stopped before it could finish. Please retry.';
       default:
         return 'Something went wrong while processing. Please retry.';
     }
@@ -235,7 +291,7 @@ export async function recoverStaleJobs(db: Database, logger: Logger, lookup: (ty
       .update(schema.jobs)
       .set({
         status: next,
-        message: next === 'queued' ? 'Interrupted when the worker stopped unexpectedly; it will resume automatically' : 'The worker stopped before this job could finish. Please retry.',
+        message: next === 'queued' ? INTERRUPTED_MESSAGE : 'The worker stopped before this job could finish. Please retry.',
         finishedAt: next === 'failed' ? new Date() : null,
         updatedAt: new Date(),
       })
