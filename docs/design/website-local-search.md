@@ -20,6 +20,15 @@ Markers used below:
 - **⚠** = not covered by the research memo, or marked unverified there. Every ⚠ item has a capability check, a
   read-only smoke test or an honest UI state, and is listed again in §14 or §15.
 
+> **Lead-architect reconciliation (2026-11-14, `docs/design/stage-bc-plan.md`).** Changed in this file:
+> (1) the shared Google OAuth routes/helper (with the `product=search_console` switch), worker token refresh/revoke,
+> `google.disconnect`, `lib/http.ts`, `lib/audit.ts`, `lib/credentials.ts` and the `IntegrationStatus` fields are built
+> by WP0, so this module does not depend on the email module being built first; (2) WordPress connections on a
+> different host use `liveMode: 'staging'`, which is now part of the shared union, instead of reusing `'sandbox'`;
+> (3) the work is split into WP8 (website check, prepared changes, WordPress apply, Search Console) and WP9
+> (Business Profile Performance, built together with the email design's Business Profile reviews tier because both
+> need the same `google_business_profile` connection, location discovery and Google's API approval).
+
 ---
 
 ## 1. Goal and scope
@@ -1039,7 +1048,7 @@ Uses the shared `IntegrationStatus` fields `state`, `liveMode`, `verified` (publ
 | `awaiting_approval` | — | quota 0 / 429 (memo §7) | — |
 | `needs_reauth` | `invalid_grant` / 401 | Business Profile connection `needs_reauth` | 401 |
 | `error` | API disabled, no access, property gone | `api_disabled`, unrecognised response | REST unreachable, missing capability |
-| `liveMode` | `live` ("Read-only") | `live` ("Read-only") | `live` or `staging` (reusing `'sandbox'` from the email design's `liveMode` union, labelled "Staging site") |
+| `liveMode` | `read_only` ("Read-only, live data") | `read_only` ("Read-only, live data") | `live` or `staging` (labelled "Staging site"; both values are in the shared WP0 union) |
 
 Existing Search Console message text in `integrations.ts` is replaced to match these states.
 
@@ -1076,11 +1085,10 @@ Existing Search Console message text in `integrations.ts` is replaced to match t
 
 ## 11. Contracts with other modules
 
-- **Email and reviews design**: owns the Google OAuth routes, `google_business_profile` connection, location
-  discovery, token refresh helper and `google.disconnect`. This design adds the `search_console` product to the
-  connect route and only reads the Business Profile row (plus writes `capabilities.performanceApi` and
-  `capabilities.performanceSyncedAt`). If this module is built first, it creates the shared OAuth helper and routes
-  exactly as specified in that design's §8.4.
+- **Email and reviews design**: owns the `google_business_profile` location discovery (built in WP9 together with
+  this design's Performance part). The Google OAuth routes, token refresh helper and `google.disconnect` are built
+  by WP0 with the `search_console` product already in the product table. This design only reads the Business
+  Profile row (plus writes `capabilities.performanceApi` and `capabilities.performanceSyncedAt`).
 - **Publishing design**: `lib/http.ts`, `lib/audit.ts`, `IntegrationStatus.state/liveMode/verified`, the OAuth state
   cookie pattern.
 - **Square design**: none. (Opening hours are entered in Settings; reading Square location hours is not designed.)
@@ -1233,8 +1241,9 @@ Existing Search Console message text in `integrations.ts` is replaced to match t
   `src/lib/google/search-console.ts`, `src/lib/google/business-profile-performance.ts`,
   `src/handlers/website-audit.ts`, `src/handlers/website-edit-apply.ts`, `src/handlers/website-copy-draft.ts`,
   `src/handlers/website-connection-check.ts`, `src/handlers/search-sync.ts`, `scripts/website-smoke.ts`.
-- Reuse (create if the other designs have not yet): `src/lib/http.ts`, `src/lib/audit.ts`, `src/lib/credentials.ts`,
-  `src/lib/google/oauth.ts`.
+- Reuse (built by WP0): `src/lib/http.ts`, `src/lib/audit.ts`, `src/lib/credentials.ts`,
+  `src/lib/google/oauth.ts`. `src/lib/google/business-profile-performance.ts`, the `business_profile_performance`
+  branch of `website.connection_check`, `search.sync` `business_profile` and the Performance card are WP9.
 - Modify `src/main.ts` (register + crons), `src/context.ts` (`websiteFetch`, `copywriter`), `src/lib/jobs.ts`
   (`refIdFor`), `src/handlers/cleanup.ts` (old audit results).
 - Add dependencies (exact pins, checked for licence and Node 22 support at implementation): `cheerio`,
@@ -1258,8 +1267,8 @@ Existing Search Console message text in `integrations.ts` is replaced to match t
   `integrations/website/{route.ts,wordpress,check}`, `integrations/business-profile-performance/check`.
 - Create `src/lib/website.ts` (queries, DTO mapping, apply availability, grouping for search data).
 - Modify `src/lib/integrations.ts` (three states, §10.5), `src/lib/jobs.ts` (`defaultRefId`),
-  `src/lib/settings-merge.ts` (server-only fields), `src/lib/google-oauth.ts` (shared; add `search_console` product),
-  `src/app/api/integrations/google/{connect,callback}/route.ts` (shared; product switch),
+  `src/lib/settings-merge.ts` (server-only fields), (`src/lib/google-oauth.ts` and
+  `src/app/api/integrations/google/{connect,callback}/route.ts` are WP0, product switch included),
   `src/app/(app)/settings/_components/business-tab.tsx` (opening hours group),
   `src/app/(app)/settings/_components/integrations-tab.tsx` (cards), `src/components/ui/status-pill.tsx` (labels).
 - Tests: `test/website.integration.test.ts`, additions to `test/integrations.test.ts`.

@@ -13,6 +13,19 @@ Markers used below:
   the memo; they were checked so the implementer does not need to re-research.
 - **⚠** = not verified from an official source. Each ⚠ item has a capability check, smoke test or honest UI state.
 
+> **Lead-architect reconciliation (2026-11-14, `docs/design/stage-bc-plan.md`).** Changed in this file:
+> (1) the rule that **decides** completion is `deriveCompletion(booking, now)` (this module, `square.ts`); it writes
+> `completed_at`/`completion_source`. `isGenuinelyCompleted(booking)` is a check of those **stored** columns, defined
+> once in `packages/core/src/completion.ts` by WP0 and used by the email/reviews design at send time (that design
+> had a second, different `isGenuinelyCompleted`); (2) when completion becomes false again, `completion_source` is
+> reset to `'none'` (the column is `NOT NULL DEFAULT 'none'`), not null; (3) `customers.square_email_unsubscribed`
+> is created by the WP0 migration (so the email module can be built in parallel); this module's sync fills it;
+> (4) `purgeSquareData` always scrubs customers (soft delete) instead of choosing between delete and scrub, so it
+> never depends on tables owned by other modules; (5) shared helpers (OAuth state cookie, `webhook.process`
+> dispatcher, worker audit/http/credentials, `melbourneLocalToUtc`/`melbourneDayRange`, integration status fields)
+> come from WP0; (6) the work is split into WP6 (Tier 0, incl. `square_availability_searches`) and WP6b (Tier 1
+> changes and self-test, incl. `square_booking_changes`).
+
 ---
 
 ## 1. Goal and scope
@@ -308,18 +321,23 @@ Square has no completed status and no booking-to-payment link (memo §6). Studio
 - Evidence stored in `bookings.attendance_evidence`: `{ paymentId, score, signals: string[], confidence, matchedAt }`.
   Never the card details.
 
-**`isGenuinelyCompleted(booking, now)`** (pure, exported from core for the reviews/email designs):
+**`deriveCompletion(booking, now)`** (pure, `packages/core/src/square.ts`; decides what is stored):
 
 ```ts
-status === 'ACCEPTED'
-&& endAt <= now
-&& missingFromSquareAt === null
-&& ownerAttendance !== 'not_attended'
-&& (ownerAttendance === 'attended' || attendance === 'payment_matched')
+const completed = status === 'ACCEPTED'
+  && endAt <= now
+  && missingFromSquareAt === null
+  && ownerAttendance !== 'not_attended'
+  && (ownerAttendance === 'attended' || attendance === 'payment_matched');
+// → { completed, source: ownerAttendance === 'attended' ? 'owner_marked' : completed ? 'payment' : 'none' }
 ```
 
+Consumers (email/reviews) do not re-derive: they call `isGenuinelyCompleted(booking)` from
+`packages/core/src/completion.ts` (WP0), which checks the stored values (`status === 'ACCEPTED'`,
+`completion_source` in `payment`/`owner_marked`, `completed_at` not null) and is re-run at send time.
+
 - The worker writes `completed_at` (first time it becomes true) and `completion_source` (`owner_marked` or `payment`);
-  it clears both when it becomes false again (Square later says NO_SHOW or cancelled, payment fully refunded, owner
+  it resets them (`completed_at = null`, `completion_source = 'none'`) when it becomes false again (Square later says NO_SHOW or cancelled, payment fully refunded, owner
   marks "didn't attend", booking disappears). `completion_source = 'square_status'` is never used (Square has no
   completed status).
 - Time passing alone never qualifies. A booking with no evidence stays `awaiting_payment` / `no_payment_matched`
@@ -327,6 +345,8 @@ status === 'ACCEPTED'
 - Owner mark on a booking Square shows as NO_SHOW or cancelled is refused: "Square says this was a no-show. Change it
   in Square first." If Square changes after an owner mark, Square wins and the card says so.
 - Marks are allowed for owner and staff (audit `booking.attendance_marked { value, previous }`), and can be cleared.
+  These marks are the "Mark as completed" / "Didn't happen" buttons the email/reviews design shows; both modules call
+  `POST /api/appointments/[id]/attendance` (§8), which this module owns.
 
 ### 4.8 Time zone rules (Australia/Melbourne incl. DST)
 
@@ -437,7 +457,7 @@ the last Square booking JSON (snake_case as returned).
 | `square_environment` | `ADD COLUMN square_environment text` (null for customers created locally by other modules) |
 | `square_version` | `ADD COLUMN square_version integer` |
 | `square_synced_at` | `ADD COLUMN square_synced_at timestamptz` |
-| `square_email_unsubscribed` | `ADD COLUMN square_email_unsubscribed boolean` — Square's read-only marketing opt-out (spec `CustomerPreferences`); the email design may treat `true` as an extra suppression, **never** `false`/null as consent |
+| `square_email_unsubscribed` | **Created by the WP0 migration** (`ADD COLUMN square_email_unsubscribed boolean`), filled here. Square's read-only marketing opt-out (spec `CustomerPreferences`); the email design treats `true` as a marketing block, **never** `false`/null as consent |
 
 **New table `square_booking_changes`**
 
@@ -491,21 +511,23 @@ CREATE INDEX square_availability_searches_created_idx ON square_availability_sea
 Rows older than 24 h are deleted by the existing hourly `maintenance.cleanup`.
 
 **`purgeSquareData(db, { environment?, merchantId? })`** (packages/db helper, one transaction): deletes
-`square_availability_searches` and `square_booking_changes` of that environment, deletes `bookings` of that
-environment, and for `customers` of that environment either deletes them or, when another module references them
-(email messages, review requests, consent rows), scrubs `square_customer_id`, names, email and phone and sets
-`deleted_at`. Writes audit `integration.square.data_purged { environment, bookings, customers }`.
+`square_availability_searches` and (once WP6b exists) `square_booking_changes` of that environment, deletes
+`bookings` of that environment, and for `customers` of that environment always scrubs `square_customer_id`, names,
+email and phone and sets `deleted_at` (never a hard delete: other modules' rows such as email messages, review
+requests and consent events may reference the customer, and the email module's suppressions and ledger are keyed by
+`email_lower`, so they keep working). Writes audit `integration.square.data_purged { environment, bookings, customers }`.
 
 ### 5.4 Pure functions (`packages/core/src/square.ts`, unit tested)
 
 - `squareScopes(access: 'read' | 'write'): string[]` — read: `APPOINTMENTS_READ, APPOINTMENTS_ALL_READ,
   APPOINTMENTS_BUSINESS_SETTINGS_READ, CUSTOMERS_READ, ITEMS_READ, MERCHANT_PROFILE_READ, PAYMENTS_READ, ORDERS_READ`
   (memo §6); write adds `APPOINTMENTS_WRITE, APPOINTMENTS_ALL_WRITE`.
-- `squareIntegrationState(envPresent, connection, now)` → `{ state: 'not_configured'|'not_connected'|'connected'|'needs_reauth'|'error', liveMode: 'sandbox'|'live'|null, needsLocation, stale, webhooks: 'off'|'ok'|'quiet', tier1: Tier1Status }`.
+- `squareIntegrationState(envPresent, connection, now)` → `{ state` (WP0 union; Square uses `'not_configured'|'not_connected'|'connected'|'needs_reauth'|'error'`), `liveMode` (WP0 union; Square uses `'sandbox'|'live'|null`), needsLocation, stale, webhooks: 'off'|'ok'|'quiet', tier1: Tier1Status }`.
 - `tier1Status(connection, snapshot)` → `{ ready: boolean, checklist: { plan, scopes, bookableService, selfTest, switch }: 'ok'|'missing'|'unknown', suspendedReason }`.
 - `classifyVariation(service, businessProfile, confirmations, rejections)` → §4.3 label.
 - `mapBookingStatus(status)` → plain label + tone (unknown values pass through as "Square status: X").
-- `deriveAttendance(booking, now)` and `isGenuinelyCompleted(booking, now)` → §4.7.
+- `deriveAttendance(booking, now)` and `deriveCompletion(booking, now)` → §4.7 (`isGenuinelyCompleted` is in
+  `completion.ts`, WP0).
 - `matchPayments(bookings, payments, orderLines)` → assignments with evidence.
 - `availabilityRange(fromDate, days)` and `melbourneDayRange(date)` (in `time.ts`).
 - `mapSquareError(err)` → `{ kind: 'reauth'|'not_allowed'|'conflict'|'invalid'|'rate_limited'|'transient'|'not_found', code, message }` (§7.5).
@@ -979,5 +1001,5 @@ Start with a test (sandbox) account; nothing real changes.
    payload shapes) — irrelevant to correctness because payloads only trigger re-fetches, but confirm in the smoke test.
 9. **`session=false`** on the authorize URL and the authorisation-code lifetime are from general Square OAuth docs,
    not the memo; confirm in the smoke test.
-10. **Ownership of shared pieces** with `publishing.md` (`webhook.process`, integration state fields, `melbourneLocalToUtc`,
-    worker audit/http helpers, `'disconnected'` status) — the lead plan assigns each to one work package.
+10. ~~Ownership of shared pieces~~ Resolved in `stage-bc-plan.md`: all of them (`webhook.process`, integration state
+    fields, `melbourneLocalToUtc`, worker audit/http helpers, `'disconnected'` status) belong to WP0.

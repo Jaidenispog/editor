@@ -6,6 +6,18 @@ and on `docs/research/platform-constraints.md` (called "the memo" below). Where 
 
 Owner's brief: `docs/spec.md` section 4 (Instagram and TikTok) and the last bullet of section 3 (music cross-posting).
 
+> **Lead-architect reconciliation (2026-11-14, `docs/design/stage-bc-plan.md`).** Changed in this file:
+> (1) shared pieces (`lib/http.ts`, `lib/audit.ts`, `lib/credentials.ts`, `oauth-state.ts`, `melbourneLocalToUtc`,
+> `IntegrationStatus` fields, the `webhook.process` dispatcher, queue `policy`/`startAfter`, the `/privacy` and
+> `/data-deletion` pages) are built once by work package WP0; (2) the memo §2 `music.ts` changes, the `no_music`
+> export variant (`render.export` `variant`, `edit_versions.variant_exports`, `editExportVariant`, download kind) and
+> `musicClearanceFor` are built by WP1 (music); `checkPublishEligibility` is built on `musicClearanceFor`;
+> (3) the `publish` feedback event and the `music_usage` ledger row are written when a target becomes `published`,
+> not at approval (matches the preferences design §12); (4) unverified Zernio webhooks are stored under an
+> `unverified:` key so a forged event id can never block the real delivery; (5) `checkMediaForPlatform` also checks
+> the memo §4 bitrate limits; (6) the caption ending setting lives on the Publishing page, not Settings → Business;
+> (7) the Zernio adapter is built in Stage C (memo §3: "Optional Stage C auto-publishing"), as work package WP10.
+
 ---
 
 ## 1. Goal and scope
@@ -83,7 +95,7 @@ separately, and only claims something is posted when the platform or the owner h
 ### 3.1 Inputs
 
 - `edit_versions.plan.audio.music?.trackId`, which gives `music_tracks.licence` (`MusicLicence`).
-- The memo §2 additions to `packages/core/src/music.ts`. These overlap with the preferences/music design; implement them **once**, in whichever package of work comes first:
+- The memo §2 additions to `packages/core/src/music.ts`. These overlap with the preferences/music design and are implemented **once**, by WP1 (music), before this module is built:
   - `MusicLicence.kind` gains `'meta_sound_collection'`.
   - `PUBLISH_PLATFORMS` gains `'facebook'`, and `permitted.facebook` is added.
   - A new `destinationLock: 'meta_only' | null` field, forced to `'meta_only'` when kind is `meta_sound_collection`. While it is set, `permitted.tiktok`, `youtube` and `website` are forced to `false`.
@@ -115,7 +127,8 @@ export function checkPublishEligibility(input: {
 1. **No music in the plan.** `standard` is allowed everywhere and automation is allowed.
 2. **Music, but the licence is missing** (track deleted). `allowedVariants = ['no_music']`. Reason: "The music track was removed, so its licence can't be checked."
 3. **Licence present.**
-   - Run `checkMusicForPlatforms(licence, [platform])`.
+   - Run `musicClearanceFor(licence)` (preferences/music design §5.3, built by WP1; it wraps `checkMusicForPlatforms`)
+     and treat the platform as cleared when it is in `platforms` and not in `blockedPlatforms`.
    - If `ok`, allow `['standard', 'no_music']`. Otherwise allow only `['no_music']` and pass on the reasons.
    - Unconfirmed, non-promotional or expired licences block every platform, because `checkMusicForPlatforms` adds those reasons whatever the platform.
 4. **`destinationLock === 'meta_only'`.**
@@ -135,7 +148,9 @@ export function checkPublishEligibility(input: {
   - An automated method on `no_music` is always allowed, and the composer says "Posts without music".
 - **Approval.**
   - The result, including `licenceSnapshot` (the usage-ledger snapshot from memo §2), is stored in `publish_posts.music_check`.
-  - If the music design adds a usage-ledger table, approval also writes a row there.
+  - The usage ledger (`music_usage`, preferences/music design §5.2) gets its row **when the target becomes
+    `published`** (`purpose 'publish'`, `platform`, the licence snapshot from the worker's pre-publish re-check),
+    `ON CONFLICT DO NOTHING`. Approval writes no ledger row, because nothing has been used yet.
 - **Again at publish time (worker).** If the live licence no longer allows the target's variant (edited, expired or deleted after scheduling), the target becomes `manual_step_required` / `music_licence_changed`. **Nothing is posted.**
 - **Downloads.**
   - Manual targets always download the exact `media_key` that the eligibility rule picked.
@@ -143,6 +158,9 @@ export function checkPublishEligibility(input: {
   - The website module must never receive a `meta_only` render. Publishing only exposes the label and the lock; the website design consumes it.
 
 ### 3.4 The music-free export (`no_music` variant)
+
+Built by WP1 (music) and only consumed here; the preferences/music design's "Make a music-free version" action in
+the export dialog uses the same variant.
 
 - This is the same edit version rendered again with `plan.audio.music = null`. Original sound follows the plan: if original sound is off, the file is silent.
 - It reuses `render.export` with a new payload field `variant`.
@@ -165,7 +183,8 @@ export function checkPublishEligibility(input: {
    - At most 5 videos per batch.
    - If a version already has a target that is `published` or in progress on a platform, the row shows: "Already posted to Instagram on 12 Nov. Posting again will create a second post." Re-posting needs the explicit `allowRepeat` tick.
 3. **Caption and cover step (per video).**
-   - **Caption.** A textarea prefilled with `settings.publishing.captionFooter`, which is empty by default and never generated by AI. A live counter shows `n / 2,200`, and a soft warning appears over 30 hashtags (common Instagram guidance, not in the memo; a warning only). The locked attribution line shows under the caption when one is required.
+   - **Caption.** A textarea prefilled with `settings.publishing.captionFooter` (edited in a "Publishing settings"
+     card on the Publishing page, owner only), which is empty by default and never generated by AI. A live counter shows `n / 2,200`, and a soft warning appears over 30 hashtags (common Instagram guidance, not in the memo; a warning only). The locked attribution line shows under the caption when one is required.
    - **Cover.** A scrubber over the preview (540×960), with **Use this frame** and a thumbnail of the chosen frame. The default is the midpoint of the last plan segment, which is usually the finished result, so no new content is invented.
    - **Platform notes.**
      - Instagram (direct): applied with `thumb_offset`.
@@ -291,7 +310,7 @@ The post detail shows one card per manual destination (built for a phone):
 | `integration_connections` | Holds the credential: provider `meta` (system-user token, encrypted) or `zernio` (API key, encrypted). Also `status`, `last_error`, `last_sync_at` and `config` (`graphVersion`, `debugToken` summary, `zernioBaseUrlHost`). |
 | `webhook_events` | Zernio webhook deliveries, stored once per (provider, external event id). |
 | `audit_log` | Connect, disconnect, approve, submit, published, failed, manual confirm, undo, override and toggle actions. |
-| `feedback_events` | Type `publish`, written at approval (style id, platforms) so the preferences design can learn from it. |
+| `feedback_events` | Type `publish`, written through `recordFeedback` (WP0) when a target becomes `published` (platform read-back or the owner's "I've posted it"), with `data.planFacts` and `data.platform`, so the preferences design can learn from it (its §6.1 counts each version once). Undoing a manual confirmation does not delete it. |
 | `jobs` | UI mirror of the new job types (§6). |
 
 **Status derivation.** `publish_posts.status` is derived and written by the worker after every target transition (helper `refreshPostStatus`):
@@ -366,9 +385,10 @@ Text enums in `schema.ts` are TypeScript-only: the initial migration has no CHEC
 
 ### 5.3 Integration states (pure function, unit tested)
 
-`IntegrationStatus` (in `apps/web/src/lib/shared/integration-types.ts`) gains these optional fields:
-- `state: 'not_configured' | 'not_connected' | 'connected' | 'needs_reauth' | 'error'`
-- `liveMode: 'live' | 'development_live' | null`
+`IntegrationStatus` (in `apps/web/src/lib/shared/integration-types.ts`) gains these optional fields. The unions
+below are the single contract for every module (WP0 in `stage-bc-plan.md`); this module uses the values it needs:
+- `state: 'not_configured' | 'not_connected' | 'connected' | 'awaiting_approval' | 'unavailable' | 'needs_reauth' | 'error'`
+- `liveMode: 'live' | 'development_live' | 'sandbox' | 'staging' | 'read_only' | null`
 - `verified: boolean`
 
 The existing `configured` / `connected` fields stay.
@@ -407,8 +427,8 @@ If no row comes back, another attempt owns the target, and the job exits success
 | `publish.poll` | `{ targetId, postId, projectId \| null, pollNo: int ≥ 0 }` | `publish-poll:{targetId}` | 5, 60 s backoff; 15 min | Reads the authoritative status: Instagram container `status_code` / copyright, Zernio post. It re-enqueues itself with `startAfter` on a schedule: Instagram every 60 s for 5 polls, then every 5 min until the container is 24 h old; Zernio at 1, 2, 5 and 10 min, then every 15 min up to 24 h. |
 | `publish.dispatch` | `{}` | cron `* * * * *` | 0; 2 min | Finds targets that are `queued`, not manual, have `media_key` set and `scheduled_for <= now()` on an `approved`/`in_progress` post, and enqueues `publish.target`. Manual scheduled targets that are due become `manual_step_required` / `post_in_app` ("Due now"). Posts still preparing are left alone, and the message says they are late. |
 | `social.check` | `{ connectionId: string \| null, reason: 'connect'\|'manual'\|'daily'\|'pre_publish' }` (null = all) | `social-check:{connectionId ?? 'all'}` | 2, 60 s; 5 min | **Read-only.** Meta: `debug_token`, discovery, `/{ig-id}?fields=id,username`, `content_publishing_limit`. Zernio: key validity and account list. Updates `social_accounts` and `integration_connections` (status, capabilities, `last_error`). Daily cron `23 4 * * *` (Melbourne time). **Never posts.** |
-| `webhook.process` | `{ webhookEventId }` | `webhook:{webhookEventId}` | 5, 10 s backoff; 2 min | Loads the stored event, finds the target by `(platform='tiktok', external_post_id)`, and enqueues `publish.poll`. Sets `processed_at`. **Never changes target state from the payload** (§7.2.5). Shared with the Square design; one handler with a `provider` switch. |
-| `render.export` (existing) | add `variant: z.enum(['standard','no_music']).default('standard')` | `export:{versionId}:{variant}` | unchanged | `no_music` clones the plan with `audio.music = null`, writes `editExportVariant`, and updates `variant_exports.no_music`. On success, enqueue `publish.prepare` for posts in `approved`/`in_progress` whose targets use this version and variant. |
+| `webhook.process` | `{ webhookEventId }` | `webhook:{webhookEventId}` | 5, 10 s backoff; 2 min | Built once by WP0 as a dispatcher that calls the handler a module registers for the event's `provider`. This module's `zernio` handler (WP10) loads the stored event, finds the target by `(platform='tiktok', external_post_id)`, and enqueues `publish.poll`. Sets `processed_at`. **Never changes target state from the payload** (§7.2.5). |
+| `render.export` (existing; `variant` added by WP1) | add `variant: z.enum(['standard','no_music']).default('standard')` | `export:{versionId}:{variant}` | unchanged | `no_music` clones the plan with `audio.music = null`, writes `editExportVariant`, and updates `variant_exports.no_music`. On success the render handler calls the worker's export-ready hooks (WP0); this module registers a hook that enqueues `publish.prepare` for posts in `approved`/`in_progress` whose targets use this version and variant. |
 
 ### 6.1 Worker additions
 - `apps/worker/src/main.ts`:
@@ -427,7 +447,8 @@ Input: the ffprobe result of `media_key` plus the byte size. Output: issues per 
   - video h264 or hevc, progressive
   - 23–60 fps
   - width ≤ 1920
-  - audio AAC ≤ 48 kHz (if present)
+  - video bitrate ≤ 25 Mbps (memo §4)
+  - audio AAC ≤ 48 kHz and ≤ 128 kbps (if present; memo §4 Reels spec)
   - 3 s ≤ duration ≤ 900 s
   - size ≤ 300 MB
   - for `instagram_api`, also size ≤ `capabilities.resumableMaxBytes` (else manual step `file_too_large_for_upload`)
@@ -577,6 +598,10 @@ The README must note that this path exposes a time-limited public URL.
 
 ### 7.2 Zernio (TikTok provider, flag `TIKTOK_PUBLISH_PROVIDER=zernio`)
 
+Built in Stage C as its own work package (WP10), as the memo §3 Decision places it ("Optional Stage C
+auto-publishing goes through one already-audited provider, Zernio, behind a feature flag and only after a live smoke
+test"). Stage B ships manual TikTok posting only.
+
 All paths below come from search summaries of docs.zernio.com (memo §3, raw findings). **Before implementing**, allow `docs.zernio.com` in network settings and confirm:
 - the API base host (`ZERNIO_API_BASE_URL`)
 - the presign endpoint path ("Get upload URL" page)
@@ -661,7 +686,11 @@ Each unconfirmed item is marked ⚠ below.
 - **Signature.**
   - If `ZERNIO_WEBHOOK_SECRET` is set **and** the scheme is confirmed (⚠), verify the signature with a timing-safe comparison and set `signatureValid`.
   - Otherwise `signatureValid=false`.
-- **Storage.** Insert into `webhook_events` with provider `zernio` and `external_event_id` = the payload's event id (⚠), or `sha256(rawBody)` if there is none. On conflict, do nothing (a duplicate delivery), then enqueue `webhook.process`.
+- **Storage.** Insert into `webhook_events` with provider `zernio`. `external_event_id` = the payload's event id (⚠)
+  **only when the signature was verified**; otherwise `unverified:` + `sha256(rawBody)`. This way an unsigned or
+  forged delivery can never take the unique `(provider, external_event_id)` slot of a real event (the Square design
+  §7.3 avoids the same problem by not storing unverified events at all). On conflict, do nothing (a duplicate
+  delivery); enqueue `webhook.process` only when a row was inserted.
 - **Processing.** The payload is **only a hint**. `webhook.process` reads `postId`, finds the matching target and enqueues `publish.poll`, which asks Zernio with our key. A forged or replayed event can at most trigger an extra read.
 - **Unconfirmed read-post endpoint.** If smoke testing shows Zernio has no read-post endpoint, webhooks become authoritative. That is allowed **only** with a verified signature; otherwise the module stays disabled.
 - **Events used:** `post.platform.published`, `post.platform.failed`, `post.partial`, `post.failed`, `post.tiktok.url_resolved`, `post.published`.
@@ -683,7 +712,7 @@ All routes are under `/api` and follow the existing conventions in `docs/api.md`
 | --- | --- | --- | --- |
 | GET | `/api/publishing/eligibility?versions=a,b` | session | → `{ items: [{ versionId, projectTitle, styleName, previewUrl, durationSec, exportStatus, noMusicExportStatus, defaultCoverTimeSec, captionSuffix, eligibility: PlatformEligibility[], methods: { instagram: MethodOption[], tiktok: MethodOption[] }, priorTargets: [{ platform, status, publishedAt }] }], quota: { instagram?: { usage, total, checkedAt }, zernio?: { last24h: number } } }`. `MethodOption = { method, delivery?, available: boolean, reason?: string, isVerification: boolean, accountId?: string, handle: string }` |
 | POST | `/api/publish-posts` | session | `{ items: [{ editVersionId, caption: string ≤ 2200, coverTimeSec: number ≥ 0, mode: 'now'\|'scheduled'\|'draft_handoff', schedule?: { date: 'YYYY-MM-DD', time: 'HH:mm' }, targets: [{ platform, method, delivery?: 'publish'\|'draft', variant }] (1–2, unique platform) }] (1–5), allowRepeat?: boolean }` → `{ posts: PublishPostDto[] }` (status `draft`, with server-resolved caption, schedule (UTC plus a Melbourne label), variants and eligibility). Validates: eligibility, method availability, DST (`VALIDATION` with "That time doesn't exist…"), the 10 min to 90 days window, and the duplicate rule (409 unless `allowRepeat`). |
-| POST | `/api/publish-posts/approve` | **owner** | `{ postIds: string[], consent?: { tiktokPublic: boolean } }` → `{ posts }`. Refuses a Zernio target without `tiktokPublic` (`VALIDATION`). Sets `approved_by`/`approved_at`, `status=approved`, writes `music_check` (re-run now) and `feedback_events` type `publish`, writes audit `publish.approved` (per post), and enqueues `publish.prepare`. Idempotent for posts that are already approved. |
+| POST | `/api/publish-posts/approve` | **owner** | `{ postIds: string[], consent?: { tiktokPublic: boolean } }` → `{ posts }`. Refuses a Zernio target without `tiktokPublic` (`VALIDATION`). Sets `approved_by`/`approved_at`, `status=approved`, writes `music_check` (re-run now), writes audit `publish.approved` (per post), and enqueues `publish.prepare`. (The `publish` feedback event and the `music_usage` row are written later, when a target is published, §3.3 and §5.1.) Idempotent for posts that are already approved. |
 | GET | `/api/publish-posts?view=queue\|history&cursor` | session | → `{ posts: PublishPostDto[], nextCursor }`. Queue = draft/approved/in_progress or any `manual_step_required` target. History = everything else. Newest first; scheduled posts sorted by time. |
 | GET | `/api/publish-posts/[id]` | session | → `PublishPostDto` with targets, messages and `actions` allowed per target |
 | PATCH | `/api/publish-posts/[id]` | session (owner if approved) | `{ caption?, coverTimeSec?, schedule?, targets? }`. Changing anything but `schedule` on an approved post returns it to `draft` (409 if any target has `submitted_at`). |
@@ -1021,12 +1050,14 @@ Follows `apps/web/src/components/ui`: `Card`, `Badge`/`StatusPill`, `Button`, `D
   - `app/(app)/publishing/new/page.tsx`, `app/(app)/publishing/[postId]/page.tsx` (new)
   - `app/(app)/library/page.tsx` (badges, select mode, Publish)
   - `app/(app)/settings/_components/integrations-tab.tsx` (Instagram and TikTok cards)
-  - `app/(app)/settings/_components/business-tab.tsx` (caption ending)
-  - `app/privacy/page.tsx` and `app/data-deletion/page.tsx` (new, public)
-  - Middleware or public-route list updated so those two pages need no session.
+  - `components/publishing/publishing-settings-card.tsx` (caption ending, on the Publishing page; not in
+    `business-tab.tsx`)
+  - `app/privacy/page.tsx`, `app/terms/page.tsx` and `app/data-deletion/page.tsx` and the public-route list: built
+    by WP0, not here.
 - Components:
   - `components/publishing/*` (§9.2), new.
-  - `components/studio/edit-grid.tsx`: **Publish…** button and badges.
+  - `components/studio/extensions/publishing.tsx` (the edit-card extension slot WP0 adds to `edit-grid.tsx`):
+    **Publish…** button and badges, with badge data from this module's own API rather than the Studio status DTO.
   - `components/ui/status-pill.tsx`: labels and tones.
 - Tests:
   - `src/lib/integrations.test.ts`: new cases.
@@ -1049,4 +1080,7 @@ Follows `apps/web/src/components/ui`: `Card`, `Badge`/`StatusPill`, `Button`, `D
 4. **Manual-post reminders.** Should due manual posts also trigger a reminder email to the owner, through the email design's transactional stream? The design shows them in-app only.
 5. **TikTok AI-generated content disclosure.** These edits are cuts of real footage with text overlays, so the design sets no AI-generated flag. The owner or a later policy check should confirm this is right for TikTok's AIGC label.
 6. **Per-platform captions.** The design keeps one caption per video for both platforms, because the brief asks to "adjust captions" without asking for platform-specific ones. Add a per-target override only if the owner asks.
-7. **Ownership of the shared pieces.** The `music.ts` licence changes overlap with the preferences/music design. The `webhook.process` job overlaps with the Square design. The `/privacy` page overlaps with the Spotify reference. The lead plan should give each to one work package.
+7. **Ownership of the shared pieces.** Resolved in `docs/design/stage-bc-plan.md`: `music.ts`, `musicClearanceFor` and
+   the `no_music` variant → WP1; `webhook.process` dispatcher, HTTP/audit/credential helpers, OAuth state cookie,
+   Melbourne time helpers, integration status fields and the public legal pages (`/privacy`, `/terms`,
+   `/data-deletion`) → WP0; Instagram publishing → WP4; Zernio → WP10.

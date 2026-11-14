@@ -13,6 +13,21 @@ Related designs: `docs/design/publishing.md` (shares `webhook.process`, `apps/wo
 `customers` sync and the completion rule this design consumes, §3.6), and the website/local-search design (shares the
 Google OAuth connection, §8.4).
 
+> **Lead-architect reconciliation (2026-11-14, `docs/design/stage-bc-plan.md`).** Changed in this file:
+> (1) `isGenuinelyCompleted` is defined once, in `packages/core/src/completion.ts` (WP0), as a check of the stored
+> booking columns; the Square module decides those columns (`deriveCompletion`). The owner's "Mark as completed" /
+> "Didn't happen" buttons call the Square module's attendance route; (2) the Square sync does **not** write consent
+> events: it fills `customers.square_email_unsubscribed` (column created by the WP0 migration); this module treats
+> `true` as a marketing block in `evaluateSendPolicy` and records a one-off `withdrawn` ledger event (method
+> `square_preference`) in its sweep; (3) Melbourne time helpers (`nextSendSlot`, day bounds) live in
+> `packages/core/src/time.ts` (WP0), not a new `zoned-time.ts`; (4) the Google OAuth routes, helper, worker
+> refresh/revoke and the `google.disconnect` job are built by WP0 with a `product` switch (`business_profile` →
+> `google_business_profile` row, scope `business.manage`; `search_console` → `google_search_console` row, scope
+> `webmasters.readonly`), answering open question 7 with two separate connections; (5) `webhook.process`, worker
+> `http.ts`/`audit.ts`, public-route list and the shared `IntegrationStatus` fields come from WP0; (6) the work is
+> split into WP7 (email, consent, review requests, Places Tier 1) and WP9 (Business Profile Tier 2 reviews, together
+> with the website design's Performance metrics, which use the same connection and approval).
+
 ---
 
 ## 1. Goal and scope
@@ -255,10 +270,16 @@ changes):
 - The owner can override to "Didn't happen". The Square design stores that so sync does not re-infer completion,
   and sets `completion_source = 'none'`.
 - `bookings.completed_at` is set with the source.
-- Square sync imports `customers.email`. If Square's `preferences.email_unsubscribed` is confirmed in the SDK, the
-  sync writes a `withdrawn` consent event with method `square_preference` (never a grant).
+- "Mark as completed" / "Didn't happen" are the Square module's attendance marks (`POST /api/appointments/[id]/attendance`,
+  owner and staff); this module only shows the buttons.
+- Square sync imports `customers.email` and fills `customers.square_email_unsubscribed` (Square's read-only
+  `preferences.email_unsubscribed`). The Square module writes nothing else for email. This module treats `true` as a
+  marketing block in `evaluateSendPolicy` (reason `unsubscribed`), and `email.automation.sweep` records one
+  `withdrawn` consent event with method `square_preference` per customer the first time it sees `true` (never a
+  grant; `false`/null mean nothing).
 
 ```ts
+// packages/core/src/completion.ts (WP0) — shared; checks the values the Square module stored
 export function isGenuinelyCompleted(b: { status: string; completionSource: string; completedAt: Date | null }): boolean {
   return b.status === 'ACCEPTED' && (b.completionSource === 'payment' || b.completionSource === 'owner_marked') && b.completedAt !== null;
 }
@@ -289,7 +310,8 @@ deliberately no "client unhappy" reason.
 
 ### 3.7 Scheduling in Melbourne time
 
-`nextSendSlot(earliest: Date, window = { start: '09:00', end: '19:00' }, tz = 'Australia/Melbourne')` uses
+`nextSendSlot(earliest: Date, window = { start: '09:00', end: '19:00' }, tz = 'Australia/Melbourne')` (in
+`packages/core/src/time.ts`, built by WP0 next to `melbourneLocalToUtc` and `melbourneDayRange`) uses
 `Intl.DateTimeFormat` offsets (no new dependency) and is tested across both daylight-saving changes (first Sunday in
 October, first Sunday in April). "Today" for daily caps is the Melbourne calendar day.
 
@@ -619,6 +641,8 @@ Inserts use `ON CONFLICT DO NOTHING` (idempotent).
 | Frequency rule | `CREATE INDEX review_requests_customer_idx ON review_requests(customer_id, created_at)` |
 
 **`reviews`**: `ADD COLUMN review_updated_at timestamptz`; `CREATE INDEX reviews_provider_created_idx ON reviews(provider, review_created_at)`.
+(Lead plan: these two statements ship in WP9's migration `0010_business_profile`, with the Tier 2 sync that uses
+them, not in this module's WP7 migration.)
 
 **`integration_connections`** (TS only): `provider` enum adds `'postmark'`, `'google_places'`; `capabilities`
 type widened to `Record<string, boolean | string | number | null>` (the publishing design makes the same change).
@@ -951,13 +975,19 @@ Auto-pause: after any campaign bounce/complaint, if `complaint_count / sent_coun
   refresh → `needs_reauth` (hint: "If this happens every 7 days, the Google consent screen is still in Testing —
   publish it to Production", memo §7); 404 location → "This location is no longer available; choose again".
 
-### 8.4 Google OAuth (shared with the website design)
+### 8.4 Google OAuth (shared with the website design; built by WP0)
 
-- Authorise: `https://accounts.google.com/o/oauth2/v2/auth?client_id=…&redirect_uri={APP_URL}/api/integrations/google/callback&response_type=code&scope=https://www.googleapis.com/auth/business.manage&access_type=offline&prompt=consent&include_granted_scopes=false&state=…&code_challenge=…&code_challenge_method=S256`.
+- `GET /api/integrations/google/connect?product=business_profile|search_console` (owner). A product table in WP0
+  maps each product to its scope, its `integration_connections` row and the job enqueued after connecting:
+  `business_profile` → `business.manage`, row `google_business_profile`, then `reviews.gbp.sync` (`connect`, WP9);
+  `search_console` → `webmasters.readonly`, row `google_search_console`, then `website.connection_check`
+  (`connect`, WP8). If the follow-up job type is not registered yet, the tokens are stored and nothing is enqueued.
+  The product is stored in the state cookie, never trusted from the callback query.
+- Authorise: `https://accounts.google.com/o/oauth2/v2/auth?client_id=…&redirect_uri={APP_URL}/api/integrations/google/callback&response_type=code&scope=<product scope>&access_type=offline&prompt=consent&include_granted_scopes=false&state=…&code_challenge=…&code_challenge_method=S256`.
 - Callback: checks `state` against the signed cookie, then exchanges the code at `POST https://oauth2.googleapis.com/token`
   **inside the request** with a 10 s timeout. This is the one synchronous external call in this design: the code is
-  single-use and short-lived, so a job would add nothing. Tokens are encrypted (`encryptToken`) into the
-  `google_business_profile` row; `scopes` stored; then `reviews.gbp.sync` (`connect`) is enqueued.
+  single-use and short-lived, so a job would add nothing. Tokens are encrypted (`encryptToken`) into the product's
+  row; `scopes` stored; then the product's follow-up job is enqueued.
 - Disconnect: `google.disconnect` job revokes and wipes tokens.
 
 ### 8.5 DNS (advisory, `node:dns/promises`)
@@ -1004,7 +1034,7 @@ Square-sends checkboxes), `ReviewLinkCard`, `GoogleRatingCard`, `GoogleReviewsLi
 
 ### 9.3 States and copy rules
 
-- `IntegrationStatus` gains (as in the publishing design) `state`, `liveMode` — extended with `'sandbox'` — and
+- `IntegrationStatus` gains the shared WP0 fields `state`, `liveMode` (the union already includes `'sandbox'`) and
   `verified`. Email card replaces "Email sending (Resend)".
 - Status words through `statusLabel`/`toneForStatus`, adding: `sending` (info), `delivered` (success), `bounced`
   (danger), `complained` (danger, label "Spam complaint"), `suppressed` (warning, label "Not sent"), `skipped`
@@ -1166,8 +1196,9 @@ Places: one Place Details call on the owner's Place ID (read-only). Business Pro
 
 **packages/core**
 - Create `src/email.ts` (classes, streams, `renderEmail`, `evaluateSendPolicy`, `foldConsent`, schemas for routes),
-  `src/email-lint.ts`, `src/reviews.ts` (`isGenuinelyCompleted`, `reviewEligibility`, `validateReviewLink`, skip
-  reasons), `src/zoned-time.ts` (`nextSendSlot`, Melbourne day bounds); export from `src/index.ts`.
+  `src/email-lint.ts`, `src/reviews.ts` (`reviewEligibility`, `validateReviewLink`, skip reasons; it imports
+  `isGenuinelyCompleted` from `completion.ts`); export from `src/index.ts`. `nextSendSlot` and the Melbourne day
+  bounds come from `src/time.ts` (WP0).
 - Modify `src/settings.ts` (`EmailSettingsSchema`, `ReviewSettingsSchema` in `AppSettingsSchema`), `src/jobs.ts` (new
   types and payloads; `webhook.process` and `google.disconnect` shared — add once).
 - Tests: `test/email-render.test.ts`, `test/email-lint.test.ts`, `test/email-policy.test.ts`,
@@ -1189,8 +1220,8 @@ Places: one Place Details call on the owner's Place ID (read-only). Business Pro
 
 **apps/worker**
 - Create `src/lib/email/provider.ts`, `src/lib/email/postmark.ts`, `src/lib/email/facts.ts` (loads policy inputs),
-  `src/lib/email/tokens.ts`, `src/lib/google/places.ts`, `src/lib/google/business-profile.ts`,
-  `src/lib/google/oauth.ts` (refresh/revoke; shared), `src/handlers/email-send.ts`, `src/handlers/email-dispatch.ts`,
+  `src/lib/email/tokens.ts`, `src/lib/google/places.ts`, `src/lib/google/business-profile.ts` (WP9),
+  (`src/lib/google/oauth.ts` and `google-disconnect` come from WP0), `src/handlers/email-send.ts`, `src/handlers/email-dispatch.ts`,
   `src/handlers/email-sweep.ts`, `src/handlers/email-campaign.ts`, `src/handlers/email-check.ts`,
   `src/handlers/email-suppression.ts`, `src/handlers/webhook.ts` (or add the `postmark` branch if publishing created
   it), `src/handlers/reviews-places.ts`, `src/handlers/reviews-gbp.ts`, `src/handlers/google-disconnect.ts`;
@@ -1246,9 +1277,9 @@ Places: one Place Details call on the owner's Place ID (read-only). Business Pro
    one-off import with the original wording and evidence could be added; without records they cannot be imported.
 6. **Unsubscribe scope**: one button stops all marketing, review requests included. Should the page also offer "only
    stop review requests"? (Not built; simpler for clients and safer legally.)
-7. **Shared Google OAuth**: the website design also needs Google sign-in (Search Console, Performance). The lead plan
-   should build the connect/callback routes once and decide whether one connection holds both scopes or two
-   connections are kept (this design assumes a separate `google_business_profile` row with `business.manage` only).
+7. ~~Shared Google OAuth~~ Resolved in `stage-bc-plan.md`: WP0 builds the connect/callback routes once with a
+   `product` switch; two connections are kept (`google_business_profile` with `business.manage`,
+   `google_search_console` with `webmasters.readonly`), so disconnecting one leaves the other.
 8. **Privacy**: confirm the Privacy Act small-business exemption applies (turnover ≤ $3M, memo §8) and that the
    owner is comfortable keeping the send log and consent records for 24 months.
 9. **Whether a bare review request is a commercial message** (memo §8 open question): treated as yes here, so review

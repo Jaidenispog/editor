@@ -11,6 +11,19 @@ Status: design only, written 2026-11-14. Nothing here is built yet. It builds on
 This design assumes both are merged first. References such as "memo §2" mean
 `docs/research/platform-constraints.md`, which supersedes `docs/research/decisions-summary.md`.
 
+> **Lead-architect reconciliation (2026-11-14, `docs/design/stage-bc-plan.md`).** Changed in this file:
+> (1) "Make a music-free version" in the export dialog and card menu is the publishing design's `no_music` **export
+> variant of the same version** (no new version); WP1 builds that variant. Choosing "No music" in the Sound panel
+> is still a revision that creates a new version; (2) `render.export` checks clearance only for the `standard`
+> variant; (3) the hashtag watch reads the Meta credential from `integration_connections` (provider `meta`), where
+> the publishing design stores it, not from `social_accounts`, and reuses the publishing module's Graph client and
+> `mapGraphError`; (4) integration statuses use the shared WP0 contract (`state` incl. `not_connected` and
+> `unavailable`; field `liveMode`, not `mode`); (5) `termsUrl`/`privacyUrl` default to the app's own public
+> `/terms` and `/privacy` pages, built by WP0 (answers open question 7); (6) `plan-facts.ts` and the
+> `recordFeedback` helper are built by WP0 so the publishing module can write `publish` events; this module adds
+> the recompute trigger; (7) the work is split into WP1 (music), WP2 (preferences, reference video, brand),
+> WP3 (trends without Instagram) and WP5 (Instagram hashtag watch).
+
 ---
 
 ## 1. Goal and scope
@@ -285,8 +298,11 @@ kept"; re-cut versions say "Re-cut to the music". Card states reuse the existing
 → preview ready / failed). Each apply records a `revise` feedback event with the audio patch, which feeds music
 volume learning.
 
-**"Make a music-free version"** (card menu and the export dialog): fast path with `{ music: 'none' }`; original
-sound follows the plan.
+**"Make a music-free version"** (card menu and the export dialog): queues `render.export` with
+`variant: 'no_music'` for the **same** version (publishing design §3.4): same cuts, text and colour, music removed,
+original sound as in the plan, stored as `variant_exports.no_music`. No new version is created, so the publishing
+composer and the download dialog can offer it next to the standard file. (Choosing **No music** as the Track in the
+Sound panel is different: it is a revision and creates a new version.)
 
 ### 4.10 Export with music clearance
 
@@ -298,9 +314,11 @@ sound follows the plan.
      (`…-instagram-facebook-only.mp4`);
    - blocked (licence not confirmed, expired, `unknown`, or no promotional use) → 409 with
      "This version's music isn't cleared for business use: <reason>. Make a music-free version, or confirm the
-     licence in Settings → Music." and two buttons.
-2. The worker re-checks before rendering (defence in depth) and writes a `music_usage` ledger row with the licence
-   snapshot after a successful export.
+     licence in Settings → Music." and two buttons. **Make a music-free version** queues the `no_music` export
+     variant of this version (§4.9), which needs no clearance.
+2. The worker re-checks the `standard` variant before rendering (defence in depth) and writes a `music_usage` ledger
+   row with the licence snapshot after a successful export. The `no_music` variant has no music, so it is never
+   checked and writes no ledger row.
 
 ### 4.11 Curated references and noted trends (Settings → Trends)
 
@@ -731,7 +749,7 @@ worker refuses to start if a type has no handler — `main.ts`). All handlers us
 | `trends.refresh` | `{ watchId: z.string().nullable() }` (null = all enabled watches) | `singletonKey: 'trends:' + (watchId ?? 'all')`; items upserted on `(watch_id, external_id)`; items not in the new result for that watch are deleted. | retryLimit 1, retryDelay 300, expire 300 s, heartbeat 60 | `null` → enqueues one job per enabled watch and exits. Per watch: Instagram (§8.1) or YouTube (§8.2). Scheduled daily `41 5 * * *` Melbourne. Manual refresh allowed once per 6 h per watch (route-enforced). |
 | `edits.revise` (changed) | add `mode: 'audio'` to the enum and `audio: AudioPatchSchema.optional()` | unchanged (`newVersionId`; skips if the version already has a plan) | unchanged | `mode 'audio'`: load parent plan → `applyAudioPatch` → `validateEditPlan` (same context builder) → store with `planSource 'manual'`, `plannerModel null` → enqueue `render.preview` (`singletonKey preview:<id>`). `mode 'revise'` with an `audio` patch that needs a re-cut: music track = `patch.trackId ?? parentPlan.audio.music?.trackId ?? null` (falls back to `generation.settings.musicTrackId` only when there is no parent plan); passes `musicStartSec`, `beatSync`, `revealOnBeat` to the planner. |
 | `render.preview` (changed) | unchanged | unchanged | unchanged | Builds `RenderBrand` from settings (with logo), stores the snapshot in `edit_versions.render_brand`. |
-| `render.export` (changed) | unchanged | unchanged | unchanged | Uses `render_brand` snapshot (falls back to current settings for old versions). Before rendering: `musicClearanceFor`; `blocked` → `AppError('UNSUPPORTED', …)` (no retry). After success: insert `music_usage` (`on conflict do nothing`). |
+| `render.export` (changed) | add `variant: 'standard' \| 'no_music'` (default `standard`; publishing design §3.4, built by WP1) | `export:{versionId}:{variant}` | unchanged | Uses `render_brand` snapshot (falls back to current settings for old versions; WP2). For `standard` only, before rendering: `musicClearanceFor`; `blocked` → `AppError('UNSUPPORTED', …)` (no retry); after success insert `music_usage` (`on conflict do nothing`). `no_music` renders the plan with `audio.music = null` into `editExportVariant(...)` and updates `edit_versions.variant_exports.no_music`. Both call the export-ready hooks (WP0). |
 | `ingest.asset` (changed) | unchanged | unchanged | unchanged | For `kind='reference_video'`: probe, proxy, thumbnail, scenes, quality, audio analysis; **skip** vision labelling and transcription; sample 8 frames only when `useVision` (read from the upload's `driverState.referenceOptions`); then enqueue `reference.analyse`. |
 | `maintenance.cleanup` (changed) | unchanged | unchanged | unchanged | Also deletes live trend items with `fetched_at < now − 7 days` and disabled watches with `last_queried_at < now − 7 days`. |
 
@@ -754,7 +772,11 @@ and log only status codes and error codes (never tokens).
 ### 8.1 Instagram hashtag watch (Graph API, memo §11)
 
 Prerequisite: a connected Instagram account from the publishing module (`social_accounts`, `status='connected'`,
-token decrypted with `packages/db` crypto). Graph version: `META_GRAPH_VERSION` as defined by the publishing design.
+provider `meta_graph`). The token is the system-user token in that account's `integration_connections` row
+(provider `meta`, via `connection_id`), decrypted in the worker with the WP0 credentials helper; `social_accounts`
+holds no token (publishing design §5.2). Calls go through the publishing module's Graph client
+(`apps/worker/src/publishing/instagram.ts` / `src/lib/meta/graph.ts`) and its `mapGraphError`. Graph version:
+`META_GRAPH_VERSION` as defined by the publishing design.
 
 1. First refresh of a watch (no `external_id`):
    `GET https://graph.facebook.com/{v}/ig_hashtag_search?user_id={ig-user-id}&q={hashtag}` →
@@ -765,8 +787,9 @@ token decrypted with `packages/db` crypto). Graph version: `META_GRAPH_VERSION` 
    Bearer` header, not the query string.
 3. Scopes: the account's existing publishing scopes plus the hashtag search permission listed in the App Dashboard
    (memo §11: "the hashtag-search permissions and the 'Instagram Public Content Access' feature"). Least privilege:
-   the hashtag permission is requested only when the owner turns hashtag watch on (reconnect with the extended
-   configuration), never at first connection.
+   the hashtag permission is requested only when the owner turns hashtag watch on: the owner adds it to the **same**
+   Facebook Login for Business configuration (`META_LOGIN_CONFIG_ID`; the login dialog sends no `scope`, so the
+   configuration decides the permissions) and reconnects Instagram. There is no second configuration.
 4. Limits: 30 unique hashtags per 7 days per account (memo §11); at most 10 enabled; one refresh per watch per day
    (plus manual, ≥ 6 h apart).
 
@@ -876,10 +899,12 @@ All under `/api`, session required, JSON errors as in `docs/api.md`, CSRF guard 
 | POST | `/api/trends/watches/[id]/refresh` | — | `{ jobId }`; 429 `RATE_LIMITED` within 6 h of the last query | owner |
 
 `GET /api/integrations/status` gains entries `instagram_hashtags`, `youtube_chart`, `spotify_reference`,
-`music_catalogue` and, for all entries, additive fields `state: 'not_configured' | 'configured' | 'connected' |
-'needs_reauth' | 'error'` and `mode: 'sandbox' | 'live' | 'read_only' | null` (the publishing design should use
-the same two fields; `configured`/`connected` booleans stay for existing callers). The four new entries are
-`read_only` or `null` — none of them can post or change anything.
+`music_catalogue`. All entries use the shared WP0 contract (`stage-bc-plan.md`): `state: 'not_configured' |
+'not_connected' | 'connected' | 'awaiting_approval' | 'unavailable' | 'needs_reauth' | 'error'` and
+`liveMode: 'live' | 'development_live' | 'sandbox' | 'staging' | 'read_only' | null`; the
+`configured`/`connected` booleans stay for existing callers. "Configured, not checked/enabled" in §4.12 maps to
+`not_connected`, "Not available" to `unavailable`, "Quota" to `error` with its own message. The four new entries
+are `read_only` or `null` — none of them can post or change anything.
 
 ---
 
@@ -921,8 +946,8 @@ Plain-language copy rules: no job names, model names or error codes in normal vi
   `music.reference_removed`, `music.spotify_mode_changed`, `music.export_blocked`, `trends.watch_added`,
   `trends.watch_removed`, `trends.noted`, `settings.logo_placement_changed`. The worker writes
   `trends.source_unavailable` / `trends.source_needs_reauth` when a watch changes state.
-- **Tokens**: hashtag watch reuses the encrypted Instagram token from `social_accounts` (decrypt in the worker only,
-  `packages/db/src/crypto.ts`); no new token storage. `YOUTUBE_API_KEY` is server-only, never in DTOs (status shows
+- **Tokens**: hashtag watch reuses the encrypted Meta system-user token from `integration_connections` (provider
+  `meta`; decrypt in the worker only, `packages/db/src/crypto.ts`); no new token storage. `YOUTUBE_API_KEY` is server-only, never in DTOs (status shows
   only "configured"), redacted in logs.
 - **Least privilege**: hashtag permission requested only when hashtag watch is turned on; YouTube key restricted to
   one API; no Spotify credentials at all.
@@ -953,7 +978,7 @@ Plain-language copy rules: no job names, model names or error codes in normal vi
 
 | Module | Contract |
 | --- | --- |
-| Publishing (`docs/design/publishing.md`) | (1) Write a `feedback_events` row `type 'publish'` with `data.planFacts` and `data.platform` when a target becomes `published` (confirmed), via `recordFeedback`. (2) Before queueing a target, call `musicClearanceFor(currentLicence)` and block destinations in `blockedPlatforms`; `meta_only` renders may only target Instagram (and Facebook if ever added). (3) Insert `music_usage` (`purpose 'publish'`, `platform`) when a target is published. (4) Pre-fill the caption with `attributionText` for CC BY tracks. (5) Offer "Make a music-free version" (this module's route) for destinations the music does not cover, and show "Add a Commercial Sound in the TikTok app" for TikTok. (6) Use the shared `state`/`mode` fields on integration statuses. (7) Own the Instagram connection; hashtag watch only reads `social_accounts` and its capabilities. |
+| Publishing (`docs/design/publishing.md`) | (1) Write a `feedback_events` row `type 'publish'` with `data.planFacts` and `data.platform` when a target becomes `published` (confirmed), via `recordFeedback` (WP0). (2) `checkPublishEligibility` is built on `musicClearanceFor(currentLicence)` and blocks destinations in `blockedPlatforms`; `meta_only` renders may only target Instagram (and Facebook if ever added). (3) Insert `music_usage` (`purpose 'publish'`, `platform`) when a target is published. (4) Pre-fill the caption with `attributionText` for CC BY tracks. (5) Offer the `no_music` export variant (built by WP1) for destinations the music does not cover, and show "Add a Commercial Sound in the TikTok app" for TikTok. (6) Use the shared WP0 `state`/`liveMode` fields on integration statuses. (7) Own the Instagram connection; hashtag watch only reads `social_accounts`, its capabilities and the `meta` connection's credential. |
 | Website module | Must never read `music_references`, never embed a `meta_only` render (memo §2), never show trend items. |
 | Email module | Must never include Spotify links/embeds or trend items. |
 | Lead plan (`docs/design/stage-bc-plan.md`) | Migration numbering; `PUBLISH_PLATFORMS` gains `facebook`; `IntegrationStatus` gains `state`/`mode`. |
@@ -1068,7 +1093,7 @@ Required for nothing — everything in this module works without new accounts ex
 Create:
 
 - `packages/core/src/preference-learning.ts` (`LEARNABLE_FIELDS`, schemas, `computeLearnedPreferences`, `effectivePreferences`, `explainLearned`)
-- `packages/core/src/plan-facts.ts`
+- `packages/core/src/plan-facts.ts` (created by WP0, shared with publishing)
 - `packages/core/src/audio-patch.ts` (`AudioPatchSchema`, `needsRecut`, `applyAudioPatch`)
 - `packages/core/src/reference.ts` (`ReferenceStyleProfileSchema`, `profileReference`)
 - `packages/core/src/music-catalogue.ts` (`MusicCatalogueProvider` interface)
@@ -1080,9 +1105,10 @@ Create:
 - `packages/ai/src/anthropic/text-estimate.ts`, `packages/ai/test/text-estimate.test.ts`
 - `packages/db/drizzle/<next>_preferences_music_trends.sql` (+ drizzle meta snapshot/journal)
 - `apps/worker/src/handlers/preferences.ts`, `apps/worker/src/handlers/reference.ts`, `apps/worker/src/handlers/trends.ts`
-- `apps/worker/src/lib/graph-client.ts` (minimal fetch wrapper, if the publishing module has not created one), `apps/worker/src/lib/youtube-client.ts`
+- `apps/worker/src/lib/youtube-client.ts` (the Instagram calls reuse the publishing module's Graph client; WP5 is
+  scheduled after WP4, so no second Graph wrapper is written)
 - `apps/worker/test/{preferences,reference,trends,audio-revise}.integration.test.ts`
-- `apps/web/src/lib/feedback.ts`, `apps/web/src/lib/preferences.ts`, `apps/web/src/lib/references.ts`, `apps/web/src/lib/music-references.ts`, `apps/web/src/lib/trend-watches.ts`
+- `apps/web/src/lib/feedback.ts` (created by WP0 with `recordFeedback`; WP2 adds `scheduleRecompute`), `apps/web/src/lib/preferences.ts`, `apps/web/src/lib/references.ts`, `apps/web/src/lib/music-references.ts`, `apps/web/src/lib/trend-watches.ts`
 - `apps/web/src/app/api/preferences/route.ts`, `…/preferences/pin/route.ts`, `…/preferences/learning/route.ts`, `…/preferences/reset/route.ts`
 - `apps/web/src/app/api/edits/[id]/dismiss/route.ts`
 - `apps/web/src/app/api/references/route.ts`, `…/references/[assetId]/decide/route.ts`
@@ -1123,7 +1149,10 @@ Modify:
    style) to avoid reducing variety silently.
 6. Instagram Audio API as a third live source (memo §11 "behind a flag") — left out; add only if a live reference
    confirms what it returns and the owner wants it.
-7. Who writes the end-user terms and privacy policy pages the Spotify embed needs (memo §1)? The app only stores
-   their URLs.
+7. ~~Who writes the end-user terms and privacy policy pages the Spotify embed needs (memo §1)?~~ Resolved in
+   `stage-bc-plan.md`: WP0 adds public `/terms`, `/privacy` and `/data-deletion` pages whose text the owner edits and
+   publishes (a plain draft is offered, marked "review before publishing"; nothing is shown until the owner
+   publishes). `termsUrl`/`privacyUrl` default to those pages; the embed switch needs both published (or both
+   overridden with the owner's own URLs).
 8. Thresholds in §6.1/§6.2 (weights, half-life, pacing/colour cut-offs) are starting values; agree to tune them after
    the owner has used the app for a few weeks.
