@@ -1144,3 +1144,36 @@ Merged since G2 and binding on every Stage C package:
 - **Browser tests:** `bash apps/web/e2e/run-stage-a.sh` must stay 51/51 with `E2E_SCREENSHOT_DIR` set (44 without)
   and `bash apps/web/e2e/run-stage-b.sh` 77/77. Run them on their own ports/databases when another is running
   (`E2E_PORT`, `E2E_DB`).
+
+### 10.3 Carried into G5 (after the G4 reviews, lead, 2026-11-15)
+
+Three independent review rounds fixed G4 before G5 started. Binding on WP6b, WP9 and WP10:
+
+- **Migrations** continue after `0010_link_tokens` (and `0011_*` if the last G4 round adds one). Generate yours with
+  your own name; the integrator renumbers in merge order.
+- **Only live Square data counts as a visit.** `deriveCompletion` (`packages/core/src/square.ts`) and
+  `isGenuinelyCompleted` (`packages/core/src/completion.ts`) take the booking's Square environment and never complete
+  a sandbox booking. Anything that sends, follows up or reports on visits must go through them; never select on
+  `completion_source` / `completed_at` alone.
+- **Square mirror writes** go through `withMirrorGuard` (`apps/worker/src/square/map.ts`): a transaction that holds
+  the `square` connection row `FOR SHARE` and writes only while it is connected for the same merchant and
+  environment. `disconnectSquare` takes the row `FOR UPDATE` before purging. WP6b's booking changes must take the
+  same lock and also refuse after a disconnect or an environment switch. Bookings sync only for the chosen location.
+- **Webhooks store an envelope, not the event.** Square keeps `squareWebhookEnvelope(event)`
+  (`apps/web/src/lib/square/webhook.ts`): ids and type only; the worker re-reads the provider with our token. Follow
+  the same rule for any new webhook, and delete the provider's `webhook_events` rows on disconnect/purge.
+- **Job labels are compile-checked.** `JOB_LABELS` in `apps/web/src/lib/shared/dto.ts` `satisfies Record<JobType,
+  string>`: every new job type needs a plain Australian-English label there or the build fails
+  (`apps/web/test/job-labels.test.ts`).
+- **Approval binds what was shown.** Website changes store `approvalHash(change, destination)`
+  (`packages/core/src/website-approval.ts`) at approval and the worker refuses to write if it no longer matches, then
+  re-reads the target just before writing. WP6b's booking change and WP10's post follow the same pattern: bind the
+  approval to the exact change and destination the owner saw, re-check just before the non-repeatable call.
+- **Outbound fetches to owner-supplied hosts** use the pinned, redirect-checked transport
+  (`apps/worker/src/website/guarded-fetch.ts`) and the shared ranges in `packages/core/src/address-ranges.ts`
+  (`isBlockedAddress`, `resolvedPrivateHostReason`). Fixed provider hosts (Square, Google) use their SDK/clients.
+- **Email:** commercial sends need `webhooksReadyForCommercial`; unsubscribe and review-click links stay valid across
+  resends (`email_link_tokens`); `REVIEW_REQUEST_STATUS_WORDS` (`packages/core/src/reviews.ts`) are the status words
+  for review requests everywhere (WP9's Google reviews tab must not reuse them for Google's own reviews).
+- **WP10 is still blocked:** this build environment cannot reach docs.zernio.com or zernio.com (proxy refusal and
+  DNS failure on 2026-11-15), so the ⚠ items in publishing §7.2 remain unconfirmed and WP10 must not start.
