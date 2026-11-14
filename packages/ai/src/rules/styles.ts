@@ -60,6 +60,8 @@ interface DraftOptions {
   allowReuse?: boolean;
   /** Exact length required (no shorter window accepted). */
   exact?: boolean;
+  /** Shortest acceptable play length when the shot has less room than asked (room for transitions). */
+  minPlay?: number;
 }
 
 function unsupported(message: string): AppError {
@@ -97,7 +99,7 @@ export function makeDraft(ctx: BuildContext, cand: Candidate, occupied: readonly
   let win = placeWindow(cand, occupied, wantSrc, anchor);
   if (!win && !o.exact) {
     // A shorter window from what is left of the shot, keeping clear of other windows when possible.
-    const minSrc = Math.max(MIN_PLAY_SEC, o.softMin * 0.6) * speed;
+    const minSrc = Math.max(MIN_PLAY_SEC, o.softMin * 0.6, o.minPlay ?? 0) * speed;
     for (const spaced of [true, false]) {
       const free = largestFree(cand, occupied, undefined, spaced);
       if (free >= minSrc) win = placeWindow(cand, occupied, free - 1e-6, anchor);
@@ -162,6 +164,11 @@ function speechStart(cand: Candidate): number | undefined {
   const first = cand.speech[0];
   if (!first) return undefined;
   return clamp(first.startSec - 0.2, cand.startSec, cand.endSec);
+}
+
+/** Shortest window worth adding when shots on both sides are linked by transitions of `t` seconds. */
+function roomFor(s: EffectiveSettings, t: number): number {
+  return s.transitions === 'none' ? MIN_PLAY_SEC * 2 : 2 * t + 0.25;
 }
 
 function insertBefore(slot: string) {
@@ -392,6 +399,7 @@ function buildCinematicReveal(ctx: BuildContext): BuildResult {
       weight: i === 0 ? 10 : weightFor(cand, s, 3),
       keep: 'centre',
       slot: i === 0 ? 'open' : 'body',
+      minPlay: roomFor(s, 0.5),
     });
     if (d) body.push(d);
   }
@@ -411,6 +419,7 @@ function buildCinematicReveal(ctx: BuildContext): BuildResult {
         weight: weightFor(cand, s, cand.label === 'before' ? 0 : 2),
         slot: 'body',
         allowReuse,
+        minPlay: roomFor(s, 0.5),
       }),
     insert: insertBefore('final'),
     transitionFor: (list, i) => {
@@ -586,6 +595,7 @@ function buildCleanPromo(ctx: BuildContext): BuildResult {
       softMax,
       weight: weightFor(cand, s, 3),
       slot: 'body',
+      minPlay: roomFor(s, 0.5),
     });
     if (d) middle.push(d);
   }
@@ -605,6 +615,7 @@ function buildCleanPromo(ctx: BuildContext): BuildResult {
         weight: weightFor(cand, s, cand.label === 'before' ? 0 : 2),
         slot: 'body',
         allowReuse,
+        minPlay: roomFor(s, 0.5),
       }),
     insert: insertBefore('final'),
     transitionFor: () => chooseTransition(s, s.attempt % 2 ? ['fade'] : ['dissolve'], s.attempt % 2 ? 0.4 : 0.5),
@@ -675,6 +686,7 @@ function buildProcessStory(ctx: BuildContext): BuildResult {
       softMax,
       weight: weightFor(cand, s, 3),
       slot: 'body',
+      minPlay: roomFor(s, 0.3),
     });
     if (d) middle.push(d);
   }
@@ -694,6 +706,7 @@ function buildProcessStory(ctx: BuildContext): BuildResult {
         weight: weightFor(cand, s, 2),
         slot: 'body',
         allowReuse,
+        minPlay: roomFor(s, 0.3),
       });
     },
     insert: (list, d) => {
