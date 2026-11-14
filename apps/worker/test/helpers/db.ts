@@ -27,10 +27,29 @@ export async function createTestDatabase(): Promise<{ handle: DatabaseHandle; ur
     url: url.toString(),
     drop: async () => {
       await handle.close();
-      const c = new pg.Client({ connectionString: base });
-      await c.connect();
-      await c.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
-      await c.end();
+      await dropWhenIdle(base, name);
     },
   };
+}
+
+/**
+ * Drops the database once the pool has really let go of it. `handle.close()` resolves before the idle sockets are
+ * gone; dropping `WITH (FORCE)` straight away terminates those half-closed connections, and the server's
+ * "terminating connection" notice (57P01) reaches a client with no error listener, which vitest reports as an
+ * unhandled error in an unrelated test. Wait briefly for other sessions to leave; FORCE stays as the fallback.
+ */
+async function dropWhenIdle(adminUrl: string, dbName: string, waitMs = 5_000): Promise<void> {
+  const admin = new pg.Client({ connectionString: adminUrl });
+  await admin.connect();
+  try {
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const res = await admin.query<{ n: number }>('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()', [dbName]);
+      if ((res.rows[0]?.n ?? 0) === 0 || Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+  } finally {
+    await admin.end();
+  }
 }
