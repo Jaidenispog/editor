@@ -4,7 +4,7 @@ import { handleApi, requireOwner } from '@/lib/api';
 import { writeAudit } from '@/lib/audit';
 import { getLogger } from '@/lib/logger';
 import { maybeSignedUrl } from '@/lib/media-links';
-import { getSettings, saveSettings } from '@/lib/settings';
+import { updateSettingsLocked } from '@/lib/settings';
 import { getBlobStore } from '@/lib/storage';
 
 const MAX_LOGO_BYTES = 2 * 1024 * 1024;
@@ -49,9 +49,8 @@ export const POST = handleApi(async ({ req, user }) => {
   const key = storageKeys.brandLogo(kind.ext);
   await getBlobStore().put(key, buf, { contentType: kind.mime, contentLength: buf.length });
   await removeOtherLogos(key);
-  const settings = await getSettings();
-  const next = { ...settings, brand: { ...settings.brand, logoStorageKey: key } };
-  await saveSettings(next);
+  // Changes only brand.logoStorageKey, under the settings row lock, so a concurrent save or learning run is kept.
+  const next = await updateSettingsLocked((current) => ({ ...current, brand: { ...current.brand, logoStorageKey: key } }));
   await writeAudit({ userId: user.id, action: 'settings.logo_uploaded', entityType: 'settings', entityId: 'default', data: { bytes: buf.length } });
   return { settings: next, logoUrl: await maybeSignedUrl(key) };
 });
@@ -60,9 +59,7 @@ export const POST = handleApi(async ({ req, user }) => {
 export const DELETE = handleApi(async ({ user }) => {
   requireOwner(user);
   await removeOtherLogos(null);
-  const settings = await getSettings();
-  const next = { ...settings, brand: { ...settings.brand, logoStorageKey: null } };
-  await saveSettings(next);
+  const next = await updateSettingsLocked((current) => ({ ...current, brand: { ...current.brand, logoStorageKey: null } }));
   await writeAudit({ userId: user.id, action: 'settings.logo_removed', entityType: 'settings', entityId: 'default' });
   return { settings: next };
 });

@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NextConfig } from 'next';
@@ -7,8 +8,31 @@ import type { NextConfig } from 'next';
  * Workspace packages ship TypeScript source, so they are transpiled here; native or connection-heavy
  * server libraries stay external so they load from node_modules at runtime.
  */
+
+/**
+ * Origins other than localhost that may load the dev server's own resources (/_next/*, including the hot-reload
+ * websocket). `next dev` refuses those from any other origin unless they are listed, and without them the page
+ * shows but never becomes interactive, so the sign-in and setup forms do nothing. Only relevant when WEB_HOST
+ * makes the dev server listen beyond this computer: then this computer's own IPv4 addresses are allowed, plus any
+ * host names listed (comma-separated) in WEB_DEV_ORIGINS, such as my-laptop.local. `next start` ignores this.
+ */
+function lanDevOrigins(): string[] {
+  const host = process.env.WEB_HOST?.trim();
+  if (!host || ['127.0.0.1', 'localhost', '::1'].includes(host)) return [];
+  const addresses = Object.values(os.networkInterfaces())
+    .flat()
+    .filter((a): a is os.NetworkInterfaceInfo => a !== undefined && !a.internal && a.family === 'IPv4')
+    .map((a) => a.address);
+  const extra = (process.env.WEB_DEV_ORIGINS ?? '')
+    .split(',')
+    .map((h) => h.trim())
+    .filter(Boolean);
+  return [...new Set([...addresses, ...extra])];
+}
+
 const nextConfig: NextConfig = {
   output: 'standalone',
+  allowedDevOrigins: lanDevOrigins(),
   // Monorepo root, so the standalone output traces the workspace packages correctly.
   outputFileTracingRoot: path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..'),
   experimental: {

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev --webpack",
+    "dev": "next dev --webpack --hostname \"${WEB_HOST:-127.0.0.1}\"",
     "build": "next build --webpack",
     "start": "next start",
     "typecheck": "next typegen && tsc -p tsconfig.json",

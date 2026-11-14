@@ -24,7 +24,7 @@ Content Library apply the same rule.
 | Method | Route | Notes |
 | --- | --- | --- |
 | GET / PUT | `/api/settings` | `AppSettings` (brand, business, preferences, legal and module sections); PUT accepts a partial object and keeps sections it does not mention |
-| POST | `/api/settings/logo` | multipart logo upload → stored at `brand/logo.<ext>` |
+| POST / DELETE | `/api/settings/logo` | multipart logo upload → stored at `brand/logo.<ext>` (DELETE removes it); only `brand.logoStorageKey` changes, under the settings row lock (`updateSettingsLocked` in `apps/web/src/lib/settings.ts`, the only whole-object settings writer; publishing settings use a single-path jsonb_set and `resetLearning` its own locked transaction) |
 | GET | `/api/integrations/status` | per integration: `{ configured, connected, message }` |
 | GET / POST / PUT / DELETE | `/api/trends` | curated or live trend references |
 

@@ -278,8 +278,8 @@ suite('Music routes (database-backed)', () => {
     const refused = await call(modeRoute.PUT, 'PUT', '/api/music/references/mode', {}, { mode: 'embed', acknowledgeSpotifyTerms: true });
     expect(refused.status).toBe(409);
     expect(refused.json.error.message).toMatch(/terms of use page/);
-    const settings = await import('../src/lib/settings');
-    await settings.updateSettings({ business: { termsUrl: 'https://example.com/terms', privacyUrl: 'https://example.com/privacy' } }, owner.id);
+    const settings = await import('../src/lib/preferences');
+    await settings.updateSettingsFromPatch({ business: { termsUrl: 'https://example.com/terms', privacyUrl: 'https://example.com/privacy' } }, owner.id);
     const on = await call(modeRoute.PUT, 'PUT', '/api/music/references/mode', {}, { mode: 'embed', acknowledgeSpotifyTerms: true });
     expect(on.status).toBe(200);
     expect(on.json.mode).toBe('embed');

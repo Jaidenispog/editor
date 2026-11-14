@@ -18,9 +18,12 @@ TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres pnpm --filter @st
 First run: open `/setup` (only available while no account exists) or create the owner from the command line:
 
 ```bash
-pnpm --filter @studio/web create-owner --email you@example.com --password 'at least ten characters' --name 'Sam'
-# or OWNER_EMAIL / OWNER_PASSWORD / OWNER_NAME in the environment; add --reset-password to re-key an account
+OWNER_EMAIL=you@example.com OWNER_PASSWORD='at least ten characters' OWNER_NAME='Sam' pnpm --filter @studio/web create-owner
+# add --reset-password to re-key an account
 ```
+
+The script also accepts `--email`, `--password` and `--name`, but avoid `--password`: pnpm prints the command
+line it runs, so the password would end up on screen and in the terminal's scrollback.
 
 Notes
 
@@ -119,7 +122,7 @@ Server-only modules start with `import 'server-only'`. Use them from server comp
 | `api.ts` | `handleApi(handler)`, `handlePublicApi(handler, { csrf })`, `parseJson(req, schema)`, `requireUser()`, `requireSession()`, `requireOwner(user)`, `assertSameOrigin(req)` |
 | `api-errors.ts` | `mapErrorToResponse(err, requestId)`, `zodIssuesToDetails` |
 | `csrf.ts` | `isSameOriginRequest(input)` |
-| `settings.ts` / `settings-merge.ts` | `getSettings()`, `updateSettings(patch, userId)`, `saveSettings`, `getSettingsOrDefaults()`, `SettingsPatchSchema`, `mergeSettings` |
+| `settings.ts` / `settings-merge.ts` | `getSettings()`, `updateSettingsLocked(change)` (read-modify-write under the settings row lock; `learned` and `styleAffinity` are always kept from the database), `getSettingsOrDefaults()`, `SettingsPatchSchema`, `mergeSettings`. Patches from the settings API go through `updateSettingsFromPatch` in `preferences.ts` |
 | `seed-trends.ts` | `ensureCuratedTrends()`, `CURATED_TRENDS` (8 format descriptions, once ever) |
 | `jobs.ts` | `createTrackedJob({ type, payload, projectId?, refId?, singletonKey?, priority? })`, `cancelJob`, `retryJob`, `getJob`, `listProjectJobs`, `listActiveJobs(user, limit?)`, `cancelProjectJobs`, `toJobDto`, `defaultRefId` |
 | `media-links.ts` | `signedUrlFor(key, { downloadName?, contentType? })`, `maybeSignedUrl`, `downloadNameFor(parts, ext)` |
