@@ -122,6 +122,24 @@ History of the background runs:
     - **G4 started** (run `wf_9f6293cb-cb0`): WP6 square ∥ WP7 email_reviews ∥ WP8 website. Then G5.
     - Preview/showcase processes: process-group ids are in `preview-run/{web,worker}.pgid` and
       `showcase/{web,worker}.pgid` in the scratchpad; stop them with `kill -TERM -- -<pgid>`.
+13. G4 merged and pushed (c7b4600; 1,197 unit tests, integration 12/12, Stage A 51/51, Stage B 77/77, re-run by the
+    lead after the integrator): WP6 Square Tier 0 (read-only), WP7 email and review requests (Postmark, consent
+    ledger, send gate, Places rating), WP8 website check, prepared changes, WordPress apply and Search Console.
+    Migrations `0007_square`, `0008_email_reviews` (ends with the hand-written `message_class` backfill) and
+    `0009_website`. Everything is verified against fakes only; no real Square, Postmark, WordPress or Google call.
+    - **Independent review running** (run `wf_385679c2-cf6`): one read-only reviewer per package, then one fix-up in
+      a worktree (also the lead follow-ups: worker `scripts/**/*.ts` in tsconfig, `JOB_TYPE_LABELS` for the G4 jobs
+      with a registry test, a start-up `email.provider.check`, the WP6 mid-appointment attendance test, and the
+      Appointments review-request badge / Dashboard approval line if missing), then a re-check. Merge the fix-up only
+      after the full suite (typecheck, unit, integration, both browser tests) passes on the merged result.
+    - Seen on the showcase, not yet fixed: the Website page's "Connections" cards sit two-up in the narrow right
+      column, so titles truncate ("Google Search C…") and env var names break mid-word.
+    - **G5 next:** WP6b (`square_changes`) ∥ WP9 (`business_profile`, docs email-and-reviews + website-local-search).
+      **WP10 Zernio stays blocked:** the plan requires docs.zernio.com to be read first; this environment's proxy
+      refuses docs.zernio.com and zernio.com (CONNECT 403) and WebFetch cannot resolve them. Needs the owner to
+      allow those hosts (a network change) before WP10 can start.
+    - The preview/showcase restart is scripted: `scratchpad/restart-preview.sh` (stops by pgid, copies the
+      standalone build, migrates both databases, restarts, records new pgids). Run it without a pipe to `tail`.
 
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
