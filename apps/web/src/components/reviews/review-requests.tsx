@@ -8,7 +8,6 @@ import { MessageDialog } from '@/components/email/message-views';
 import type { AutomationDto, ClientDto, EmailTemplateDto, ReviewRequestDto } from '@/components/email/types';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { Dialog } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Input, Select, Textarea } from '@/components/ui/field';
@@ -16,6 +15,8 @@ import { StatusPill } from '@/components/ui/status-pill';
 import { Tabs } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
+import type { GoogleReviewsDto } from '@/lib/shared/business-profile-dto';
+import { GoogleReviewsTab } from './google-reviews-tab';
 
 export interface ReviewsData {
   requests: ReviewRequestDto[];
@@ -26,6 +27,8 @@ export interface ReviewsData {
   automationBlocked: string | null;
   emailReady: boolean;
   googleProfile: { state: string; label: string; message: string };
+  /** The "Reviews on Google" tab (Business Profile module); owner only. */
+  googleReviews?: GoogleReviewsDto | null;
 }
 
 const STATUS_WORDS: Record<string, string> = REVIEW_REQUEST_STATUS_WORDS;
@@ -211,15 +214,7 @@ export function ReviewsWorkspace({ data, canEdit }: { data: ReviewsData; canEdit
       <MessageDialog id={openMessage} open={openMessage !== null} onClose={() => setOpenMessage(null)} onChanged={refresh} />
     </div>
   );
-  const google = (
-    <Card>
-      <CardHeader title="Reviews on Google" actions={<StatusPill status={data.googleProfile.state} label={data.googleProfile.label} />} />
-      <CardBody className="space-y-2 text-sm text-charcoal-700">
-        <p>{data.googleProfile.message}</p>
-        <p>Optional: listing your Google reviews here needs a Google Cloud project and Google&rsquo;s approval. Review requests work without it. Reviews are never typed in by hand.</p>
-      </CardBody>
-    </Card>
-  );
+  const google = <GoogleReviewsTab initial={data.googleReviews ?? null} fallback={data.googleProfile} canEdit={canEdit} />;
   return (
     <Tabs
       label="Reviews"

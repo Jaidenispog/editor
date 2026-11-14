@@ -819,11 +819,13 @@ export const reviews = pgTable(
     reviewerName: text('reviewer_name').notNull().default(''),
     comment: text('comment').notNull().default(''),
     reviewCreatedAt: timestamp('review_created_at', { withTimezone: true }),
+    /** Google's `updateTime`: the incremental sync's watermark (Business Profile, WP9). */
+    reviewUpdatedAt: timestamp('review_updated_at', { withTimezone: true }),
     replyText: text('reply_text'),
     raw: jsonb('raw').$type<Record<string, unknown>>().notNull().default({}),
     syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex('reviews_provider_ext_idx').on(t.provider, t.externalReviewId)],
+  (t) => [uniqueIndex('reviews_provider_ext_idx').on(t.provider, t.externalReviewId), index('reviews_provider_created_idx').on(t.provider, t.reviewCreatedAt)],
 );
 
 /** One website check (design `website-local-search.md` §5.2). At most one is queued or running (partial unique index). */

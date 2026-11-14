@@ -6,6 +6,7 @@ import { loadConnection, recordConnectionCheck } from '../lib/connections.js';
 import { getGoogleAccessToken } from '../lib/google/oauth.js';
 import { SearchConsoleError, fetchWindow, pacificToday, syncWindows, type MetricRow } from '../lib/google/search-console.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
+import { syncProfilePerformance } from '../modules/business_profile/performance.js';
 import { defaultWebsiteDeps, type WebsiteDeps } from '../website/deps.js';
 
 /** At most one Search Console request per second (design §7.2). */
@@ -16,7 +17,8 @@ const UPSERT_BATCH = 500;
  * `search.sync` for Search Console (design §7.2, §8): a first sync backfills 16 months in 31-day windows, oldest
  * first; daily and manual syncs re-fetch the last 10 days so late numbers overwrite earlier ones. Rows are upserted on
  * (source, property, granularity, day, kind, key), so running it twice gives identical rows. Only numbers Google
- * returned are stored. Skips with a message when Search Console isn't connected or no property is chosen.
+ * returned are stored. Skips with a message when Search Console isn't connected or no property is chosen. Source
+ * `business_profile` syncs the Business Profile Performance numbers instead (only once Google has approved access).
  */
 export async function handleSearchSync(
   ctx: WorkerContext,
@@ -25,6 +27,11 @@ export async function handleSearchSync(
   deps: WebsiteDeps = defaultWebsiteDeps(ctx),
   pace: () => Promise<void> = defaultPace(run.signal),
 ): Promise<void> {
+  // Business Profile Performance numbers (WP9, design §7.3), on the shared Business Profile connection.
+  if (payload.source === 'business_profile') {
+    await syncProfilePerformance(ctx, run, payload.reason, deps.now);
+    return;
+  }
   const conn = await loadConnection(ctx.db, 'google_search_console');
   if (!conn || conn.status !== 'connected') {
     await run.message('Search Console is not connected');

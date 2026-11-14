@@ -287,3 +287,19 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
 - **Privacy**: checks store extracted facts, never page HTML or images. Search queries stay server-side and owner-only
   and can be deleted on disconnect ("Also delete stored search data"): every stored Search Console row goes, for
   every property this connection synced, since choosing another property keeps the earlier rows.
+
+## Google Business Profile (Stage C, WP9)
+
+- **Owner only**: the reviews list, the Performance numbers and every Business Profile action; staff see the
+  connection state on the Reviews page and nothing else.
+- **Least privilege, read-only**: scope `business.manage` only (the only one these APIs accept, memo §7), through the
+  shared Google sign-in with its encrypted tokens and row-locked refresh; `invalid_grant` or a 401 marks the shared row
+  `needs_reauth` and stops without retrying. Every call to Google is a GET (the token refresh aside); no reply,
+  edit, Q&A or `BUSINESS_CONVERSATIONS` call exists. Nothing is ever requested to raise Google's quota.
+- **Untrusted data**: location names are checked against `accounts/{id}` / `locations/{id}` before they go into a URL
+  (stored and submitted values alike); the owner can only choose a location Google listed. Review text, names and
+  replies are stored as plain capped text and rendered by React as text.
+- **Honest numbers**: only values Google returned are stored or shown; a missing value is NULL ("—"); an unknown
+  response shape stores nothing. Requests and reviews are never matched.
+- **Privacy**: review text and Performance numbers stay server-side for the owner; "Also delete stored Google reviews
+  and numbers" on disconnect deletes them; choosing another location deletes the other listing's reviews.

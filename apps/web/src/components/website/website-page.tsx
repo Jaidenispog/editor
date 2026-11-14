@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { IntegrationStatusList } from '@/components/app/integration-status-list';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { apiRequest } from '@/lib/client/api-client';
+import type { ProfilePerformanceDto } from '@/lib/shared/business-profile-dto';
+import { ProfilePerformanceCard } from './profile-performance-card';
 import { SearchPerformanceCard } from './search-performance-card';
 import { SetupChecklist } from './setup-checklist';
 import { SuggestedChanges } from './suggested-changes';
@@ -14,7 +16,18 @@ import { WebsiteCheckCard } from './website-check-card';
  * The Website page body (design §10.1): setup checklist, website check, suggested changes, search performance and the
  * connections. Polls every 3 seconds while a check runs; otherwise it reloads after each action.
  */
-export function WebsitePage({ initial, initialEdits, initialSearch }: { initial: WebsiteOverviewDto; initialEdits: WebsiteEditDto[]; initialSearch: SearchPerformanceDto }) {
+export function WebsitePage({
+  initial,
+  initialEdits,
+  initialSearch,
+  initialProfile,
+}: {
+  initial: WebsiteOverviewDto;
+  initialEdits: WebsiteEditDto[];
+  initialSearch: SearchPerformanceDto;
+  /** The Business Profile performance card (Business Profile module); absent hides the card. */
+  initialProfile?: ProfilePerformanceDto;
+}) {
   const [overview, setOverview] = useState(initial);
   const [changesKey, setChangesKey] = useState('0');
   const changesRef = useRef<HTMLDivElement>(null);
@@ -54,6 +67,7 @@ export function WebsitePage({ initial, initialEdits, initialSearch }: { initial:
       </div>
       <div className="min-w-0 space-y-6 lg:col-span-2">
         <SearchPerformanceCard initial={initialSearch} queryGroups={overview.queryGroups} onChanged={() => void reload()} />
+        {initialProfile ? <ProfilePerformanceCard initial={initialProfile} /> : null}
         <Card>
           <CardHeader title="Connections" description="Search Console is read-only. WordPress is optional; without it every change comes with copy-paste steps." />
           <CardBody className="min-w-0">

@@ -8,6 +8,7 @@ import { getGoogleAccessToken } from '../lib/google/oauth.js';
 import { SearchConsoleError, autoSelectProperty, canRead, listSites } from '../lib/google/search-console.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
+import { checkProfilePerformance } from '../modules/business_profile/performance.js';
 import { loadSettings } from '../lib/plan-context.js';
 import { TransientAdapterError } from '../website/adapters/types.js';
 import { WordPressAdapter } from '../website/adapters/wordpress.js';
@@ -18,7 +19,8 @@ import { splitWordPressCredential, wordPressContext } from './website-edit-apply
 /**
  * `website.connection_check` (design §8): read-only. Search Console: refresh the token and list properties
  * (`sites.list`), auto-select the one for the website when exactly one readable property matches, then queue the
- * first sync. WordPress: REST discovery and the user's rights. Never writes to any external system.
+ * first sync. WordPress: REST discovery and the user's rights. Business Profile Performance: a 7-day read that tells
+ * whether Google has approved API access. Never writes to any external system.
  */
 export async function handleWebsiteConnectionCheck(
   ctx: WorkerContext,
@@ -27,6 +29,11 @@ export async function handleWebsiteConnectionCheck(
   deps: WebsiteDeps = defaultWebsiteDeps(ctx),
 ): Promise<void> {
   if (payload.provider === 'google_search_console') return checkSearchConsole(ctx, run, payload.reason);
+  // Business Profile Performance probe (WP9, design §7.3): read-only, on the shared Business Profile connection.
+  if (payload.provider === 'business_profile_performance') {
+    await checkProfilePerformance(ctx, run, payload.reason, deps.now);
+    return;
+  }
   return checkWordPress(ctx, run, deps);
 }
 
