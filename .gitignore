@@ -15,3 +15,6 @@ coverage/
 *.tsbuildinfo
 test-results/
 playwright-report/
+
+# Agent git worktrees (created by Claude Code workflows)
+/.claude/worktrees/
