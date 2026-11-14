@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import pino from 'pino';
 import { eq } from 'drizzle-orm';
-import { CancelledError, JOB_TYPES, newId } from '@studio/core';
+import { CancelledError, JOB_TYPES, NonRetryableError, newId } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
 import { INTERRUPTED_MESSAGE, JobInterruptedError, STALE_AFTER_MS, recoverStaleJobs, runTracked } from '../src/lib/job-tracker.js';
 import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
@@ -73,6 +73,21 @@ describe.skipIf(skip)('runTracked', () => {
     const row = await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.id, id) });
     expect(row?.status).toBe('failed');
     expect(row?.message).toMatch(/could not be processed/);
+  });
+
+  it('fails a NonRetryableError on its first attempt with its own message', async () => {
+    const id = newId();
+    await handle.db.insert(schema.jobs).values({ id, type: JOB_TYPES.RENDER_EXPORT, payload: {}, status: 'queued' });
+    const refused = async () => {
+      throw new NonRetryableError('PROCESSING_FAILED', 'The music is not cleared for business use.');
+    };
+    await expect(
+      runTracked(handle.db, logger, { type: JOB_TYPES.RENDER_EXPORT, bossJobId: newId(), trackingJobId: id, payload: {}, retryCount: 0, bossSignal: new AbortController().signal, workerId: 'w1' }, refused),
+    ).rejects.toBeInstanceOf(NonRetryableError);
+    const row = await handle.db.query.jobs.findFirst({ where: eq(schema.jobs.id, id) });
+    expect(row?.status).toBe('failed');
+    expect(row?.message).toBe('The music is not cleared for business use.');
+    expect(row?.finishedAt).toBeInstanceOf(Date);
   });
 
   it('propagates the queue abort signal into the handler signal and reports an interruption, not a cancel', async () => {

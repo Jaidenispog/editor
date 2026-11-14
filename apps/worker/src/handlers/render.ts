@@ -3,6 +3,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import {
   AppError,
   CancelledError,
+  NonRetryableError,
   VERTICAL_1080,
   VERTICAL_PREVIEW,
   missingTrackClearance,
@@ -85,7 +86,7 @@ export async function handleRender(
   };
 
   // Defence in depth: the export route already refused music the licence does not clear, but the licence may have
-  // changed since. A blocked export is the owner's to fix, not a fault to retry, so it ends here without a retry.
+  // changed since. A blocked export is the owner's to fix, not a fault to retry: the job fails without a retry.
   let clearance: MusicClearance | null = null;
   let licencedTrack: Awaited<ReturnType<typeof clearanceForPlan>>['track'] = null;
   if (quality === 'export' && variant === 'standard') {
@@ -96,8 +97,7 @@ export async function handleRender(
       const message = musicBlockedMessage(clearance);
       await setVersion({ exportStatus: 'failed', exportMessage: message });
       await writeWorkerAudit(ctx.db, { userId: null, action: 'music.export_blocked', entityType: 'edit_version', entityId: version.id, data: { reasons: clearance.reasons } }, ctx.logger);
-      await run.progress(1, message);
-      return;
+      throw new NonRetryableError('PROCESSING_FAILED', message, { details: { reasons: clearance.reasons } });
     }
   }
 

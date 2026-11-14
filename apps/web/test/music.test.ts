@@ -19,8 +19,8 @@ describe('music integration cards', () => {
     expect(entries.find((e) => e.id === 'spotify_reference')?.message).toMatch(/not licensed for playing in the shop or in your videos/);
     expect(entries.find((e) => e.id === 'music_catalogue')).toMatchObject({ state: 'not_configured' });
     expect(entries.find((e) => e.id === 'music_catalogue')?.message).toMatch(/^Not available\. Download tracks from your business-eligible library/);
-    // Kept out of the shared list until the Stage A wording test compares only its own ids.
-    expect(buildMusicIntegrations({} as never, { connections: [], socialAccounts: [] })).toEqual([]);
+    // The same cards appear in the shared status list (the Stage A wording test checks only its own ids).
+    expect(buildMusicIntegrations({} as never, { connections: [], socialAccounts: [] })).toEqual(entries);
   });
 });
 

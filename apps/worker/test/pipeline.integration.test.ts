@@ -18,7 +18,7 @@ import { loadEnv } from '@studio/config';
 import { CancelledError, JOB_TYPES, MusicLicenceSchema, STYLE_IDS, checkMusicForPlatforms, computeTimeline, newId, type JobType, type StyleId } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
 import { LocalDiskStore, storageKeys } from '@studio/storage';
-import { probeMedia, segmentFrameCount } from '@studio/media';
+import { probeMedia, quantiseTimeline } from '@studio/media';
 import { createAiProviders } from '@studio/ai';
 import type { WorkerContext } from '../src/context.js';
 import { INTERRUPTED_MESSAGE, type TrackedRun } from '../src/lib/job-tracker.js';
@@ -350,13 +350,14 @@ describe.skipIf(skip)('worker pipeline on synthetic footage', () => {
     const hardCuts = timeline.segments.filter((p) => p.index > 0 && !p.segment.transitionIn);
     expect(hardCuts.length).toBeGreaterThanOrEqual(3);
     for (const cut of hardCuts) expect(distanceToBeat(cut.startSec)).toBeLessThanOrEqual(0.06);
-    // The renderer quantises every segment to whole frames; the cuts must still land on the beat in the file.
+    // The renderer snaps every cut to the frame grid; the cuts must still land on the beat in the file,
+    // within half a frame of the plan.
     const fps = plan.output.fps;
-    let renderedEnd = 0;
+    const grid = quantiseTimeline(timeline, fps);
     for (const placed of timeline.segments) {
-      const start = placed.index === 0 ? 0 : placed.segment.transitionIn ? placed.startSec : renderedEnd;
-      if (placed.index > 0 && !placed.segment.transitionIn) expect(distanceToBeat(start)).toBeLessThanOrEqual(0.06);
-      renderedEnd = start + segmentFrameCount(placed.playDurationSec, fps) / fps;
+      const renderedStart = grid[placed.index]!.startFrame / fps;
+      expect(Math.abs(renderedStart - placed.startSec)).toBeLessThanOrEqual(0.5 / fps + 1e-9);
+      if (placed.index > 0 && !placed.segment.transitionIn) expect(distanceToBeat(renderedStart)).toBeLessThanOrEqual(0.06);
     }
     const total = timeline.totalDurationSec;
     expect(offset + total).toBeLessThanOrEqual(track!.durationSec!);

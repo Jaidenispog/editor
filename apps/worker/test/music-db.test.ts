@@ -13,7 +13,7 @@ import pino from 'pino';
 import { execa } from 'execa';
 import { and, eq } from 'drizzle-orm';
 import { loadEnv } from '@studio/config';
-import { AudioPatchSchema, CancelledError, JOB_PAYLOAD_SCHEMAS, MusicLicenceSchema, computeTimeline, newId, type JobType } from '@studio/core';
+import { AudioPatchSchema, CancelledError, JOB_PAYLOAD_SCHEMAS, MusicLicenceSchema, NonRetryableError, computeTimeline, newId, type JobType } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
 import { LocalDiskStore, storageKeys } from '@studio/storage';
 import { probeMedia } from '@studio/media';
@@ -139,9 +139,9 @@ describe.skipIf(skip)('music controls on synthetic footage', () => {
       id: generationId,
       projectId,
       requestedBy: userId,
-      settings: { durationSec: 12, styles: ['clean_promo'], musicTrackId: trackId, keepOriginalSound: 'auto', captions: 'auto', instructions: '', musicStartSec: null },
+      settings: { durationSec: 12, styles: ['beat_montage'], musicTrackId: trackId, keepOriginalSound: 'auto', captions: 'auto', instructions: '', musicStartSec: null },
     });
-    await handle.db.insert(schema.edits).values({ id: editId, projectId, generationId, styleId: 'clean_promo', slot: 0, currentVersionId: v1 });
+    await handle.db.insert(schema.edits).values({ id: editId, projectId, generationId, styleId: 'beat_montage', slot: 0, currentVersionId: v1 });
     await handle.db.insert(schema.editVersions).values({ id: v1, editId, versionNo: 1, origin: 'initial', status: 'planning' });
     await handleGenerateEdits(ctx, fakeRun(), { generationId, projectId });
     await handleRender(ctx, fakeRun(), { editVersionId: v1, projectId }, 'preview');
@@ -232,8 +232,8 @@ describe.skipIf(skip)('music controls on synthetic footage', () => {
   it('refuses to export music whose licence is no longer cleared, without retrying, and still makes the music-free file', async () => {
     const track = await handle.db.query.musicTracks.findFirst({ where: eq(schema.musicTracks.id, trackId) });
     await handle.db.update(schema.musicTracks).set({ licence: { ...track!.licence, confirmedByOwnerAt: null } }).where(eq(schema.musicTracks.id, trackId));
-    // Returns normally (so the queue does not retry it) with the export marked failed and the reason shown.
-    await expect(handleRender(ctx, fakeRun(), { editVersionId: v2, projectId, variant: 'standard' }, 'export')).resolves.toBeUndefined();
+    // Fails with a NonRetryableError (so the queue does not retry it), the export marked failed and the reason shown.
+    await expect(handleRender(ctx, fakeRun(), { editVersionId: v2, projectId, variant: 'standard' }, 'export')).rejects.toBeInstanceOf(NonRetryableError);
     const v = await version(v2);
     expect(v.exportStatus).toBe('failed');
     expect(v.exportMessage).toMatch(/isn't cleared for business use: The licence has not been confirmed by the owner\. Make a music-free version/);
@@ -253,7 +253,7 @@ describe.skipIf(skip)('music controls on synthetic footage', () => {
     await handle.db.insert(schema.musicReferences).values({ id: newId(), url: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC', itemType: 'track', externalId: '4uLU6hMCjMI75M1A2tKUQC', notes: 'vibe for fade videos' });
     const footage = (await loadProjectFootage(ctx, projectId))!;
     const generation = await handle.db.query.generations.findFirst({ where: eq(schema.generations.id, generationId) });
-    const input = buildPlannerInput({ styleId: 'clean_promo', settings: generation!.settings, footage, music: await loadMusic(ctx, trackId), appSettings: await loadSettings(ctx), attempt: 0 });
+    const input = buildPlannerInput({ styleId: 'beat_montage', settings: generation!.settings, footage, music: await loadMusic(ctx, trackId), appSettings: await loadSettings(ctx), attempt: 0 });
     const text = JSON.stringify(input);
     expect(text).not.toContain('open.spotify.com');
     expect(text).not.toContain('vibe for fade videos');

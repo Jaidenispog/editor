@@ -39,9 +39,7 @@ export function musicStatusEntries(): IntegrationStatus[] {
 }
 
 /**
- * Integration cards of the music module in the shared status list. Returns nothing for now: the WP0 wording test
- * (apps/web/test/foundations.test.ts) compares the whole list with the Stage A fixture, so new entries would break
- * it. The cards are shown by `settings/_components/integrations/music.tsx` from {@link musicStatusEntries} instead;
- * once that test compares only the Stage A ids, this returns `musicStatusEntries()` (see the handover notes).
+ * Integration cards of the music module in the shared status list (GET /api/integrations/status and the dashboard).
+ * `settings/_components/integrations/music.tsx` skips ids already in that list, so each card shows once.
  */
-export const buildMusicIntegrations: IntegrationBuilder = () => [];
+export const buildMusicIntegrations: IntegrationBuilder = () => musicStatusEntries();

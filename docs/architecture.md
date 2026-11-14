@@ -22,13 +22,14 @@ packages/config Typed environment (Zod). Secrets never leave the server.
 2. Worker ingest: `ffprobe` (rotation, HDR, HEVC, audio) → proxy (960p SDR, auto-rotated, tonemapped) → thumbnail → scene detection → quality metrics → audio analysis → sampled frames → vision labelling (if configured) → optional transcription when speech is likely → `media_assets.analysis`.
 3. Owner presses **Generate 5 edits** → `generations` row + `edits` (one per chosen style) + `edit_versions` v1 → `edits.generate` job.
 4. Worker planning: builds the planner input (analyses, manual tags, music beats, preferences, brand) → planner (Anthropic structured output, or rules planner) → `validateEditPlan` against real footage bounds → repair loop → stores plan → enqueues `render.preview` per version.
-5. Worker render: compiles the validated plan to one FFmpeg filtergraph (trim/speed/crop/zoom/colour/transitions + ASS text overlay + music/original sound mix + loudness) → 540×960 preview → uploaded to storage → `preview_ready`.
+5. Worker render: compiles the validated plan to one FFmpeg filtergraph (trim/speed/crop/zoom/colour/transitions + ASS text overlay + music/original sound mix + loudness) → 540×960 preview → uploaded to storage → `preview_ready`. Cut points, segment lengths and transition overlaps are snapped to the output frame grid cumulatively (`quantiseTimeline` in `packages/media/src/render/video-filters.ts`), so the file length and every cut stay within half a frame of the plan however many short or speed-changed shots it has; each segment is padded by a few cloned frames before its exact `trim`, so it never comes out a frame short.
 6. Revise/regenerate creates a **new version** (old versions stay). Export renders 1080×1920 H.264/AAC MP4 only for the versions the owner asks for.
 
 ## Durability
 
 - pg-boss queues per job type with `retryLimit`, `expireInSeconds` and `heartbeatSeconds` (30 s). A worker that dies stops heart-beating; the worker's pg-boss supervisor (every 30 s) fails the attempt and it is retried → restart recovery.
 - `jobs` table mirrors every job for the UI (progress, message, cancel flag). Cancel = flag + `boss.cancel` → the worker's `AbortSignal` kills FFmpeg.
+- A failure that another attempt cannot fix (a music licence that no longer clears, a token the owner must reconnect) is thrown as `NonRetryableError` (`packages/core/src/errors.ts`): the `jobs` row is marked failed with its plain message on the first attempt and the worker loop completes the pg-boss job instead of letting it retry.
 - Handlers are idempotent: re-running ingest or render overwrites the same storage keys; planning skips versions that already have a plan.
 - Per-job temp dirs under `WORKER_TMP_DIR`, removed in `finally`; an hourly cleanup job removes orphans.
 

@@ -8,7 +8,7 @@ import { DEFAULT_DB_POOL_MAX, createDatabase } from '@studio/db';
 import { createBlobStore } from '@studio/storage';
 import { createQueue } from '@studio/queue';
 import { createAiProviders } from '@studio/ai';
-import { ALL_JOB_TYPES, CancelledError, JOB_PAYLOAD_SCHEMAS, JOB_TYPES, newId, type JobPayload, type JobType } from '@studio/core';
+import { ALL_JOB_TYPES, CancelledError, JOB_PAYLOAD_SCHEMAS, JOB_TYPES, NonRetryableError, newId, type JobPayload, type JobType } from '@studio/core';
 import { repoRoot, type WorkerContext } from './context.js';
 import { recoverStaleJobs, runTracked, type TrackedRun } from './lib/job-tracker.js';
 import { refIdFor } from './lib/jobs.js';
@@ -153,9 +153,10 @@ export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => P
         try {
           await attempt;
         } catch (err) {
-          // The owner's cancellation is a normal outcome, not a failure the queue should retry. An interruption
+          // The owner's cancellation is a normal outcome, not a failure the queue should retry; neither is a
+          // NonRetryableError (runTracked has already marked the row failed with its message). An interruption
           // by the queue (JobInterruptedError) is rethrown so pg-boss records the attempt and retries it.
-          if (err instanceof CancelledError) return;
+          if (err instanceof CancelledError || err instanceof NonRetryableError) return;
           throw err;
         } finally {
           inFlight.delete(attempt);

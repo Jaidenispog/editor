@@ -1,7 +1,7 @@
 import { AppError, VERTICAL_1080, VERTICAL_PREVIEW, computeTimeline, type OutputFormat } from '@studio/core';
 import { buildAudioGraph } from './audio-filters.js';
 import { escapeFilterPath, formatNumber } from './escape.js';
-import { buildSegmentFilter } from './video-filters.js';
+import { buildSegmentFilter, quantiseTimeline } from './video-filters.js';
 import type { RenderCommand, RenderInputs } from './types.js';
 
 /** Resolves the output size/frame rate: an explicit format wins, otherwise it follows the quality. */
@@ -87,8 +87,8 @@ export const AUDIO_CODEC_ARGS: readonly string[] = ['-c:a', 'aac', '-profile:a',
  *
  * Inputs: one `-ss/-t/-i` per segment (accurate input seeking, auto-rotation left on), then the
  * music file. Video: a chain per segment (see buildSegmentFilter), joined left to right with
- * `concat` for hard cuts or `xfade` for transitions whose offsets are computeTimeline's start
- * times, then the ASS overlay. Audio: see buildAudioGraph. The output is trimmed to the timeline
+ * `concat` for hard cuts or `xfade` for transitions, with every length, offset and transition
+ * snapped to the frame grid by quantiseTimeline, then the ASS overlay. Audio: see buildAudioGraph. The output is trimmed to the timeline
  * total so the file length matches the plan to within a frame.
  */
 export function buildRenderCommand(inputs: RenderInputs, outputPath: string, assPath: string | null): RenderCommand {
@@ -117,6 +117,7 @@ export function buildRenderCommand(inputs: RenderInputs, outputPath: string, ass
     args.push('-i', inputs.music.path);
   }
 
+  const frameGrid = quantiseTimeline(timeline, output.fps);
   const filters: string[] = [];
   for (const placed of timeline.segments) {
     const asset = inputs.assets[placed.segment.assetId];
@@ -124,7 +125,7 @@ export function buildRenderCommand(inputs: RenderInputs, outputPath: string, ass
       buildSegmentFilter({
         inputIndex: placed.index,
         segment: placed.segment,
-        playDurationSec: placed.playDurationSec,
+        frames: frameGrid[placed.index]!.frames,
         isHdr: asset?.probe.video?.isHdr ?? false,
         output,
         colourPreset: plan.colourPreset,
@@ -138,10 +139,11 @@ export function buildRenderCommand(inputs: RenderInputs, outputPath: string, ass
     const k = placed.index;
     const label = `x_${k}`;
     const transition = placed.segment.transitionIn;
-    if (transition) {
-      filters.push(
-        `[${current}][v_${k}]xfade=transition=${transition.type}:duration=${formatNumber(transition.durationSec)}:offset=${formatNumber(placed.startSec)}[${label}]`,
-      );
+    const grid = frameGrid[k]!;
+    if (transition && grid.transitionFrames > 0) {
+      const duration = formatNumber(grid.transitionFrames / output.fps);
+      const offset = formatNumber(grid.startFrame / output.fps);
+      filters.push(`[${current}][v_${k}]xfade=transition=${transition.type}:duration=${duration}:offset=${offset}[${label}]`);
     } else {
       // concat outputs a 1/1000000 timebase; xfade needs both inputs on the same 1/F timebase, so restore it
       // here or any transition that follows a hard cut fails to configure.

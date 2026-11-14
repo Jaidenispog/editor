@@ -1,4 +1,4 @@
-import type { ColourPreset, OutputFormat, Segment } from '@studio/core';
+import type { ColourPreset, OutputFormat, Segment, Timeline } from '@studio/core';
 import { formatNumber } from './escape.js';
 
 /** `eq` settings for each colour preset; `null` means the footage is left untouched. */
@@ -21,8 +21,8 @@ export interface SegmentFilterOptions {
   /** Index of the FFmpeg input that carries this segment (one input per segment). */
   inputIndex: number;
   segment: Segment;
-  /** Duration after the speed change, in seconds (from computeTimeline). */
-  playDurationSec: number;
+  /** Whole output frames this segment contributes (from quantiseTimeline). */
+  frames: number;
   /** Whether the source clip is HDR and needs tone-mapping. */
   isHdr: boolean;
   output: OutputFormat;
@@ -31,14 +31,59 @@ export interface SegmentFilterOptions {
   outputLabel: string;
 }
 
-/** Number of output frames a segment contributes: its play duration quantised to whole frames. */
-export function segmentFrameCount(playDurationSec: number, fps: number): number {
-  return Math.max(1, Math.round(playDurationSec * fps));
+/** A segment's place on the output frame grid. */
+export interface SegmentFrames {
+  index: number;
+  /** First output frame of the segment (where an incoming transition starts). */
+  startFrame: number;
+  /** One past the segment's last output frame. */
+  endFrame: number;
+  /** endFrame − startFrame, always at least 1. */
+  frames: number;
+  /** Frames shared with the previous segment by an `xfade` (0 for the first segment and hard cuts). */
+  transitionFrames: number;
 }
 
 /**
+ * Snaps computeTimeline's continuous times to the output frame grid cumulatively: every segment
+ * boundary is rounded to the nearest frame once, and a segment spans the frames between its rounded
+ * start and end. Rounding each segment's length on its own instead lets the errors add up — a
+ * 16-cut beat montage could end several frames away from the plan, fail verifyExport and drift off
+ * the music it was cut to. Here the file's length and every cut stay within half a frame of the plan.
+ */
+export function quantiseTimeline(timeline: Timeline, fps: number): SegmentFrames[] {
+  const out: SegmentFrames[] = [];
+  let previousEnd = 0;
+  for (const placed of timeline.segments) {
+    let startFrame = 0;
+    let transitionFrames = 0;
+    if (placed.index > 0) {
+      if (placed.transitionInSec > 0) {
+        // xfade needs at least one shared frame, and cannot reach back past the start of the stream.
+        startFrame = Math.max(0, Math.min(Math.round(placed.startSec * fps), previousEnd - 1));
+        transitionFrames = previousEnd - startFrame;
+      } else {
+        startFrame = previousEnd;
+      }
+    }
+    // The segment must outlast the transition into it by at least one frame.
+    const endFrame = Math.max(startFrame + transitionFrames + 1, Math.round(placed.endSec * fps));
+    out.push({ index: placed.index, startFrame, endFrame, frames: endFrame - startFrame, transitionFrames });
+    previousEnd = endFrame;
+  }
+  return out;
+}
+
+/**
+ * Cloned frames appended to a segment before it is trimmed. Snapping a boundary can ask a segment
+ * for up to one frame more than its source span holds, and the `fps` filter can drop the last
+ * frame of a speed-changed span; the padding guarantees `trim` always finds the full frame count.
+ */
+export const SEGMENT_PAD_FRAMES = 3;
+
+/**
  * Builds the per-segment video chain:
- * reset timestamps → speed change → constant frame rate (trimmed to the exact frame count) →
+ * reset timestamps → speed change → constant frame rate (padded, then trimmed to the exact frame count) →
  * scale to cover the output → crop with the framing focus → HDR tone-mapping when needed →
  * 8-bit 4:2:0 → optional zoom (zoompan, a crop window that eases from `from` to `to` and is scaled
  * back to the output size) → colour preset → square pixels and a 1/fps timebase.
@@ -51,7 +96,7 @@ export function buildSegmentFilter(options: SegmentFilterOptions): string {
   const W = output.width;
   const H = output.height;
   const fps = output.fps;
-  const frames = segmentFrameCount(options.playDurationSec, fps);
+  const frames = Math.max(1, Math.floor(options.frames));
   const focusX = segment.framing.mode === 'focus' ? clamp01(segment.framing.focusX) : 0.5;
   const focusY = segment.framing.mode === 'focus' ? clamp01(segment.framing.focusY) : 0.5;
 
@@ -59,7 +104,7 @@ export function buildSegmentFilter(options: SegmentFilterOptions): string {
   if (segment.speed !== 1) {
     steps.push(`setpts=PTS/${formatNumber(segment.speed)}`);
   }
-  steps.push(`fps=${fps}`, `trim=end_frame=${frames}`);
+  steps.push(`fps=${fps}`, `tpad=stop_mode=clone:stop=${SEGMENT_PAD_FRAMES}`, `trim=end_frame=${frames}`);
   steps.push(`scale=${W}:${H}:force_original_aspect_ratio=increase:force_divisible_by=2:flags=bicubic`);
   steps.push(`crop=${W}:${H}:x=(iw-${W})*${formatNumber(focusX)}:y=(ih-${H})*${formatNumber(focusY)}`);
   if (options.isHdr) {

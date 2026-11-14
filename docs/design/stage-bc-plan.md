@@ -1057,3 +1057,48 @@ Every edited file starts with a "Lead-architect reconciliation" box listing thes
   `sandbox`).
 - §11: the Google OAuth helper and routes come from WP0; the Business Profile parts are WP9.
 - §14: reuse list and Performance files moved to WP9; the Google OAuth files belong to WP0.
+
+## 10. Carried forward from G1 (lead, 2026-11-14)
+
+G1 (WP1 music, WP3 trends) is merged. Before G2 started, the lead made these changes on the main branch, so every
+later package builds on them:
+
+- **Renderer frame grid (Stage A fix).** Speed-changed beat montages exported a few frames short and failed
+  `verifyExport`. `segmentFrameCount` is gone; `quantiseTimeline(timeline, fps)` in
+  `packages/media/src/render/video-filters.ts` snaps cut points, segment lengths and `xfade` offsets/durations to the
+  frame grid cumulatively, and each segment chain pads with `tpad` before its exact `trim`. Regression test:
+  "exports speed-changed hard cuts (a beat montage) at the exact timeline length" in `packages/media/test/render.test.ts`.
+  **WP2:** any change to the video graph (logo end card, corner mark) must keep using `quantiseTimeline` for lengths and
+  offsets, and keep that test and `verifyExport`'s one-frame duration contract passing. An end card that adds time
+  must add it to the plan's timeline, not only to the filtergraph.
+- **`NonRetryableError`** in `packages/core/src/errors.ts`. Throw it from a handler for a failure another attempt
+  cannot fix: `runTracked` marks the `jobs` row failed with its message on the first attempt, and the worker loop
+  completes the pg-boss job instead of retrying. The blocked music export now uses it (its `jobs` row reads failed).
+  **WP4:** use it for error 190 → reconnect, licence changed after scheduling, deleted export, and other owner-fixable
+  publish failures; keep retries for transient Graph errors and quota (requeue).
+- **Music cards in the shared status list.** `buildMusicIntegrations` now returns `musicStatusEntries()`; the WP0
+  wording test compares only the Stage A ids.
+
+Requests carried to later packages (each is in that package's Owns list):
+
+- **WP2:**
+  - `apps/web/src/lib/uploads.ts` `finishAudio` passes the upload's `genres` to `createLibraryTrack` (today they are
+    accepted by `CompleteUploadSchema` and dropped).
+  - Add `preferences.musicGenres` and `preferences.musicArtists` (string arrays, default empty) to the
+    editing-preferences schema, with "Music taste" fields in Settings → Editing preferences. `musicTasteFrom` in
+    `packages/core/src/music-ranking.ts` already reads them when present.
+  - `studio-status-shape.ts` `shapeMusicOption` fills `MusicOptionDto.genres`, `moods` and the licence state
+    (`licenceStateOf` from core), so the Studio form stops working it out itself.
+  - `SettingsPatchSchema` (`settings-merge.ts`) refuses a `music` section with a 400 that names
+    `PUT /api/music/references/mode`; the Spotify mode changes only through that route, which applies the embed rules.
+- **WP4:** exports are keyed `export:{id}:{variant}`; `edit_versions.variant_exports` holds the `no_music` file;
+  `music_usage` rows for publishing use `purpose: 'publish'` and the platform (the unique index is
+  `(edit_version_id, purpose, platform)`).
+- **WP5:** add `instagram_hashtag` to `TREND_SOURCES` in `apps/worker/src/handlers/trends.ts` (refresher type in
+  `apps/worker/src/modules/trends/sources.ts`); `toTrendItemDto` already labels live items with provider
+  `instagram_hashtag`; add the hashtag card to `live-signals.tsx` and its entry to `trendSourceStatuses` /
+  `buildTrendsIntegrations`. `trend_watches.social_account_id` already exists. `POST /api/trends/watches` with that
+  provider returns 422 `UNSUPPORTED` until WP5 lands.
+- **Open (no package owns it yet; lead to schedule):** let `ConnectionFacts` carry trend-watch facts in
+  `getIntegrationStatuses`, so the `youtube_chart` card in Settings → Integrations shows the chart's real state
+  (`youTubeChartStatus(env, watches)` already accepts them).

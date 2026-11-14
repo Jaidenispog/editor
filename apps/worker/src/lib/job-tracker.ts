@@ -1,6 +1,6 @@
 import { and, eq, lt, sql } from 'drizzle-orm';
 import type { Logger } from 'pino';
-import { CancelledError, errorMessage, isAppError, newId, type JobType } from '@studio/core';
+import { CancelledError, NonRetryableError, errorMessage, isAppError, newId, type JobType } from '@studio/core';
 import { schema, type Database } from '@studio/db';
 import { QUEUE_SETTINGS } from '@studio/queue';
 
@@ -205,17 +205,20 @@ export async function runTracked<T>(
       log.warn({ attemptsLeft }, 'job interrupted by the queue');
       throw new JobInterruptedError(message);
     } else {
+      // A NonRetryableError is final on any attempt; the worker loop also keeps the queue from retrying it.
+      const retry = attemptsLeft && !(err instanceof NonRetryableError);
       await db
         .update(schema.jobs)
         .set({
-          status: attemptsLeft ? 'queued' : 'failed',
-          message: attemptsLeft ? 'Retrying after a problem' : friendlyFailure(err),
+          status: retry ? 'queued' : 'failed',
+          message: retry ? 'Retrying after a problem' : friendlyFailure(err),
           error: message,
-          finishedAt: attemptsLeft ? null : new Date(),
+          finishedAt: retry ? null : new Date(),
           updatedAt: new Date(),
         })
         .where(eq(schema.jobs.id, jobId));
-      log.error({ err, attemptsLeft }, 'job failed');
+      if (retry || !(err instanceof NonRetryableError)) log.error({ err, attemptsLeft: retry }, 'job failed');
+      else log.warn({ code: err.code, reason: err.message }, 'job failed without a retry');
     }
     throw err;
   }

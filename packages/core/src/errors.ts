@@ -55,6 +55,18 @@ export class CancelledError extends AppError {
   }
 }
 
+/**
+ * A job failure that another attempt cannot fix: a music licence that no longer clears, a revoked token the owner
+ * must reconnect, a source that was deleted. The worker records the job as failed straight away, shows `message` to
+ * the owner, and does not hand the job back to the queue for a retry.
+ */
+export class NonRetryableError extends AppError {
+  constructor(code: AppErrorCode, message: string, options: { status?: number; details?: unknown; cause?: unknown } = {}) {
+    super(code, message, options);
+    this.name = 'NonRetryableError';
+  }
+}
+
 export function isAppError(err: unknown): err is AppError {
   return err instanceof AppError;
 }

@@ -142,6 +142,36 @@ describe('renderEditPlan with real footage', () => {
   });
 
   it(
+    'exports speed-changed hard cuts (a beat montage) at the exact timeline length',
+    async () => {
+      // Beat-montage shape: eight hard cuts on 117 BPM beats (0.513 s = 15.39 frames), slowed and
+      // sped-up shots, so no segment is a whole number of frames long. Rounding each segment on its
+      // own ends the video almost three frames short of the plan (and off the music) and verifyExport
+      // refuses it; the frame grid keeps it within half a frame.
+      const plan = samplePlan();
+      plan.styleId = 'beat_montage';
+      plan.targetDurationSec = 6;
+      plan.textOverlays = [];
+      plan.segments = [
+        { id: 's0', assetId: ASSET_IDS.a, inSec: 0.5, outSec: 0.828, speed: 0.64, framing: { mode: 'centre', focusX: 0.5, focusY: 0.5 }, zoom: null, transitionIn: null, role: 'cutting', keepOriginalSound: false },
+        { id: 's1', assetId: ASSET_IDS.c, inSec: 0.5, outSec: 0.958, speed: 0.893, framing: { mode: 'centre', focusX: 0.5, focusY: 0.5 }, zoom: null, transitionIn: null, role: 'styling', keepOriginalSound: false },
+        { id: 's2', assetId: ASSET_IDS.a, inSec: 3, outSec: 3.641, speed: 1.25, framing: { mode: 'centre', focusX: 0.5, focusY: 0.5 }, zoom: null, transitionIn: null, role: 'cutting', keepOriginalSound: false },
+        { id: 's3', assetId: ASSET_IDS.c, inSec: 1.5, outSec: 3.809, speed: 1.5, framing: { mode: 'centre', focusX: 0.5, focusY: 0.5 }, zoom: null, transitionIn: null, role: 'styling', keepOriginalSound: false },
+        { id: 's4', assetId: ASSET_IDS.c, inSec: 3.9, outSec: 4.358, speed: 0.893, framing: { mode: 'centre', focusX: 0.5, focusY: 0.5 }, zoom: null, transitionIn: null, role: 'styling', keepOriginalSound: false },
+        { id: 's5', assetId: ASSET_IDS.a, inSec: 6, outSec: 6.985, speed: 0.64, framing: { mode: 'centre', focusX: 0.5, focusY: 0.5 }, zoom: { from: 1, to: 1.08 }, transitionIn: null, role: 'result', keepOriginalSound: false },
+        { id: 's6', assetId: ASSET_IDS.a, inSec: 7.2, outSec: 7.841, speed: 1.25, framing: { mode: 'centre', focusX: 0.5, focusY: 0.5 }, zoom: null, transitionIn: null, role: 'result', keepOriginalSound: false },
+        { id: 's7', assetId: ASSET_IDS.c, inSec: 4.5, outSec: 5.27, speed: 1.5, framing: { mode: 'centre', focusX: 0.5, focusY: 0.5 }, zoom: null, transitionIn: null, role: 'styling', keepOriginalSound: false },
+      ];
+      const total = computeTimeline(plan).totalDurationSec;
+      const result = await renderEditPlan(inputs({ plan, quality: 'export' }), join(workDir, 'export-speed.mp4'));
+      expect(result.exportCheck).toEqual({ ok: true, problems: [] });
+      const counted = await execa('ffprobe', ['-v', 'error', '-select_streams', 'v', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', result.outputPath]);
+      expect(Number(counted.stdout.trim())).toBe(Math.round(total * 30));
+    },
+    RENDER_TIMEOUT,
+  );
+
+  it(
     'renders a 1080x1920 export of the same plan',
     async () => {
       const result = await renderEditPlan(inputs({ quality: 'export' }), join(workDir, 'export.mp4'));

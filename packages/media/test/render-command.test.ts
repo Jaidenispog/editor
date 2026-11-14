@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AppError, computeTimeline } from '@studio/core';
+import { AppError, computeTimeline, type EditPlan } from '@studio/core';
 import {
   MAX_RENDER_DURATION_SEC,
   assertRenderableDuration,
@@ -8,7 +8,7 @@ import {
   escapeFilterPath,
   exportLevelFor,
   formatNumber,
-  segmentFrameCount,
+  quantiseTimeline,
   videoCodecArgs,
   type RenderInputs,
 } from '../src/render/index.js';
@@ -77,7 +77,7 @@ describe('buildRenderCommand', () => {
     expect(chain1).toContain('zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv');
     expect(chain0).not.toContain('zscale');
     expect(chain2).not.toContain('zscale');
-    expect(chain0).toContain('[0:v]setpts=PTS-STARTPTS,setpts=PTS/1.5,fps=30,trim=end_frame=60,scale=540:960:force_original_aspect_ratio=increase:force_divisible_by=2');
+    expect(chain0).toContain('[0:v]setpts=PTS-STARTPTS,setpts=PTS/1.5,fps=30,tpad=stop_mode=clone:stop=3,trim=end_frame=60,scale=540:960:force_original_aspect_ratio=increase:force_divisible_by=2');
     expect(chain0).toContain("zoompan=z='1+(1.1-1)*min(on/59,1)':x='(iw-iw/zoom)*0.5':y='(ih-ih/zoom)*0.5':d=1:s=540x960:fps=30");
     expect(chain0).toContain('eq=contrast=1.03:saturation=1.05');
     expect(chain0.endsWith('setsar=1,settb=1/30[v_0]')).toBe(true);
@@ -184,7 +184,7 @@ describe('buildRenderCommand', () => {
     expect(silent.filterComplex).not.toContain('amix');
     expect(silent.filterComplex).not.toContain('loudnorm');
     expect(silent.filterComplex).toBe(
-      '[0:v]setpts=PTS-STARTPTS,fps=30,trim=end_frame=120,scale=540:960:force_original_aspect_ratio=increase:force_divisible_by=2:flags=bicubic,crop=540:960:x=(iw-540)*0.3:y=(ih-960)*0.4,format=yuv420p,eq=contrast=1.03:saturation=1.05,setsar=1,settb=1/30[v_0];[v_0]null[vout]',
+      '[0:v]setpts=PTS-STARTPTS,fps=30,tpad=stop_mode=clone:stop=3,trim=end_frame=120,scale=540:960:force_original_aspect_ratio=increase:force_divisible_by=2:flags=bicubic,crop=540:960:x=(iw-540)*0.3:y=(ih-960)*0.4,format=yuv420p,eq=contrast=1.03:saturation=1.05,setsar=1,settb=1/30[v_0];[v_0]null[vout]',
     );
     expect(lastValueAfter(silent.args, '-t')).toBe('4');
   });
@@ -236,10 +236,49 @@ describe('escapeFilterPath', () => {
 });
 
 describe('frame maths', () => {
-  it('quantises play durations to whole frames and formats numbers plainly', () => {
-    expect(segmentFrameCount(2, 30)).toBe(60);
-    expect(segmentFrameCount(2.5 / 1.5, 30)).toBe(50);
-    expect(segmentFrameCount(0.01, 30)).toBe(1);
+  const cut = (id: string, inSec: number, outSec: number, speed = 1, transition: number | null = null): EditPlan['segments'][number] => ({
+    id,
+    assetId: 'a',
+    inSec,
+    outSec,
+    speed,
+    framing: { mode: 'centre', focusX: 0.5, focusY: 0.5 },
+    zoom: null,
+    transitionIn: transition === null ? null : { type: 'fade', durationSec: transition },
+    role: 'cutting',
+    keepOriginalSound: false,
+  });
+
+  it('snaps segment boundaries to the frame grid cumulatively, so errors never add up', () => {
+    // Eight 0.513 s shots (15.39 frames each): rounding each one gives 15 frames and ends 3 frames
+    // short; the grid gives 15 or 16 so the total is the rounded timeline.
+    const segments = Array.from({ length: 8 }, (_, i) => cut(`s${i}`, i, i + 0.513));
+    const timeline = computeTimeline({ segments });
+    const grid = quantiseTimeline(timeline, 30);
+    expect(grid.reduce((sum, g) => sum + g.frames, 0)).toBe(Math.round(timeline.totalDurationSec * 30));
+    expect(grid.map((g) => g.frames)).toEqual([15, 16, 15, 16, 15, 15, 16, 15]);
+    grid.forEach((g, i) => {
+      expect(g.startFrame).toBe(i === 0 ? 0 : grid[i - 1]!.endFrame);
+      expect(Math.abs(g.startFrame / 30 - timeline.segments[i]!.startSec)).toBeLessThanOrEqual(0.5 / 30 + 1e-9);
+      expect(g.transitionFrames).toBe(0);
+    });
+  });
+
+  it('puts transitions on whole frames, keeps at least one shared frame and one frame after it', () => {
+    const segments = [cut('s0', 0, 2.51, 1.5), cut('s1', 0, 2.5, 1, 0.5), cut('s2', 0, 0.02, 1, 0.01), cut('s3', 0, 3, 1, 0.4)];
+    const timeline = computeTimeline({ segments });
+    const grid = quantiseTimeline(timeline, 30);
+    expect(grid[0]).toEqual({ index: 0, startFrame: 0, endFrame: 50, frames: 50, transitionFrames: 0 });
+    expect(grid[1]).toMatchObject({ startFrame: 35, transitionFrames: 15, endFrame: 110 });
+    // A 0.02 s segment with a 0.01 s fade still gets one shared frame and one of its own.
+    expect(grid[2]!.transitionFrames).toBeGreaterThanOrEqual(1);
+    expect(grid[2]!.frames).toBeGreaterThan(grid[2]!.transitionFrames);
+    expect(grid[3]!.startFrame).toBe(grid[2]!.endFrame - grid[3]!.transitionFrames);
+    // The timeline total is rounded to milliseconds, so compare within half a frame.
+    expect(Math.abs(grid.at(-1)!.endFrame / 30 - timeline.totalDurationSec)).toBeLessThanOrEqual(0.5 / 30 + 0.001);
+  });
+
+  it('formats numbers plainly', () => {
     expect(formatNumber(8.6)).toBe('8.6');
     expect(formatNumber(1 / 3)).toBe('0.333333');
     expect(formatNumber(2)).toBe('2');
