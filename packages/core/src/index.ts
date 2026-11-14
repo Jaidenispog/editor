@@ -32,3 +32,5 @@ export * from './publishing.js';
 export * from './jobs/publishing.js';
 export * from './settings/publishing.js';
 export * from './hashtag-watch.js';
+export * from './square.js';
+export * from './jobs/square.js';

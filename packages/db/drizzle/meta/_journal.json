@@ -50,6 +50,13 @@
       "when": 1794654706623,
       "tag": "0006_worker_heartbeats",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794662432054,
+      "tag": "0007_square",
+      "breakpoints": true
     }
   ]
 }

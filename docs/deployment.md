@@ -350,3 +350,20 @@ not allow it for this app setup, the card says "Not available" and everything el
   `NODE_ENV=test` (the login dialog then stays on `https://www.facebook.com`).
   `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` are not used (no direct TikTok API for a private app).
 - The worker schedules `publish.dispatch` every minute and `social.check` daily at 4:23 am Melbourne time.
+
+## Square appointments (Stage C, WP6)
+
+- Needs `SQUARE_APPLICATION_ID` and `SQUARE_APPLICATION_SECRET` (Developer Console → OAuth, sandbox tab first) and
+  `SQUARE_ENVIRONMENT` (`sandbox` by default; `production` for the live account). Register
+  `https://<app address>/api/integrations/square/callback` as the redirect URL for each environment.
+- Optional webhooks: subscribe `https://<app address>/api/webhooks/square` (API version 2026-09-16) to
+  `booking.created`, `booking.updated`, `payment.created`, `payment.updated`, `customer.created`, `customer.updated`,
+  `customer.deleted`, and put the signature key in `SQUARE_WEBHOOK_SIGNATURE_KEY`. If the subscribed address differs
+  from `APP_URL` + `/api/webhooks/square` in any byte (a trailing slash matters), set `SQUARE_WEBHOOK_NOTIFICATION_URL`.
+  Without webhooks bookings still refresh every 10 minutes.
+- Outbound HTTPS from the worker to `connect.squareup.com` (or `connect.squareupsandbox.com`); the web app calls it once
+  per connect for the code exchange. `SQUARE_API_BASE_URL` is for tests only and ignored unless `NODE_ENV=test`.
+- Switching `SQUARE_ENVIRONMENT` asks the owner to reconnect; the other environment's copied data is removed then.
+- The worker schedules `square.sync` every 10 minutes and at 2:47 am, `square.attendance` every 30 minutes and
+  `square.token_refresh` at 3:13 am (Melbourne time).
+

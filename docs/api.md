@@ -245,6 +245,36 @@ copyright check), `publish.dispatch {}` (every minute, key `every-minute`), `soc
 
 ## Square appointments (Stage C, WP6 and WP6b)
 
+WP6 is Tier 0: read-only. Studio Assistant never writes to Square and never sends a message. Booking changes and the
+self-test (`/api/appointments/changes/**`, `/api/integrations/square/self-test/**`) are WP6b and are not built.
+All times are ISO UTC with a Melbourne `…Label` beside them. Types in `apps/web/src/lib/shared/square-dto.ts`.
+
+| Method | Route | Notes |
+| --- | --- | --- |
+| GET | `/api/integrations/square/connect?access=read` | Owner. 302 to Square's authorise page (code flow, read scopes, `session=false`); state in a 10-minute HttpOnly cookie on `/api/integrations/square`. 409 when the server keys are missing; `access=write` → 422 until booking changes exist |
+| GET | `/api/integrations/square/callback?code&state[&error]` | Owner, same session. One code exchange (10 s, no retry); another environment's or account's copied data is purged first; tokens stored encrypted; queues `square.sync { reason: 'connect' }`; 302 to `/settings?tab=integrations&square=checking` (or `square_error=…`) |
+| GET | `/api/integrations/square` | Signed in. `SquareStatusDto`: `state` (shared union), `liveMode` (`sandbox`/`live`), `dataEnvironment`, location choice, last sync, stale flag, webhooks line, booking-changes checklist (read-only), services with labels, team, latest sync job; owner-only `details` (merchant id, scopes, access expiry). Never tokens |
+| PATCH | `/api/integrations/square` | Owner. `{ locationId?, serviceConfirmation?: { variationId, confirmed }, writesEnabled? }` → `SquareStatusDto`. `writesEnabled: true` → 409 (not available yet) |
+| DELETE | `/api/integrations/square` | Owner. `{ purgeData }` → `{ status: 'disconnected', revokeJobId, purged }`. Tokens wiped; with `purgeData` bookings deleted and Square clients scrubbed (never deleted); queues `square.revoke` |
+| POST | `/api/integrations/square/sync` | Owner. → `{ jobId }` (`square.sync { reason: 'manual' }`). 409 when not connected |
+| GET | `/api/appointments?view=upcoming\|confirm\|past&from&days&cursor` | Signed in. `{ bookings: BookingDto[], nextCursor, environment, syncedAt }` from the local copy (upcoming: today + 31 days; confirm: ended ACCEPTED bookings of the last 14 days still needing a word; past: 90 days) |
+| GET | `/api/appointments/[id]` | Signed in. `BookingDetailDto` (evidence, "Open in Square" link with a one-line instruction; notes, email and phone only for the owner) |
+| POST | `/api/appointments/[id]/attendance` | Owner or staff. `{ value: 'attended' \| 'not_attended' \| null }` → `BookingDto`. 409 on Square `NO_SHOW`/cancelled/declined/pending or before the start. Sets `completed_at`/`completion_source` (`owner_marked`) once the appointment has ended; audit `booking.attendance_marked` |
+| GET | `/api/appointments/clients?q&cursor` | Signed in. `{ clients: ClientDto[], nextCursor }`; email and phone (and searching by them) only for the owner |
+| GET | `/api/appointments/clients/[id]` | Signed in. `ClientDto` + bookings |
+| GET | `/api/appointments/services` | Signed in. `{ services, teamMembers }` with the per-service label (`bookable`, `needs_confirmation`, `book_in_square`, `unverified`, `not_bookable`) |
+| POST | `/api/appointments/availability` | Signed in. `{ serviceVariationId, teamMemberId?, fromDate: 'YYYY-MM-DD', days: 1..14 }` → `{ searchId, jobId }`. 400 for an unknown service or a day before today (Melbourne) |
+| GET | `/api/appointments/availability/[searchId]` | Signed in. `{ status, slots: [{ startAt, dayLabel, startLabel, endLabel, teamMemberName, … }], fetchedAt, fetchedLabel, stale, error }` |
+| POST | `/api/webhooks/square` | Public, no CSRF. HMAC-SHA256 of `notification URL + raw body` (timing-safe); invalid → 401 and not stored; valid → stored once per `event_id` and `webhook.process` queued; 404 when `SQUARE_WEBHOOK_SIGNATURE_KEY` is unset |
+
+Jobs (worker, all read-only towards Square): `square.sync { reason: connect|schedule|manual|reconcile }` (token status,
+snapshot, bookings in ≤ 31-day windows, reconcile, customers, then `square.attendance`; `stately`; crons every 10
+minutes, key `every-10-minutes`, and 2:47 am, key `nightly-reconcile`), `square.refresh { entity, squareId }` (from a
+webhook), `square.attendance { squareCustomerId?, fromIso?, toIso? }` (payment matching; every 30 minutes),
+`square.availability { searchId }`, `square.token_refresh {}` (3:13 am daily), `square.revoke { merchantId,
+environment }`. The `webhook.process` handler for provider `square` ignores other merchants (`merchant_mismatch`) and
+only queues `square.refresh`.
+
 ## Email and reviews (Stage C, WP7)
 
 ## Website and local search (Stage C, WP8)

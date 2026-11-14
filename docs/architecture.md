@@ -257,3 +257,30 @@ Built once so every Stage B/C module integrates the same way and parallel work p
 - **Export-ready hook**: when `render.export` stores a version's file (standard or `no_music`), posts waiting for it get
   `publish.prepare` again. `publish.dispatch` hands due scheduled targets on, turns due manual ones into "Your turn",
   and settles a processing target untouched for an hour (failed with Retry, or `check_before_retry` once submitted).
+
+## Square appointments (Stage C, WP6)
+
+- **Tier 0 only (read-only).** Square stays the source of truth. The worker copies bookings, customers and the
+  business snapshot (locations, booking profile, team, APPOINTMENTS_SERVICE catalogue) through the official
+  `square@46.0.0` SDK behind a narrow `SquareApi` interface (`apps/worker/src/square/api.ts`; `maxRetries: 0`, 20 s,
+  the run's AbortSignal). Nothing writes to Square and nothing sends a message; Square keeps sending its own
+  confirmations and reminders. Booking changes (Tier 1) stay off in code (`SQUARE_TIER1_AVAILABLE = false`) until WP6b
+  and the sandbox smoke test.
+- **Contracts** (`packages/core/src/square.ts`): stored config/capabilities schemas, `squareScopes`,
+  `squareIntegrationState`, `tier1Status`, `classifyVariation`, `mapBookingStatus`, `deriveAttendance`,
+  `deriveCompletion` (decides `completed_at`/`completion_source`; consumers use `isGenuinelyCompleted` from
+  `completion.ts`), `matchPayments`, `availabilityRange`, `bookingWindows`, `mapSquareError`.
+- **Data**: `bookings` gains environment, Square customer id, end time, Square update time, `attendance` +
+  evidence, the owner's mark and `missing_from_square_at`; `customers` gains environment, Square version and sync time
+  (and fills WP0's `square_email_unsubscribed`); new `square_availability_searches` (deleted after 24 h by
+  `maintenance.cleanup`). `purgeSquareData` (`packages/db/src/square-purge.ts`) deletes bookings and searches and always
+  scrubs customers (soft delete), so rows of other modules keep working.
+- **Flow**: Connect (OAuth code flow, read scopes) → callback stores encrypted tokens (purging another environment's or
+  account's data first) → `square.sync` → every 10 minutes (31-day window) and nightly reconcile (3 × 31 days, missing
+  bookings re-read and marked) → `square.attendance` matches COMPLETED payments to ended ACCEPTED bookings (strong =
+  same client; weak = possible) → `completed_at` set only for a strong match or the owner's mark; a refund, a later
+  NO_SHOW/cancellation or "didn't attend" resets the source to `none`. Verified webhooks only queue `square.refresh`,
+  which re-reads the object from Square. Stale versions never overwrite newer ones.
+- **Times**: everything stored in UTC; availability searches use `availabilityRange` (a 23-hour DST day is widened to
+  Square's 24-hour minimum and the extra slots dropped); lists are grouped by Melbourne day.
+

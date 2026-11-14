@@ -372,3 +372,27 @@ its process alive, and five clips sat on "Waiting to be analysed" with no hint w
      again. To see the notice, run the web app and `pnpm --filter @studio/worker start` separately and `kill -9` the
      worker: within about 60 s `GET /api/health` reports `"worker":{"alive":false,…}` (still 200) and a project with
      a waiting clip shows "The background worker isn't running" above the clips.
+
+## Square appointments (Stage C, WP6)
+
+- Unit: `packages/core/test/square.test.ts` (scopes, every card state incl. environment switch and stale sync,
+  `classifyVariation` incl. passthrough `no_show_fee`, the Tier 1 checklist, the six statuses, attendance and
+  completion: time passing alone is never completion, owner marks, Square NO_SHOW wins, refunds, missing bookings;
+  `matchPayments` window edges, refunds, ties; DST availability ranges; 31-day windows; `mapSquareError`);
+  `apps/web/test/square.test.ts` (webhook signature vector, trailing slash, tampering; authorise URL; state cookie;
+  card wording; attendance rule; ref ids).
+- Database + a local fake of Square (`apps/worker/test/fakes/square-server.ts`, Square's own JSON, used through the
+  real SDK via `SQUARE_API_BASE_URL`, honoured only when `NODE_ENV=test`): `apps/worker/test/square-db.test.ts` (connect
+  sync and idempotent second run, three ≤ 31-day windows, six statuses verbatim, stale versions, webhook processing and
+  merchant mismatch, missed `booking.created`, reconcile, payment match and refund, 23-hour DST availability,
+  deleted customer scrubbed, token refresh and revoked token, revoke, environment purge, cleanup, no writes to Square).
+- Database-backed routes: `apps/web/test/square-routes.integration.test.ts` (connect/callback against the fake token
+  endpoint, verified webhook stored once with one job, lists, attendance refused on NO_SHOW, contact details for the
+  owner only, service confirmation, `writesEnabled` refused, availability validation, disconnect with purge and revoke,
+  reconnecting in the other environment purges).
+- Sandbox smoke test (developer, read-only, needs the owner's Square developer application):
+  `pnpm --filter @studio/worker square:smoke` refuses to run unless `SQUARE_ENVIRONMENT=sandbox`; record its output in
+  `docs/research/square-sandbox-results.md`. The write checks belong to WP6b.
+- Only verifiable with the owner's accounts: `session=false` and the code lifetime, webhook delivery to the production
+  URL, payment-match quality, the location time zone and the Dashboard deep links.
+
