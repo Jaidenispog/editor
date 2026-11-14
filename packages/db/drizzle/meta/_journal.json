@@ -22,6 +22,13 @@
       "when": 1794644135015,
       "tag": "0002_music",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794644164760,
+      "tag": "0003_trends",
+      "breakpoints": true
     }
   ]
 }
