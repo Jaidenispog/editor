@@ -44,6 +44,14 @@ History of the background runs:
    If a group run stops mid-way (usage limit), commit the worktree's changes as a WIP commit on its branch and
    relaunch the group with `resumeWorktree`/`resumeBranch` for that package.
 
+8. G1 merged and pushed 2026-11-14 (f471de3): migrations 0002_music and 0003_trends, 574 unit tests, worker
+   integration 12/12, browser test 51/51, preview database migrated. The lead then fixed what G1 reported (823a6e5,
+   details in `docs/design/stage-bc-plan.md` §10): renderer frame grid (`quantiseTimeline`; speed-changed beat
+   montages used to export short and fail `verifyExport`), `NonRetryableError` for jobs another attempt cannot fix,
+   and music cards in the shared status list. 578 unit tests, integration 12/12. The port-3000 preview was rebuilt
+   on that commit. **G2 (WP2 preferences ∥ WP4 publishing) started right after** (workflow run `wf_5a49e176-d40`).
+   Plan §10 lists the requests G2+ must honour; the agents read it.
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
