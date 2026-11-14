@@ -20,6 +20,11 @@ History of the background runs:
    commits on its own worktree branch and reports the branch and SHA; the lead session merges them into
    `claude/blissful-lamport-f1lndn` after the end-to-end browser test agent (main checkout) has finished.
 
+4. Also on 2026-11-14, `docs/handover/stage-bc-design-workflow.js` started five design agents (publishing,
+   preferences/music/trends, Square, email + reviews, website/local search) writing `docs/design/*.md`, then a lead
+   architect writing `docs/design/stage-bc-plan.md` (ordered, conflict-free work packages). Design only: no code.
+   Stage B/C implementation starts from that plan after the Stage A merges.
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
