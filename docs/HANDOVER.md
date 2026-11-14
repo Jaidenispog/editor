@@ -6,12 +6,19 @@ bottom before touching code. Then read `CLAUDE.md`, `docs/architecture.md`, `doc
 
 ## Continuing in the SAME Claude Code session?
 
-Two background `Workflow` runs were still going when this was written: the phase-1 implementation run (media
-analysis + renderer agents active; ai-package, web-foundation and devops-docs agents queued behind them) and the
-platform-research run. Check the task list or `/workflows` first. **While the implementation run is alive, do not
-edit `packages/ai`, `apps/web` or the root dev-ops files yourself** — its queued agents will write them. Wait for
-its completion notification, then integrate (section 7, from step 1's typecheck). If no run is alive, follow
-section 7 from the top and re-launch work from `docs/handover/*.js` as needed.
+History of the background runs:
+1. The first implementation run (`docs/handover/phase1-implementation-workflow.js`) finished the media analysis and
+   renderer, then stopped on 2026-11-13 when the account hit its 5-hour usage limit. The AI package, web foundation
+   and dev-ops agents never wrote anything.
+2. On 2026-11-14 the work was relaunched as `docs/handover/stage-a-retry-workflow.js`: AI package → worker
+   integrator (typecheck, unit + integration tests, music case, real boot and kill -9 recovery test) → dev-ops/docs,
+   in parallel with web foundation → Video Studio UI, then an end-to-end browser test. The research run was resumed
+   for its three missing topics plus critique and synthesis.
+
+Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
+`apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
+session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
+returns a structured report in the workflow journal) and re-launch only the missing pieces from `docs/handover/`.
 
 ## 0. First commands in a fresh session
 
