@@ -1,15 +1,8 @@
-import { formatTrendDateTime, type IntegrationState, type TrendWatchProvider, type TrendWatchStatus } from '@studio/core';
+import { formatTrendDateTime, type IntegrationState, type TrendWatchStatus } from '@studio/core';
 import type { IntegrationStatus } from '../shared/integration-types.js';
-import { missingEnv, type IntegrationBuilder, type IntegrationEnv } from './types.js';
+import { missingEnv, type IntegrationBuilder, type IntegrationEnv, type TrendWatchFact } from './types.js';
 
-/** What the status builder needs to know about a live source's watch (never any fetched content). */
-export interface TrendWatchFact {
-  provider: TrendWatchProvider;
-  enabled: boolean;
-  status: TrendWatchStatus;
-  statusMessage: string;
-  lastSuccessAt: Date | string | null;
-}
+export type { TrendWatchFact } from './types.js';
 
 /** Shown when no YouTube Data API key is set (design §4.12). */
 export const YOUTUBE_NOT_CONFIGURED_MESSAGE =
@@ -56,4 +49,4 @@ export function youTubeChartStatus(env: Pick<IntegrationEnv, 'YOUTUBE_API_KEY'>,
  * Integration cards of the trends module. Pure: no database or network access. The Instagram hashtag watch card is
  * added by WP5. TikTok and Google Trends have no card: they are links the owner opens with their own logins.
  */
-export const buildTrendsIntegrations: IntegrationBuilder = (env) => [youTubeChartStatus(env, null)];
+export const buildTrendsIntegrations: IntegrationBuilder = (env, facts) => [youTubeChartStatus(env, facts.trendWatches ?? null)];

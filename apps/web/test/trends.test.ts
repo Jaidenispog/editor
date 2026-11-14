@@ -21,6 +21,11 @@ describe('YouTube chart integration status', () => {
     expect(s?.message).toMatch(/Settings → Trends/);
   });
 
+  it('shows the chart\'s real state in the shared list when the aggregator passes the watches', () => {
+    const [s] = buildTrendsIntegrations({ YOUTUBE_API_KEY: 'k' } as never, { connections: [], socialAccounts: [], trendWatches: [fact('ok', { lastSuccessAt: '2026-11-13T19:05:00Z' })] });
+    expect(s).toMatchObject({ state: 'connected', connected: true, liveMode: 'read_only', detail: 'Last fetched 14 Nov 2026, 6:05 am.' });
+  });
+
   it('maps every watch state to the shared contract', () => {
     const env = { YOUTUBE_API_KEY: 'k' };
     expect(youTubeChartStatus(env, [])).toMatchObject({ state: 'not_connected', connected: false });

@@ -32,6 +32,8 @@ suite('database-backed helpers', () => {
     process.env.STORAGE_LOCAL_ROOT = storageRoot;
     process.env.STORAGE_DRIVER = 'local';
     process.env.APP_SECRET ??= 'test-secret-test-secret-test-secret-0123';
+    // Placeholder only: the web app never calls YouTube; the worker does, and not in these tests.
+    process.env.YOUTUBE_API_KEY ??= 'placeholder-youtube-key';
   }, 60_000);
 
   afterAll(async () => {
@@ -122,5 +124,18 @@ suite('database-backed helpers', () => {
     const { getAccessibleProject } = await import('../src/lib/studio-access');
     await expect(getAccessibleProject(project.id, owner)).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await expect(jobs.getJob(job.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  }, 60_000);
+
+  it('builds the live status list from stored connections, social accounts and trend watches', async () => {
+    const { getIntegrationStatuses } = await import('../src/lib/integrations');
+    const { getDb } = await import('../src/lib/db');
+    const { schema } = await import('@studio/db');
+    const before = await getIntegrationStatuses();
+    expect(before.find((s) => s.id === 'youtube_chart')).toMatchObject({ state: 'not_connected', connected: false, liveMode: 'read_only' });
+    expect(before.some((s) => s.id === 'spotify_reference')).toBe(true);
+    await getDb().insert(schema.trendWatches).values({ id: randomUUID(), provider: 'youtube_chart', query: 'AU', enabled: true, status: 'ok', lastSuccessAt: new Date('2026-11-13T19:05:00Z') });
+    const after = await getIntegrationStatuses();
+    expect(after.find((s) => s.id === 'youtube_chart')).toMatchObject({ state: 'connected', connected: true, detail: 'Last fetched 14 Nov 2026, 6:05 am.' });
+    expect(JSON.stringify(after)).not.toContain('placeholder-youtube-key');
   }, 60_000);
 });

@@ -1099,6 +1099,6 @@ Requests carried to later packages (each is in that package's Owns list):
   `instagram_hashtag`; add the hashtag card to `live-signals.tsx` and its entry to `trendSourceStatuses` /
   `buildTrendsIntegrations`. `trend_watches.social_account_id` already exists. `POST /api/trends/watches` with that
   provider returns 422 `UNSUPPORTED` until WP5 lands.
-- **Open (no package owns it yet; lead to schedule):** let `ConnectionFacts` carry trend-watch facts in
-  `getIntegrationStatuses`, so the `youtube_chart` card in Settings → Integrations shows the chart's real state
-  (`youTubeChartStatus(env, watches)` already accepts them).
+- **Done by the lead after G2 started:** `ConnectionFacts.trendWatches` (optional; `TrendWatchFact` now lives in
+  `apps/web/src/lib/integrations/types.ts`) is read by `getIntegrationStatuses`, so the `youtube_chart` card in the
+  shared list shows the chart's real state. **WP5:** use the same facts for the hashtag card.

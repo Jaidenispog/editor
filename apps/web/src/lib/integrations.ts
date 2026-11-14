@@ -50,13 +50,15 @@ export async function getIntegrationStatuses(): Promise<IntegrationStatus[]> {
   const env = getEnv();
   const db = getDb();
   const c = schema.integrationConnections;
-  const [connections, socialAccounts] = await Promise.all([
+  const w = schema.trendWatches;
+  const [connections, socialAccounts, trendWatches] = await Promise.all([
     db
       .select({ provider: c.provider, status: c.status, displayName: c.displayName, capabilities: c.capabilities, config: c.config, lastError: c.lastError, lastSyncAt: c.lastSyncAt })
       .from(c),
     db
       .select({ platform: schema.socialAccounts.platform, status: schema.socialAccounts.status, username: schema.socialAccounts.username, capabilities: schema.socialAccounts.capabilities })
       .from(schema.socialAccounts),
+    db.select({ provider: w.provider, enabled: w.enabled, status: w.status, statusMessage: w.statusMessage, lastSuccessAt: w.lastSuccessAt }).from(w),
   ]);
-  return buildIntegrationStatuses(env, { connections, socialAccounts });
+  return buildIntegrationStatuses(env, { connections, socialAccounts, trendWatches });
 }

@@ -1,5 +1,5 @@
 import type { Env } from '@studio/config';
-import type { ConnectionCapabilities } from '@studio/core';
+import type { ConnectionCapabilities, TrendWatchProvider, TrendWatchStatus } from '@studio/core';
 import type { IntegrationStatus } from '../shared/integration-types.js';
 
 /** Settings the Stage A cards read (always present in callers). */
@@ -71,10 +71,21 @@ export interface ConnectionFact {
   lastSyncAt?: Date | null;
 }
 
-/** Minimal connection facts read from integration_connections and social_accounts. */
+/** What a status card needs to know about a live trend source's watch (never any fetched content). */
+export interface TrendWatchFact {
+  provider: TrendWatchProvider;
+  enabled: boolean;
+  status: TrendWatchStatus;
+  statusMessage: string;
+  lastSuccessAt: Date | string | null;
+}
+
+/** Minimal connection facts read from integration_connections, social_accounts and trend_watches. */
 export interface ConnectionFacts {
   connections: ConnectionFact[];
   socialAccounts: Array<{ platform: string; status: string; username: string; capabilities?: Record<string, unknown> }>;
+  /** Trend watches, when the caller read them; absent means "not read" and cards fall back to settings only. */
+  trendWatches?: TrendWatchFact[];
 }
 
 /** Builds one module's status cards. Pure (no database or network access), so it is unit tested. */
