@@ -179,3 +179,27 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   Instagram or TikTok post pattern. Graph messages are shown as text.
 - **Media**: uploads stream from private storage to `rupload.facebook.com` (no public URL); owner downloads use
   expiring links. Deleting a project cancels its unsent posts and removes its `publishing/{postId}/` covers.
+
+## Square appointments (Stage C, WP6)
+
+- **Tokens**: Square access and refresh tokens live only in `integration_connections` (AES-256-GCM), decrypted in the
+  worker per call and in the callback for the single code exchange. Never in job payloads, `bookings.raw`, audit data,
+  logs or DTOs. `SQUARE_APPLICATION_SECRET` and `SQUARE_WEBHOOK_SIGNATURE_KEY` stay in the environment; the worker uses
+  the secret for refresh and revoke.
+- **Least privilege**: read scopes only (`APPOINTMENTS_READ`, `APPOINTMENTS_ALL_READ`,
+  `APPOINTMENTS_BUSINESS_SETTINGS_READ`, `CUSTOMERS_READ`, `ITEMS_READ`, `MERCHANT_PROFILE_READ`, `PAYMENTS_READ`,
+  `ORDERS_READ`). Write scopes are refused until booking changes exist (WP6b). Code flow, so the secret stays server-side.
+- **OAuth**: state bound to the owner's session in an encrypted, HttpOnly, SameSite=Lax 10-minute cookie on
+  `/api/integrations/square`; fixed redirect from `APP_URL`; the callback requires the owner and refuses a sign-in
+  that started in the other environment.
+- **Webhook endpoint (built)**: `POST /api/webhooks/square` checks `x-square-hmacsha256-signature` =
+  base64(HMAC-SHA256(key, notification URL + raw body)) with a timing-safe compare before parsing (body ≤ 256 KiB).
+  Invalid deliveries are refused and never stored; valid ones are stored once per event id. Payloads are hints only:
+  the worker ignores other merchants and re-reads every object from Square.
+- **Roles**: owner only for connect, disconnect, location, service confirmations and sync. Staff see bookings, client
+  names, services and free times, and may mark attendance; client email/phone and booking notes are owner-only.
+- **Personal data**: only names, email, phone, Square ids and the email opt-out are copied. Disconnect offers a purge;
+  switching environment or Square account purges automatically; customers are scrubbed, never deleted. No Square data
+  goes to an AI model. Square text (names, notes, error details) is rendered as text. Audit entries hold ids, codes and
+  the environment, never names, contact details, notes or tokens.
+

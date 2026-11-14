@@ -1,0 +1,378 @@
+import { SquareClient, SquareEnvironment, SquareError, SquareTimeoutError, type Square } from 'square';
+import { CancelledError, mapSquareError, noShowFeeFrom, type MatchPayment, type SquareBusinessProfileSnapshot, type SquareErrorEntry, type SquareErrorKind, type SquareServiceSnapshot } from '@studio/core';
+
+/**
+ * The narrow, read-only view of Square this module uses (design §7.2), so handlers never touch the SDK directly and
+ * tests can point the real SDK at a local fake server. Every call carries the run's AbortSignal, a 20 s time limit
+ * and no SDK retries (pg-boss owns retries). Booking changes are not part of this interface (WP6b).
+ */
+export interface SquareApi {
+  retrieveTokenStatus(): Promise<{ scopes: string[]; expiresAt: string | null; merchantId: string | null }>;
+  getMerchantName(merchantId: string): Promise<string>;
+  listLocations(): Promise<Array<{ id: string; name: string; timezone: string | null; status: string }>>;
+  getBusinessProfile(): Promise<SquareBusinessProfileSnapshot | null>;
+  listLocationProfiles(): Promise<Array<{ locationId: string; bookingSiteUrl: string | null }>>;
+  listTeamMemberProfiles(locationId: string | null): Promise<Array<{ id: string; displayName: string; isBookable: boolean }>>;
+  listServices(): Promise<SquareServiceSnapshot[]>;
+  listBookings(input: { locationId: string | null; startAtMin: string; startAtMax: string }): Promise<SquareBookingData[]>;
+  /** Null when Square answers NOT_FOUND. */
+  getBooking(bookingId: string): Promise<SquareBookingData | null>;
+  searchAvailability(filter: { startAt: string; endAt: string; locationId: string; serviceVariationId: string; teamMemberId: string | null }): Promise<SquareSlotData[]>;
+  listCustomers(): Promise<SquareCustomerData[]>;
+  searchCustomersUpdatedSince(sinceIso: string): Promise<SquareCustomerData[]>;
+  /** Null when Square answers NOT_FOUND (the customer was deleted). */
+  getCustomer(customerId: string): Promise<SquareCustomerData | null>;
+  bulkRetrieveCustomers(customerIds: string[]): Promise<SquareCustomerData[]>;
+  listPayments(input: { locationId: string; beginTime: string; endTime: string }): Promise<MatchPayment[]>;
+  getPayment(paymentId: string): Promise<MatchPayment | null>;
+  /** Order id → catalogue object ids of its line items. */
+  batchGetOrderLines(locationId: string, orderIds: string[]): Promise<Record<string, string[]>>;
+}
+
+/** One appointment segment of a booking. */
+export interface SquareSegmentData {
+  teamMemberId: string;
+  serviceVariationId: string | null;
+  serviceVariationVersion: string | null;
+  durationMinutes: number;
+  intermissionMinutes: number;
+}
+
+/** A Square booking, normalised (Square's int64 values become strings; `raw` is JSON-safe). */
+export interface SquareBookingData {
+  id: string;
+  version: number;
+  status: string;
+  startAt: string;
+  locationId: string;
+  customerId: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  segments: SquareSegmentData[];
+  raw: Record<string, unknown>;
+}
+
+/** A Square customer, normalised. */
+export interface SquareCustomerData {
+  id: string;
+  version: number | null;
+  givenName: string;
+  familyName: string;
+  email: string | null;
+  phone: string | null;
+  emailUnsubscribed: boolean | null;
+  updatedAt: string | null;
+}
+
+/** One free slot from SearchAvailability. */
+export interface SquareSlotData {
+  startAt: string;
+  locationId: string;
+  segments: SquareSegmentData[];
+}
+
+/** A Square failure mapped to what the module does about it (design §7.5). */
+export class SquareApiError extends Error {
+  constructor(
+    readonly kind: SquareErrorKind,
+    readonly code: string,
+    message: string,
+    readonly statusCode: number | null,
+    readonly errors: SquareErrorEntry[],
+  ) {
+    super(message);
+    this.name = 'SquareApiError';
+  }
+}
+
+/** Converts Square's SDK values (bigint, nested objects) to plain JSON. */
+export function toJsonSafe(value: unknown, depth = 0): unknown {
+  if (depth > 12) return null;
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return value.map((v) => toJsonSafe(v, depth + 1));
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) if (v !== undefined) out[k] = toJsonSafe(v, depth + 1);
+    return out;
+  }
+  return value;
+}
+
+const str = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
+const bigStr = (v: unknown): string | null => (typeof v === 'bigint' || typeof v === 'number' ? String(v) : typeof v === 'string' ? v : null);
+const money = (m: Square.Money | undefined | null): { amount: string; currency: string } | null =>
+  m && m.amount !== undefined && m.amount !== null ? { amount: String(m.amount), currency: String(m.currency ?? 'AUD') } : null;
+
+function segmentsOf(list: Square.AppointmentSegment[] | null | undefined): SquareSegmentData[] {
+  return (list ?? []).map((s) => ({
+    teamMemberId: s.teamMemberId,
+    serviceVariationId: str(s.serviceVariationId),
+    serviceVariationVersion: bigStr(s.serviceVariationVersion),
+    durationMinutes: typeof s.durationMinutes === 'number' ? s.durationMinutes : 0,
+    intermissionMinutes: typeof s.intermissionMinutes === 'number' ? s.intermissionMinutes : 0,
+  }));
+}
+
+/** Normalises an SDK booking; null when Square left out the fields every booking has. */
+export function bookingFromSdk(b: Square.Booking): SquareBookingData | null {
+  if (!b.id || !b.startAt || !b.status) return null;
+  return {
+    id: b.id,
+    version: typeof b.version === 'number' ? b.version : 0,
+    status: String(b.status),
+    startAt: b.startAt,
+    locationId: b.locationId ?? '',
+    customerId: str(b.customerId),
+    createdAt: str(b.createdAt),
+    updatedAt: str(b.updatedAt),
+    segments: segmentsOf(b.appointmentSegments),
+    raw: toJsonSafe(b) as Record<string, unknown>,
+  };
+}
+
+/** Normalises an SDK customer. */
+export function customerFromSdk(c: Square.Customer): SquareCustomerData | null {
+  if (!c.id) return null;
+  const version = typeof c.version === 'bigint' || typeof c.version === 'number' ? Number(c.version) : null;
+  return {
+    id: c.id,
+    version: version !== null && Number.isSafeInteger(version) && version <= 2_147_483_647 ? version : null,
+    givenName: c.givenName ?? '',
+    familyName: c.familyName ?? '',
+    email: str(c.emailAddress),
+    phone: str(c.phoneNumber),
+    emailUnsubscribed: typeof c.preferences?.emailUnsubscribed === 'boolean' ? c.preferences.emailUnsubscribed : null,
+    updatedAt: str(c.updatedAt),
+  };
+}
+
+/** Normalises an SDK payment for the matcher. */
+export function paymentFromSdk(p: Square.Payment): MatchPayment | null {
+  if (!p.id || !p.createdAt) return null;
+  return {
+    id: p.id,
+    status: p.status ?? '',
+    locationId: str(p.locationId),
+    customerId: str(p.customerId),
+    teamMemberId: str(p.teamMemberId),
+    orderId: str(p.orderId),
+    createdAt: new Date(p.createdAt),
+    squareProduct: str(p.applicationDetails?.squareProduct),
+    totalAmount: money(p.totalMoney)?.amount ?? null,
+    refundedAmount: money(p.refundedMoney)?.amount ?? null,
+  };
+}
+
+/** Flattens APPOINTMENTS_SERVICE items into one entry per variation. */
+export function servicesFromSdk(items: Square.CatalogObject[]): SquareServiceSnapshot[] {
+  const out: SquareServiceSnapshot[] = [];
+  for (const item of items) {
+    if (item.type !== 'ITEM' || !item.id) continue;
+    const data = item.itemData;
+    for (const v of data?.variations ?? []) {
+      if (v.type !== 'ITEM_VARIATION' || !v.id) continue;
+      const vd = v.itemVariationData;
+      const durationMs = vd?.serviceDuration !== undefined && vd?.serviceDuration !== null ? Number(vd.serviceDuration) : null;
+      out.push({
+        itemId: item.id,
+        itemName: data?.name ?? '',
+        variationId: v.id,
+        variationName: vd?.name ?? '',
+        version: bigStr(v.version) ?? '0',
+        durationMinutes: durationMs !== null && Number.isFinite(durationMs) ? Math.round(durationMs / 60_000) : null,
+        price: money(vd?.priceMoney),
+        availableForBooking: vd?.availableForBooking === true,
+        teamMemberIds: vd?.teamMemberIds ?? [],
+        archived: data?.isArchived === true || v.isDeleted === true || item.isDeleted === true,
+        noShowFeeSeen: noShowFeeFrom(vd as Record<string, unknown> | undefined),
+      });
+    }
+  }
+  return out;
+}
+
+function profileFromSdk(p: Square.BusinessBookingProfile | undefined): SquareBusinessProfileSnapshot | null {
+  if (!p) return null;
+  const s = p.businessAppointmentSettings;
+  return {
+    bookingEnabled: p.bookingEnabled ?? null,
+    bookingPolicy: p.bookingPolicy ? String(p.bookingPolicy) : null,
+    allowUserCancel: p.allowUserCancel ?? null,
+    supportSellerLevelWrites: p.supportSellerLevelWrites === true,
+    cancellationWindowSeconds: s?.cancellationWindowSeconds ?? null,
+    cancellationFee: money(s?.cancellationFeeMoney),
+    cancellationPolicy: s?.cancellationPolicy ? String(s.cancellationPolicy) : null,
+    minLeadSeconds: s?.minBookingLeadTimeSeconds ?? null,
+    maxLeadSeconds: s?.maxBookingLeadTimeSeconds ?? null,
+  };
+}
+
+/** Maps anything a Square call threw to a {@link SquareApiError} (cancellation passes through unchanged). */
+export function toSquareApiError(err: unknown, op: 'read' | 'write' = 'read'): Error {
+  if (err instanceof SquareApiError || err instanceof CancelledError) return err;
+  if (err instanceof SquareError) {
+    const errors = (err.errors ?? []).map((e) => ({ category: String(e.category), code: String(e.code), ...(e.detail ? { detail: e.detail } : {}) }));
+    const mapped = mapSquareError({ statusCode: err.statusCode ?? null, errors }, op);
+    return new SquareApiError(mapped.kind, mapped.code, mapped.message, err.statusCode ?? null, errors);
+  }
+  if (err instanceof SquareTimeoutError) return new SquareApiError('transient', 'TIMEOUT', 'Square didn’t answer in time. Trying again shortly.', null, []);
+  const mapped = mapSquareError({ statusCode: null, errors: null }, op);
+  return new SquareApiError(mapped.kind, mapped.code, mapped.message, null, []);
+}
+
+/** Options for {@link createSdkSquareApi}. */
+export interface SdkSquareApiOptions {
+  token: string;
+  environment: 'sandbox' | 'production';
+  /** Test-only base URL of a local fake (null in every real deployment). */
+  baseUrl: string | null;
+  signal: AbortSignal;
+  fetch?: typeof fetch | undefined;
+}
+
+/** The {@link SquareApi} backed by the official `square@46.0.0` SDK. */
+export function createSdkSquareApi(options: SdkSquareApiOptions): SquareApi {
+  const client = new SquareClient({
+    token: options.token,
+    environment: options.environment === 'production' ? SquareEnvironment.Production : SquareEnvironment.Sandbox,
+    ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    timeoutInSeconds: 20,
+    // pg-boss owns retries (the SDK's default is 2).
+    maxRetries: 0,
+  });
+  const ro = { abortSignal: options.signal, maxRetries: 0, timeoutInSeconds: 20 };
+  const call = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (options.signal.aborted) throw options.signal.reason instanceof Error ? options.signal.reason : new CancelledError();
+    try {
+      return await fn();
+    } catch (err) {
+      if (options.signal.aborted) throw options.signal.reason instanceof Error ? options.signal.reason : new CancelledError();
+      throw toSquareApiError(err);
+    }
+  };
+  const orNull = async <T>(fn: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await call(fn);
+    } catch (err) {
+      if (err instanceof SquareApiError && err.kind === 'not_found') return null;
+      throw err;
+    }
+  };
+  const all = async <T>(page: Promise<AsyncIterable<T>>): Promise<T[]> => {
+    const out: T[] = [];
+    for await (const item of await page) out.push(item);
+    return out;
+  };
+
+  return {
+    retrieveTokenStatus: () =>
+      call(async () => {
+        const r = await client.oAuth.retrieveTokenStatus(ro);
+        return { scopes: r.scopes ?? [], expiresAt: r.expiresAt ?? null, merchantId: r.merchantId ?? null };
+      }),
+    getMerchantName: (merchantId) => call(async () => (await client.merchants.get({ merchantId }, ro)).merchant?.businessName ?? ''),
+    listLocations: () =>
+      call(async () =>
+        ((await client.locations.list(ro)).locations ?? [])
+          .filter((l) => l.id)
+          .map((l) => ({ id: l.id as string, name: l.name ?? '', timezone: l.timezone ?? null, status: String(l.status ?? 'ACTIVE') })),
+      ),
+    getBusinessProfile: () => call(async () => profileFromSdk((await client.bookings.getBusinessProfile(ro)).businessBookingProfile)),
+    listLocationProfiles: () =>
+      call(async () =>
+        (await all(client.bookings.locationProfiles.list({}, ro))).filter((p) => p.locationId).map((p) => ({ locationId: p.locationId as string, bookingSiteUrl: p.bookingSiteUrl ?? null })),
+      ),
+    listTeamMemberProfiles: (locationId) =>
+      call(async () =>
+        (await all(client.bookings.teamMemberProfiles.list({ bookableOnly: false, ...(locationId ? { locationId } : {}) }, ro)))
+          .filter((t) => t.teamMemberId)
+          .map((t) => ({ id: t.teamMemberId as string, displayName: t.displayName ?? '', isBookable: t.isBookable === true })),
+      ),
+    listServices: () =>
+      call(async () => {
+        const items: Square.CatalogObject[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < 20; page++) {
+          const r = await client.catalog.searchItems({ productTypes: ['APPOINTMENTS_SERVICE'], archivedState: 'ARCHIVED_STATE_NOT_ARCHIVED', ...(cursor ? { cursor } : {}) }, ro);
+          items.push(...(r.items ?? []));
+          cursor = r.cursor;
+          if (!cursor) break;
+        }
+        return servicesFromSdk(items);
+      }),
+    listBookings: ({ locationId, startAtMin, startAtMax }) =>
+      call(async () =>
+        (await all(client.bookings.list({ startAtMin, startAtMax, limit: 100, ...(locationId ? { locationId } : {}) }, ro)))
+          .map(bookingFromSdk)
+          .filter((b): b is SquareBookingData => b !== null),
+      ),
+    getBooking: (bookingId) =>
+      orNull(async () => {
+        const b = (await client.bookings.get({ bookingId }, ro)).booking;
+        return b ? bookingFromSdk(b) : null;
+      }),
+    searchAvailability: (f) =>
+      call(async () => {
+        const r = await client.bookings.searchAvailability(
+          {
+            query: {
+              filter: {
+                startAtRange: { startAt: f.startAt, endAt: f.endAt },
+                locationId: f.locationId,
+                segmentFilters: [{ serviceVariationId: f.serviceVariationId, ...(f.teamMemberId ? { teamMemberIdFilter: { any: [f.teamMemberId] } } : {}) }],
+              },
+            },
+          },
+          ro,
+        );
+        return (r.availabilities ?? []).filter((a) => a.startAt).map((a) => ({ startAt: a.startAt as string, locationId: a.locationId ?? f.locationId, segments: segmentsOf(a.appointmentSegments) }));
+      }),
+    listCustomers: () => call(async () => (await all(client.customers.list({ limit: 100 }, ro))).map(customerFromSdk).filter((c): c is SquareCustomerData => c !== null)),
+    searchCustomersUpdatedSince: (sinceIso) =>
+      call(async () => {
+        const out: SquareCustomerData[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < 50; page++) {
+          const r = await client.customers.search({ limit: 100n, query: { filter: { updatedAt: { startAt: sinceIso } } }, ...(cursor ? { cursor } : {}) }, ro);
+          out.push(...(r.customers ?? []).map(customerFromSdk).filter((c): c is SquareCustomerData => c !== null));
+          cursor = r.cursor;
+          if (!cursor) break;
+        }
+        return out;
+      }),
+    getCustomer: (customerId) =>
+      orNull(async () => {
+        const c = (await client.customers.get({ customerId }, ro)).customer;
+        return c ? customerFromSdk(c) : null;
+      }),
+    bulkRetrieveCustomers: (customerIds) =>
+      call(async () => {
+        const out: SquareCustomerData[] = [];
+        for (let i = 0; i < customerIds.length; i += 100) {
+          const r = await client.customers.bulkRetrieveCustomers({ customerIds: customerIds.slice(i, i + 100) }, ro);
+          for (const res of Object.values(r.responses ?? {})) {
+            const c = res.customer ? customerFromSdk(res.customer) : null;
+            if (c) out.push(c);
+          }
+        }
+        return out;
+      }),
+    listPayments: ({ locationId, beginTime, endTime }) =>
+      call(async () => (await all(client.payments.list({ locationId, beginTime, endTime, sortOrder: 'ASC', limit: 100 }, ro))).map(paymentFromSdk).filter((p): p is MatchPayment => p !== null)),
+    getPayment: (paymentId) =>
+      orNull(async () => {
+        const p = (await client.payments.get({ paymentId }, ro)).payment;
+        return p ? paymentFromSdk(p) : null;
+      }),
+    batchGetOrderLines: (locationId, orderIds) =>
+      call(async () => {
+        const out: Record<string, string[]> = {};
+        for (let i = 0; i < orderIds.length; i += 100) {
+          const r = await client.orders.batchGet({ locationId, orderIds: orderIds.slice(i, i + 100) }, ro);
+          for (const o of r.orders ?? []) if (o.id) out[o.id] = (o.lineItems ?? []).map((l) => l.catalogObjectId ?? '').filter(Boolean);
+        }
+        return out;
+      }),
+  };
+}

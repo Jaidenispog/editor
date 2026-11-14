@@ -612,6 +612,11 @@ export const customers = pgTable(
      * module treats `true` as a block on marketing email and records its own consent-ledger event.
      */
     squareEmailUnsubscribed: boolean('square_email_unsubscribed'),
+    /** Square environment the row was copied from (null for customers other modules created locally). */
+    squareEnvironment: text('square_environment'),
+    /** Square's customer `version` at the last copy (newer copies only overwrite older ones). */
+    squareVersion: integer('square_version'),
+    squareSyncedAt: timestamp('square_synced_at', { withTimezone: true }),
     notes: text('notes').notNull().default(''),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     ...timestamps,
@@ -638,9 +643,33 @@ export const bookings = pgTable(
     completedAt: timestamp('completed_at', { withTimezone: true }),
     raw: jsonb('raw').$type<Record<string, unknown>>().notNull().default({}),
     syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Square environment the booking was copied from; switching environment purges the other one's rows. */
+    squareEnvironment: text('square_environment').notNull().default('sandbox'),
+    /** Square's customer id, kept even before the customer row is mirrored. */
+    squareCustomerId: text('square_customer_id'),
+    /** Start plus the sum of the segment durations. */
+    endAt: timestamp('end_at', { withTimezone: true }),
+    squareUpdatedAt: timestamp('square_updated_at', { withTimezone: true }),
+    /** Studio Assistant's attendance view (an estimate unless the owner marked it); see `deriveAttendance` in @studio/core. */
+    attendance: text('attendance').notNull().default('upcoming'),
+    /** The payment evidence behind the estimate: payment id, score, signals, confidence (never card details). */
+    attendanceEvidence: jsonb('attendance_evidence').$type<Record<string, unknown>>().notNull().default({}),
+    /** The owner's or a barber's own mark: `attended` / `not_attended` (wins over the estimate, not over Square). */
+    ownerAttendance: text('owner_attendance', { enum: ['attended', 'not_attended'] }),
+    ownerAttendanceBy: text('owner_attendance_by').references(() => users.id, { onDelete: 'set null' }),
+    ownerAttendanceAt: timestamp('owner_attendance_at', { withTimezone: true }),
+    /** Square answered NOT_FOUND for this booking during a reconcile. */
+    missingFromSquareAt: timestamp('missing_from_square_at', { withTimezone: true }),
     ...timestamps,
   },
-  (t) => [uniqueIndex('bookings_square_idx').on(t.squareBookingId), index('bookings_start_idx').on(t.startAt), index('bookings_customer_idx').on(t.customerId)],
+  (t) => [
+    uniqueIndex('bookings_square_idx').on(t.squareBookingId),
+    index('bookings_start_idx').on(t.startAt),
+    index('bookings_customer_idx').on(t.customerId),
+    index('bookings_end_idx').on(t.endAt),
+    index('bookings_attendance_idx').on(t.attendance, t.endAt),
+    index('bookings_env_start_idx').on(t.squareEnvironment, t.startAt),
+  ],
 );
 
 export const webhookEvents = pgTable(

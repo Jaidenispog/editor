@@ -28,6 +28,7 @@ Australian English, AUD, `Australia/Melbourne`.
 | Publishing: composer, "Post it yourself", Instagram direct (WP4) | Yes | Yes, against a local fake of Meta (Stage B browser test and worker tests); no real post made | Meta business app, configuration and the first real verification post |
 | Trends: curated (sourced, dated), noted by staff, YouTube AU chart; no "trending" claims | Yes (WP3) | Unit and database tests with a fake YouTube API; curated and noted labels in the Stage B browser test | `YOUTUBE_API_KEY` for the chart (optional) |
 | Instagram hashtag watch (WP5) | Yes | Yes, against the fake of Meta (unit, database and Stage B browser tests) | A connected Instagram account and Meta's hashtag search permission |
+| Square appointments, read-only: bookings, clients, services, free times, attendance estimate and marks (WP6) | Yes | Yes, against a local fake of Square through the real SDK (unit, database and route tests); nothing written to Square | A Square developer application (sandbox first), then the live account |
 | TikTok direct, Square, email, Google reviews, website tools (Stage C) | TikTok: manual posting only; the rest "Needs setup" screens | — | TikTok (optional Zernio route), Square, Resend, Google accounts |
 
 **Not yet done:**

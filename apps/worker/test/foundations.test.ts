@@ -24,7 +24,7 @@ describe('handler registry', () => {
   it('refuses to start when a registered type has no handler', () => {
     const withoutCleanup = coreHandlers(1).filter((h) => h.type !== 'maintenance.cleanup');
     expect(() => assertHandlersCoverJobTypes(withoutCleanup)).toThrow(/No handler registered for: maintenance.cleanup/);
-    expect(() => assertHandlersCoverJobTypes(allHandlers(1), [...ALL_JOB_TYPES, 'square.sync'])).toThrow(/No handler registered for: square.sync/);
+    expect(() => assertHandlersCoverJobTypes(allHandlers(1), [...ALL_JOB_TYPES, 'example.unhandled' as never])).toThrow(/No handler registered for: example.unhandled/);
   });
 
   it('refuses duplicate handlers and handlers for unknown types', () => {
@@ -53,7 +53,7 @@ describe('handler registry', () => {
     expect(webhookHandlerFor('square', [m])).toBe(handler);
     expect(webhookHandlerFor('postmark', [m])).toBeNull();
     expect(webhookHandlerFor('toString', [m])).toBeNull();
-    expect(webhookHandlerFor('square')).toBeNull();
+    expect(webhookHandlerFor('example')).toBeNull();
   });
 
   it('runs every export-ready hook even when one fails', async () => {
