@@ -15,6 +15,13 @@
       "when": 1794639895727,
       "tag": "0001_foundations",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794641251307,
+      "tag": "0002_music",
+      "breakpoints": true
     }
   ]
 }

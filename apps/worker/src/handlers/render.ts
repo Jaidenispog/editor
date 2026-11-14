@@ -1,7 +1,21 @@
 import path from 'node:path';
-import { and, eq, inArray } from 'drizzle-orm';
-import { AppError, CancelledError, VERTICAL_1080, VERTICAL_PREVIEW, type AssetProbe } from '@studio/core';
-import { schema } from '@studio/db';
+import { and, eq, inArray, sql } from 'drizzle-orm';
+import {
+  AppError,
+  CancelledError,
+  VERTICAL_1080,
+  VERTICAL_PREVIEW,
+  missingTrackClearance,
+  musicClearanceFor,
+  newId,
+  normaliseLicence,
+  withoutMusic,
+  type AssetProbe,
+  type EditPlan,
+  type ExportVariant,
+  type MusicClearance,
+} from '@studio/core';
+import { schema, type VariantExportState } from '@studio/db';
 import { storageKeys } from '@studio/storage';
 import { probeMedia, renderEditPlan } from '@studio/media';
 import type { WorkerContext } from '../context.js';
@@ -9,25 +23,86 @@ import { INTERRUPTED_MESSAGE, friendlyFailure, stopOutcome, type TrackedRun } fr
 import { createJobTempDir, removeTempDir } from '../lib/temp.js';
 import { loadSettings } from '../lib/plan-context.js';
 import { runExportReadyHooks } from '../modules/index.js';
+import { writeWorkerAudit } from '../lib/audit.js';
+
+/** The plain message an export blocked by its music licence shows on the card. */
+export function musicBlockedMessage(clearance: MusicClearance): string {
+  const reason = (clearance.reasons[0] ?? 'the licence could not be checked.').replace(/\.$/, '');
+  return `This version's music isn't cleared for business use: ${reason}. Make a music-free version, or confirm the licence in Settings → Music.`;
+}
+
+/**
+ * Checks the music of a plan against its track's current licence (the worker's second check after the export
+ * route's). No music → `no_music`; a removed track → blocked.
+ */
+export async function clearanceForPlan(ctx: WorkerContext, plan: EditPlan): Promise<{ clearance: MusicClearance; track: typeof schema.musicTracks.$inferSelect | null }> {
+  if (!plan.audio.music) return { clearance: musicClearanceFor(null), track: null };
+  const track = await ctx.db.query.musicTracks.findFirst({ where: eq(schema.musicTracks.id, plan.audio.music.trackId) });
+  if (!track || track.deletedAt) return { clearance: missingTrackClearance(), track: null };
+  return { clearance: musicClearanceFor(track.licence), track };
+}
+
+/** Merges one variant's state into `edit_versions.variant_exports` without touching other variants. */
+async function setVariantState(ctx: WorkerContext, versionId: string, variant: Exclude<ExportVariant, 'standard'>, state: Omit<VariantExportState, 'updatedAt'>): Promise<void> {
+  const value = JSON.stringify({ [variant]: { ...state, updatedAt: new Date().toISOString() } });
+  await ctx.db
+    .update(schema.editVersions)
+    .set({ variantExports: sql`${schema.editVersions.variantExports} || ${value}::jsonb`, updatedAt: new Date() })
+    .where(eq(schema.editVersions.id, versionId));
+}
 
 /**
  * Renders one edit version. Previews use the small SDR proxies (fast); exports use the originals at 1080×1920.
- * Idempotent: the storage key for a version is fixed, so a retry simply overwrites the earlier file.
+ * Exports come in two variants: `standard` (as planned; its music must be cleared by its licence, and a usage-ledger
+ * row is written once it is stored) and `no_music` (the same cuts, text and colour with the music removed, stored next
+ * to the standard file; it needs no clearance and writes no ledger row).
+ * Idempotent: the storage key for a version and variant is fixed, so a retry simply overwrites the earlier file.
  */
-export async function handleRender(ctx: WorkerContext, run: TrackedRun, payload: { editVersionId: string; projectId: string }, quality: 'preview' | 'export'): Promise<void> {
+export async function handleRender(
+  ctx: WorkerContext,
+  run: TrackedRun,
+  payload: { editVersionId: string; projectId: string; variant?: ExportVariant | undefined },
+  quality: 'preview' | 'export',
+): Promise<void> {
+  const variant: ExportVariant = quality === 'export' ? (payload.variant ?? 'standard') : 'standard';
   const version = await ctx.db.query.editVersions.findFirst({ where: eq(schema.editVersions.id, payload.editVersionId) });
   if (!version) throw new AppError('NOT_FOUND', 'This version no longer exists');
   if (!version.plan) throw new AppError('PROCESSING_FAILED', 'This version has no edit plan to render');
   const edit = await ctx.db.query.edits.findFirst({ where: eq(schema.edits.id, version.editId) });
   if (!edit) throw new AppError('NOT_FOUND', 'The edit no longer exists');
   const settings = await loadSettings(ctx);
-  const plan = version.plan;
+  const plan = variant === 'no_music' ? withoutMusic(version.plan) : version.plan;
 
   const setVersion = (values: Partial<typeof schema.editVersions.$inferInsert>) =>
     ctx.db.update(schema.editVersions).set({ ...values, updatedAt: new Date() }).where(eq(schema.editVersions.id, version.id));
+  /** Export progress of this variant: the standard columns, or the variant's entry in `variant_exports`. */
+  const setExport = async (status: 'none' | 'rendering' | 'ready' | 'failed', message: string, file?: { key: string; byteSize: number }) => {
+    if (variant === 'standard') {
+      await setVersion({ exportStatus: status, exportMessage: message, ...(file ? { exportKey: file.key, exportByteSize: file.byteSize } : {}) });
+    } else {
+      await setVariantState(ctx, version.id, variant, { status: status === 'none' ? 'failed' : status, key: file?.key ?? null, byteSize: file?.byteSize ?? null, message });
+    }
+  };
+
+  // Defence in depth: the export route already refused music the licence does not clear, but the licence may have
+  // changed since. A blocked export is the owner's to fix, not a fault to retry, so it ends here without a retry.
+  let clearance: MusicClearance | null = null;
+  let licencedTrack: Awaited<ReturnType<typeof clearanceForPlan>>['track'] = null;
+  if (quality === 'export' && variant === 'standard') {
+    const checked = await clearanceForPlan(ctx, plan);
+    clearance = checked.clearance;
+    licencedTrack = checked.track;
+    if (clearance.state === 'blocked') {
+      const message = musicBlockedMessage(clearance);
+      await setVersion({ exportStatus: 'failed', exportMessage: message });
+      await writeWorkerAudit(ctx.db, { userId: null, action: 'music.export_blocked', entityType: 'edit_version', entityId: version.id, data: { reasons: clearance.reasons } }, ctx.logger);
+      await run.progress(1, message);
+      return;
+    }
+  }
 
   if (quality === 'preview') await setVersion({ status: 'rendering_preview', statusMessage: 'Rendering preview' });
-  else await setVersion({ exportStatus: 'rendering', exportMessage: 'Rendering full-quality video' });
+  else await setExport('rendering', variant === 'no_music' ? 'Rendering the music-free version' : 'Rendering full-quality video');
 
   const tmp = await createJobTempDir(ctx.tmpRoot, run.jobId);
   try {
@@ -88,29 +163,43 @@ export async function handleRender(ctx: WorkerContext, run: TrackedRun, payload:
     );
     run.checkCancelled();
     await run.progress(0.92, 'Saving');
-    const key = quality === 'preview' ? storageKeys.editPreview(payload.projectId, edit.id, version.versionNo) : storageKeys.editExport(payload.projectId, edit.id, version.versionNo);
+    const key =
+      quality === 'preview'
+        ? storageKeys.editPreview(payload.projectId, edit.id, version.versionNo)
+        : variant === 'no_music'
+          ? storageKeys.editExportVariant(payload.projectId, edit.id, version.versionNo, 'no_music')
+          : storageKeys.editExport(payload.projectId, edit.id, version.versionNo);
     await ctx.store.putFile(key, outputPath, { contentType: 'video/mp4' });
     if (quality === 'preview') {
       await setVersion({ status: 'preview_ready', statusMessage: 'Preview ready', previewKey: key, previewDurationSec: result.durationSec });
       await refreshGenerationStatus(ctx, edit.generationId, payload.projectId);
     } else {
-      await setVersion({ exportStatus: 'ready', exportMessage: 'Ready to download', exportKey: key, exportByteSize: result.byteSize });
-      await runExportReadyHooks(ctx, { editVersionId: version.id, editId: edit.id, projectId: payload.projectId, variant: 'standard', storageKey: key, byteSize: result.byteSize });
+      await setExport('ready', 'Ready to download', { key, byteSize: result.byteSize });
+      if (clearance && licencedTrack && clearance.state !== 'no_music') {
+        // Usage ledger (memo §2): one row per version for its export, with the licence as it was. A second export
+        // of the same version adds nothing.
+        await ctx.db
+          .insert(schema.musicUsage)
+          .values({ id: newId(), trackId: licencedTrack.id, editVersionId: version.id, purpose: 'export', platform: '', licenceSnapshot: normaliseLicence(licencedTrack.licence), clearance })
+          .onConflictDoNothing();
+      }
+      await runExportReadyHooks(ctx, { editVersionId: version.id, editId: edit.id, projectId: payload.projectId, variant, storageKey: key, byteSize: result.byteSize });
     }
     await run.progress(1, quality === 'preview' ? 'Preview ready' : 'Export ready');
   } catch (err) {
     const outcome = err instanceof CancelledError ? await stopOutcome(run) : null;
     if (outcome === 'cancelled') {
       if (quality === 'preview') await setVersion({ status: 'cancelled', statusMessage: 'Preview cancelled' });
-      else await setVersion({ exportStatus: 'none', exportMessage: 'Export cancelled' });
+      else await setExport('none', 'Export cancelled');
     } else if (outcome === 'resume') {
       // The queue renders this version again after a worker restart or time limit.
       if (quality === 'preview') await setVersion({ statusMessage: INTERRUPTED_MESSAGE });
-      else await setVersion({ exportMessage: INTERRUPTED_MESSAGE });
+      else if (variant === 'standard') await setVersion({ exportMessage: INTERRUPTED_MESSAGE });
+      else await setExport('rendering', INTERRUPTED_MESSAGE);
     } else {
       const message = friendlyFailure(err);
       if (quality === 'preview') await setVersion({ status: 'failed', statusMessage: message });
-      else await setVersion({ exportStatus: 'failed', exportMessage: message });
+      else await setExport('failed', message);
       if (quality === 'preview') await refreshGenerationStatus(ctx, edit.generationId, payload.projectId);
     }
     throw err;

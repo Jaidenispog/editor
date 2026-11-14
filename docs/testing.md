@@ -141,3 +141,16 @@ seeing it work.
 Record the phone model, iOS version, camera settings (resolution, frame rate, HDR on or off), clip lengths and
 any problems seen. Synthetic-footage results go in the "Verified with synthetic footage" column of the README.
 This checklist is the only evidence for "Verified with real footage".
+
+## Music controls and licence passport (Stage B, WP1)
+
+- Unit: `packages/core/test/{music-clearance,audio-patch,music-ranking,spotify-link,revision-music}.test.ts`,
+  `packages/ai/test/rules-music-options.test.ts` (beat sync off, reveal on a beat within ±0.25 s, AI prompt fields),
+  `apps/web/test/music.test.ts` (status cards, Spotify embed rules, request schemas, Sound panel patch, import guard).
+- Database + ffmpeg (`TEST_DATABASE_URL`): `apps/worker/test/music-db.test.ts` (fast-path and re-cut revisions,
+  `no_music` export without a music stream, blocked export without retry, one `music_usage` row, no Spotify data in the
+  planner input) and `apps/web/test/music-routes.integration.test.ts` (CC BY-NC refused, Meta lock, owner-only
+  licence changes, export 409 and the music-free variant, Sound panel routing, Spotify references and the embed switch).
+  Both run with `pnpm -r test` when `TEST_DATABASE_URL` is set.
+- Only with the owner's real accounts: whether the library plan covers organic posts, website and boosts (written
+  confirmation); how the Sound panel feels on real tracks.

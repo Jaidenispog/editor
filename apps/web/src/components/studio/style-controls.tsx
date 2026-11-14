@@ -1,8 +1,8 @@
 'use client';
 
 import { Music, Sparkles } from 'lucide-react';
-import { useId, useMemo, useState } from 'react';
-import type { StyleId } from '@studio/core';
+import { useEffect, useId, useMemo, useState } from 'react';
+import { LICENCE_STATE_LABELS, licenceStateOf, type StyleId } from '@studio/core';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { Select, Textarea } from '@/components/ui/field';
@@ -10,10 +10,65 @@ import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
 import { formatSeconds } from '@/lib/format';
 import { cn } from '@/lib/shared/cn';
-import type { StudioStatusDto } from '@/lib/shared/studio-dto';
+import type { MusicSuggestionsDto, StudioStatusDto } from '@/lib/shared/studio-dto';
 import { latestMusicStart } from '@/lib/shared/music-curve';
 import { MusicStartPicker } from './music-start-picker';
 import { MusicUploadDialog, type MusicUploadRequest } from './music-upload-dialog';
+
+/**
+ * "Suggested for you": up to three of the owner's own tracks that match their music taste, with the reasons. Only a
+ * suggestion: nothing is chosen until the owner picks it, and "No music" stays a choice.
+ */
+function MusicSuggestions({ durationSec, styleId, titles, chosen, onPick }: { durationSec: number; styleId: StyleId | null; titles: ReadonlyMap<string, string>; chosen: string; onPick: (id: string) => void }) {
+  const trackCount = titles.size;
+  const [data, setData] = useState<MusicSuggestionsDto | null>(null);
+  useEffect(() => {
+    if (trackCount === 0) return;
+    let alive = true;
+    const q = new URLSearchParams({ durationSec: String(durationSec), ...(styleId ? { styleId } : {}) });
+    const timer = setTimeout(() => {
+      apiRequest<MusicSuggestionsDto>(`/api/music/suggestions?${q.toString()}`)
+        .then((d) => alive && setData(d))
+        .catch(() => alive && setData(null));
+    }, 300);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [durationSec, styleId, trackCount]);
+  const top = (data?.tracks ?? []).filter((t) => t.rank !== null);
+  if (top.length === 0 && !(data?.notes.length)) return null;
+  return (
+    <div className="space-y-1.5 rounded-lg bg-charcoal-50 p-3">
+      {top.length ? <p className="text-xs font-medium text-charcoal-700">Suggested for you</p> : null}
+      {top.length ? (
+        <ul className="space-y-1.5">
+          {top.map((t) => (
+            <li key={t.id}>
+              <button
+                type="button"
+                onClick={() => onPick(t.id)}
+                aria-pressed={chosen === t.id}
+                className={cn(
+                  'flex min-h-11 w-full flex-col items-start rounded-md border bg-white px-3 py-1.5 text-left text-sm',
+                  chosen === t.id ? 'border-charcoal-900' : 'border-charcoal-200 hover:border-charcoal-400',
+                )}
+              >
+                <span className="font-medium text-charcoal-900">{titles.get(t.id) ?? 'Track'}</span>
+                <span className="text-xs text-charcoal-600">{t.reasons.join(' · ')}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {data?.notes.map((n) => (
+        <p key={n} className="text-xs text-charcoal-600">
+          {n}
+        </p>
+      ))}
+    </div>
+  );
+}
 
 const SOUND_OPTIONS = [
   { value: 'auto', label: 'Automatic: keep talking, drop clipper noise' },
@@ -72,6 +127,7 @@ export function StyleControls({
   // The chosen start always leaves room for the whole edit, even after the length slider moves.
   const effectiveMusicStart = musicChoice && musicStartSec !== null && latestMusicStart(musicChoice.durationSec, durationSec) > 0 ? Math.min(musicStartSec, latestMusicStart(musicChoice.durationSec, durationSec)) : null;
 
+  const titles = useMemo(() => new Map(status.music.map((m) => [m.id, m.artist ? `${m.title} – ${m.artist}` : m.title])), [status.music]);
   const musicOptions = useMemo(
     () => [
       { value: '', label: 'No music (original sound only)' },
@@ -197,6 +253,22 @@ export function StyleControls({
             <Button variant="secondary" size="sm" onClick={() => setMusicOpen(true)}>
               <Music className="size-4" aria-hidden="true" /> Upload licensed track
             </Button>
+            {musicChoice ? (
+              <p className="text-xs text-charcoal-600">
+                {LICENCE_STATE_LABELS[licenceStateOf(musicChoice.licence)]}
+                {licenceStateOf(musicChoice.licence) === 'meta_only' ? ': videos with this track are for Instagram and Facebook only.' : '.'}
+              </p>
+            ) : null}
+            <MusicSuggestions
+              durationSec={durationSec}
+              styleId={chosen.length === 1 ? (chosen[0]?.id ?? null) : null}
+              titles={titles}
+              chosen={musicTrackId}
+              onPick={(id) => {
+                setMusicTrackId(id);
+                setMusicStartSec(null);
+              }}
+            />
             {musicChoice && musicChoice.status === 'ready' ? <MusicStartPicker track={musicChoice} editSec={durationSec} value={effectiveMusicStart} onChange={setMusicStartSec} /> : null}
           </div>
           <div className="space-y-4">

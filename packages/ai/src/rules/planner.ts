@@ -17,7 +17,7 @@ import {
 import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '../types.js';
 import { fitDuration, play, startTimes, totalDuration, grow, shrink, type Draft } from './draft.js';
 import { collectFootage, type Candidate, type Footage } from './footage.js';
-import { alignedCuts, beatGrid, type BeatGrid } from './music.js';
+import { alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
 import { clamp, hashString, round, seededRandom } from './random.js';
 import { effectiveSettings, tameTransition, type EffectiveSettings } from './settings.js';
 import { STYLE_BUILDERS, applyOpening, type BuildContext, type Recipe } from './styles.js';
@@ -124,7 +124,13 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   };
   const needsGrid = input.styleId === 'beat_montage' || Boolean(input.music && s.musicOn);
   const preferStart = previous?.audio.music?.startOffsetSec;
-  const grid = needsGrid ? beatGrid(s.musicOn ? input.music : null, s.target, s.attempt, preferStart, input.musicStartSec ?? null) : null;
+  const fullGrid = needsGrid ? beatGrid(s.musicOn ? input.music : null, s.target, s.attempt, preferStart, input.musicStartSec ?? null) : null;
+  const beatMode = beatSyncFor(input, s);
+  // "Cut to the beat: Off" keeps natural shot lengths: the builders get no grid, but the music still starts on a beat.
+  // The beat montage is cut on the beat by definition, so it keeps its grid.
+  const beatsOff = beatMode === 'off' && input.styleId !== 'beat_montage';
+  const grid = beatsOff ? null : fullGrid;
+  if (beatsOff && fullGrid?.fromMusic) s.notes.push('Shot lengths follow the footage rather than the beat, as asked.');
   const ctx: BuildContext = {
     input,
     s,
@@ -170,6 +176,11 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     });
   if (!recipe.exact) fit();
   recipe.finish(drafts);
+  if (grid?.fromMusic && !recipe.exact && beatMode === 'on' && snapCutsToBeats(drafts, grid) > 0) ctx.notes.push('Cuts are nudged onto the beat of the music where the footage allows.');
+  if (grid?.fromMusic && input.revealOnBeat) {
+    if (landRevealOnBeat(drafts, grid)) ctx.notes.push('The first shot of the finished cut starts on a beat.');
+    else ctx.notes.push('The reveal could not be moved onto a beat with this footage, so it stays where the cut works best.');
+  }
 
   const keepPreviousText = Boolean(previous && !recipe.exact && previous.textOverlays.length > 0 && s.text !== 'none');
   const textFor = (list: Draft[]): TextOverlay[] => {
@@ -203,7 +214,7 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     bannedText: new Set<string>(),
     captionsOn: captionsWanted,
     musicOn: Boolean(input.music && s.musicOn),
-    musicOffset: grid?.fromMusic ? grid.startOffsetSec : 0,
+    musicOffset: fullGrid?.fromMusic ? fullGrid.startOffsetSec : 0,
   };
   const vctx: PlanValidationContext = {
     assets: input.assets,
@@ -540,8 +551,22 @@ function compose(
       beatAlignment,
       loudnessTargetLufs: -14,
     },
-    colourPreset: previous?.colourPreset ?? s.colourPreset,
+    colourPreset: colourFor(s, previous),
   };
+}
+
+/** A colour asked for in a revision wins; otherwise a revision keeps the earlier colour, and a new plan uses the style's. */
+function colourFor(s: EffectiveSettings, previous: EditPlan | null): EditPlan['colourPreset'] {
+  const asked = s.revisionHints?.colour;
+  if (asked && asked !== 'keep') return asked;
+  return previous?.colourPreset ?? s.colourPreset;
+}
+
+/** The beat option for this plan: the Sound panel's choice, else a revision's "cut to the beat" / "ignore the beat". */
+function beatSyncFor(input: PlannerInput, s: EffectiveSettings): 'auto' | 'on' | 'off' {
+  if (input.beatSync && input.beatSync !== 'auto') return input.beatSync;
+  const hinted = s.revisionHints?.beatSync;
+  return hinted === 'on' || hinted === 'off' ? hinted : 'auto';
 }
 
 /** A factual one-paragraph description of the edit that was actually built (max 280 characters). */

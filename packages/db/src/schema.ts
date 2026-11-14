@@ -23,6 +23,17 @@ import type {
 } from '@studio/core';
 import { timestamps } from './schema/common.js';
 
+/** State of one extra export file of a version (`edit_versions.variant_exports`). */
+export interface VariantExportState {
+  status: 'queued' | 'rendering' | 'ready' | 'failed';
+  key: string | null;
+  byteSize: number | null;
+  message: string;
+  updatedAt: string;
+}
+/** Extra export files by variant (only `no_music` today). */
+export type VariantExports = { no_music?: VariantExportState };
+
 // New Stage B/C tables live in one file per module (./schema/<module>.ts) and are re-exported here, so the app,
 // the worker and drizzle-kit all see them while parallel work packages edit only their own file.
 export * from './schema/music.js';
@@ -207,6 +218,8 @@ export const musicTracks = pgTable(
     /** Beat timestamps (seconds) and an energy curve for the picker UI. */
     beats: jsonb('beats').$type<{ beatTimesSec: number[]; energy: number[]; energyStepSec: number } | null>(),
     moods: jsonb('moods').$type<string[]>().notNull().default([]),
+    /** Genres the owner tagged (guides "Suggested for you"). */
+    genres: jsonb('genres').$type<string[]>().notNull().default([]),
     licence: jsonb('licence').$type<MusicLicence>().notNull(),
     status: text('status', { enum: ['uploaded', 'processing', 'ready', 'failed'] }).notNull().default('uploaded'),
     statusMessage: text('status_message').notNull().default(''),
@@ -285,6 +298,8 @@ export const editVersions = pgTable(
     exportKey: text('export_key'),
     exportByteSize: bigint('export_byte_size', { mode: 'number' }),
     exportMessage: text('export_message').notNull().default(''),
+    /** Extra export files of this version, e.g. the music-free `no_music` render (same cuts, music removed). */
+    variantExports: jsonb('variant_exports').$type<VariantExports>().notNull().default({}),
     ...timestamps,
   },
   (t) => [uniqueIndex('edit_versions_edit_no_idx').on(t.editId, t.versionNo), index('edit_versions_status_idx').on(t.status)],

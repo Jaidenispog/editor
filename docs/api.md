@@ -89,6 +89,30 @@ Webhook routes call `readRawBody` (256 KiB limit, 413 above it), verify, then `s
 
 ## Music (Stage B, WP1)
 
+Licence passport rules apply on every way in (`POST /api/music`, `PATCH /api/music/[id]`, upload completion): CC BY-NC
+is refused (400 "Non-commercial licences don't cover promoting a business…"), CC BY needs `attributionText`, and
+`meta_sound_collection` is forced to `destinationLock: 'meta_only'` with TikTok, YouTube and website off. Licence
+fields added in Stage B: `accountHolder`, `planName`, `providerTrackRef`, `downloadedAt`, `termsAcceptedAt`,
+`permitted.facebook`, `permitted.paidAds`, `destinationLock`. Track summaries add `genres` and `licenceState`
+(`confirmed` / `not_confirmed` / `expired` / `meta_only`).
+
+| Method | Route | Notes |
+| --- | --- | --- |
+| PATCH | `/api/music/[id]` | Also `genres`. Licence changes and `confirmLicence` are **owner only** (403 for staff); staff may change title, artist, moods and genres. DELETE is owner only |
+| GET | `/api/music/[id]/listen` | `{ url, expiresInSeconds, mimeType }`: expiring link to the track's audio (Sound panel "Listen") |
+| GET | `/api/music/suggestions?durationSec=25&styleId=beat_montage` | `{ tracks: [{ id, score, rank, reasons, usable, unusableReason? }], notes }`: the owner's own tracks ranked by genre, mood, artist and tempo; unusable ones (not analysed, licence not confirmed or expired, shorter than the edit) last with the reason. Nothing is chosen automatically; nothing outside the library is searched |
+| GET | `/api/music/versions/[id]` | Studio access. The music of one version: track and licence chip, `clearance` (`MusicClearance`), `clearanceSummary`, `downloadLabel`, the plan's sound settings, beats and loudness, and `noMusicExport` state |
+| GET / POST | `/api/music/references` | Private Spotify references (memo §1). GET (signed in) `{ mode, storedMode, canEmbed, missing, termsAcknowledged, notice, references }`; POST (owner) `{ url, notes? }` → 201; 400 "That isn't a Spotify link." (lookalike hosts refused), 409 when already saved. Only the canonical URL, type, id and notes are stored; the server never calls Spotify |
+| PATCH / DELETE | `/api/music/references/[id]` | Owner. `{ notes }` |
+| PUT | `/api/music/references/mode` | Owner. `{ mode: 'link_only' \| 'embed', acknowledgeSpotifyTerms?: true }`. `embed` is refused (409, `details.missing`) until a terms of use page and a privacy policy page exist (own URLs or the published `/terms` and `/privacy`) and Spotify's terms are acknowledged. `link_only` always works. The embed URL is only returned while embed mode is in force |
+| POST | `/api/edits/[id]/revise` | `{ instruction?, audio?: AudioPatch }` (at least one). A sound change alone that needs no re-cut queues `edits.revise` with `mode: 'audio'` (same cuts, `planSource: 'manual'`, "Sound changed · cuts kept"); a new track, beat options or `startSec` with `keepCuts: false` re-plan (`mode: 'revise'`, "Re-cut to the music"). A chosen `trackId` must be a ready library track with a confirmed licence |
+| POST | `/api/edit-versions/[id]/export[?variant=no_music]` | Standard: 409 `CONFLICT` with `details.musicClearance` when the music is not cleared (audit `music.export_blocked`); response adds `variant` and `musicClearance`. `no_music`: the same version rendered without music into `export-no-music.mp4` (`edit_versions.variant_exports.no_music`); never needs clearance; idempotent per variant (singleton `export:{id}:{variant}`) |
+| GET | `/api/edit-versions/[id]/download` | `?kind=export\|export_no_music\|preview`. Adds `musicClearance` and `label` ("For Instagram/Facebook upload only" with file name suffix `-instagram-facebook-only` for Meta-locked music) |
+
+Worker side: `render.export` checks the standard variant's clearance again before rendering; a blocked export is
+marked failed with the reason and the job ends without a retry. A successful standard export with music inserts one
+`music_usage` row (`purpose 'export'`, licence snapshot, clearance; `ON CONFLICT DO NOTHING`).
+
 ## Preferences (Stage B, WP2)
 
 ## Trends (Stage B, WP3 and WP5)

@@ -1,4 +1,5 @@
 import type { PlannerMusic } from '../types.js';
+import { grow, hardMinPlay, shrink, startTimes, type Draft } from './draft.js';
 import { round } from './random.js';
 
 /** Beat positions on the OUTPUT timeline, plus where in the track playback starts. */
@@ -108,4 +109,80 @@ export function nearestBeatIndex(grid: BeatGrid, t: number): number {
 /** Output cut times that land within 40 ms of a beat (reported in the plan's beat-alignment info). */
 export function alignedCuts(grid: BeatGrid, cutTimes: number[]): number[] {
   return cutTimes.filter((c) => grid.beats.some((b) => Math.abs(b - c) <= 0.04)).map((c) => round(c, 3));
+}
+
+/**
+ * The grid beat to aim for near output time `t`: a downbeat (every fourth beat from where the music starts) when one
+ * is within `downbeatWindowSec`, otherwise the nearest beat.
+ */
+export function beatTargetNear(grid: BeatGrid, t: number, downbeatWindowSec = 0.35): number {
+  let nearest = grid.beats[0] ?? 0;
+  let downbeat: number | null = null;
+  grid.beats.forEach((b, i) => {
+    if (Math.abs(b - t) < Math.abs(nearest - t)) nearest = b;
+    if (i % 4 === 0 && Math.abs(b - t) <= downbeatWindowSec && (downbeat === null || Math.abs(b - t) < Math.abs(downbeat - t))) downbeat = b;
+  });
+  return downbeat ?? nearest;
+}
+
+/** Output time at which draft `i` is fully on screen (its start plus its incoming transition). */
+function cutTime(drafts: readonly Draft[], i: number): number {
+  return (startTimes(drafts)[i] ?? 0) + (drafts[i]?.transitionIn?.durationSec ?? 0);
+}
+
+/**
+ * Moves the cut into draft `i` by lengthening or shortening the draft before it, and gives the difference back
+ * at the end so the total length stays the same. Returns the shift that was made (it may be less than asked
+ * when the footage or the minimum shot length does not allow it).
+ */
+function shiftCut(drafts: Draft[], i: number, delta: number): number {
+  const prev = drafts[i - 1];
+  const last = drafts[drafts.length - 1];
+  if (!prev || !last || last === prev || i < 1) return 0;
+  if (delta > 0) {
+    const g = grow(prev, drafts, delta);
+    const back = shrink(last, g, hardMinPlay(drafts, drafts.length - 1));
+    if (back + 1e-3 < g) shrink(prev, g - back, hardMinPlay(drafts, i - 1));
+    return Math.min(g, back);
+  }
+  const cut = shrink(prev, -delta, hardMinPlay(drafts, i - 1));
+  const given = grow(last, drafts, cut);
+  if (given + 1e-3 < cut) grow(prev, drafts, cut - given);
+  return -Math.min(cut, given);
+}
+
+/**
+ * "Cut to the beat: On" for styles that do not cut on every beat by themselves: each cut is nudged onto the
+ * nearest music beat (at most half a beat away), left to right, keeping the total length. Cuts the footage
+ * cannot reach stay where they are.
+ */
+export function snapCutsToBeats(drafts: Draft[], grid: BeatGrid): number {
+  if (!grid.fromMusic) return 0;
+  let moved = 0;
+  // The last draft absorbs the changes, so the cut into it is left alone.
+  for (let i = 1; i < drafts.length - 1; i++) {
+    const t = cutTime(drafts, i);
+    const beat = grid.beats[nearestBeatIndex(grid, t)] ?? t;
+    const delta = beat - t;
+    if (Math.abs(delta) < 0.02 || Math.abs(delta) > grid.interval / 2 + 1e-3) continue;
+    if (Math.abs(shiftCut(drafts, i, delta)) > 0.01) moved++;
+  }
+  return moved;
+}
+
+/**
+ * "Land the reveal on a beat": the first shot of the finished result starts on a beat (a downbeat when one is
+ * close), within ±0.25 s, keeping the total length. Returns false when there is no result shot after the opening
+ * or the footage cannot move the cut that far.
+ */
+export function landRevealOnBeat(drafts: Draft[], grid: BeatGrid): boolean {
+  if (!grid.fromMusic) return false;
+  const r = drafts.findIndex((d, i) => i > 0 && d.role === 'result');
+  if (r < 1) return false;
+  const t = cutTime(drafts, r);
+  const beat = beatTargetNear(grid, t);
+  if (Math.abs(beat - t) <= 0.02) return true;
+  if (Math.abs(beat - t) > Math.max(0.6, grid.interval)) return false;
+  shiftCut(drafts, r, beat - t);
+  return Math.abs(cutTime(drafts, r) - beat) <= 0.25;
 }

@@ -107,3 +107,22 @@ Built once so every Stage B/C module integrates the same way and parallel work p
 - **A** (this milestone): upload, analysis, five previews, revise/regenerate with history, full-quality export.
 - **B**: music controls and licensing model, saved preferences/feedback, publishing (Instagram/TikTok) with honest fallbacks.
 - **C**: Square appointments, email, review requests, website/local search tools.
+
+## Music controls and licence passport (Stage B, WP1)
+
+- **Contracts** (`packages/core`): `music.ts` (licence passport incl. `meta_sound_collection`, `facebook`,
+  `destinationLock`; `normaliseLicence`, `musicClearanceFor`, `licenceStateOf`), `audio-patch.ts` (`AudioPatchSchema`,
+  `needsRecut`, `applyAudioPatch`, `withoutMusic`), `music-ranking.ts`, `music-catalogue.ts` (interface only, no
+  adapter), `spotify-link.ts`, `jobs/music.ts` (extends `edits.revise` with `mode: 'audio'` and `render.export` with
+  `variant`), `settings/music.ts` (`music.spotifyReferenceMode`).
+- **Data**: `music_tracks.genres`, `edit_versions.variant_exports`, `music_usage` (usage ledger, one row per version
+  and purpose/platform), `music_references` (private Spotify links).
+- **Sound panel**: sound-only changes are applied to the parent plan without the planner (validated again with
+  `validateEditPlan`); track, beat and "re-cut to this section" changes go through the planner with
+  `PlannerInput.beatSync` / `revealOnBeat` / `musicStartSec`. A new version keeps its parent's track.
+- **Exports**: the standard file needs music the licence clears (web route, then the worker again); the `no_music`
+  variant is the same version without music, stored next to it, and needs no clearance. Export-ready hooks get the
+  variant.
+- **Spotify**: link-only by default; the official embed only on signed-in pages once the legal pages exist and the
+  owner acknowledged Spotify's terms. Nothing from Spotify reaches the planner, AI prompts, publishing, email or the
+  website module (a unit test checks the imports).
