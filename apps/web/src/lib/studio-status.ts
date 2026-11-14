@@ -9,6 +9,7 @@ import { getSettings } from './settings.js';
 import { UPLOAD_PART_SIZE } from './shared/upload-math.js';
 import type { StudioStatusDto } from './shared/studio-dto.js';
 import { shapeStudioStatus, type LinkSigner } from './studio-status-shape.js';
+import { getWorkerStatus } from './worker-status.js';
 
 /** How many generations the status payload carries (newest first). */
 const GENERATION_LIMIT = 20;
@@ -20,7 +21,7 @@ const GENERATION_LIMIT = 20;
 export async function buildStudioStatus(project: Project): Promise<StudioStatusDto> {
   const db = getDb();
   const env = getEnv();
-  const [assets, tracks, generations, jobs, settings] = await Promise.all([
+  const [assets, tracks, generations, jobs, settings, worker] = await Promise.all([
     db.query.mediaAssets.findMany({ where: and(eq(schema.mediaAssets.projectId, project.id), isNull(schema.mediaAssets.deletedAt)) }),
     db.query.musicTracks.findMany({
       where: and(isNull(schema.musicTracks.projectId), isNull(schema.musicTracks.deletedAt)),
@@ -33,6 +34,7 @@ export async function buildStudioStatus(project: Project): Promise<StudioStatusD
       limit: 50,
     }),
     getSettings(),
+    getWorkerStatus(),
   ]);
   const generationIds = generations.map((g) => g.id);
   const edits = generationIds.length
@@ -64,6 +66,7 @@ export async function buildStudioStatus(project: Project): Promise<StudioStatusD
       maxUploadBytes: env.MAX_UPLOAD_BYTES,
       mediaLinkTtlSeconds: env.MEDIA_LINK_TTL_SECONDS,
       partSize: UPLOAD_PART_SIZE,
+      worker,
     },
     sign,
   );

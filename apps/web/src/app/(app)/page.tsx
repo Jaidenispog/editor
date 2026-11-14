@@ -8,6 +8,7 @@ import { countNeedingSetup, integrationPill } from '@/components/app/integration
 import { JobList } from '@/components/app/job-list';
 import { NewProjectButton } from '@/components/app/new-project-dialog';
 import { ProjectCard } from '@/components/app/project-card';
+import { Alert } from '@/components/ui/alert';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
@@ -18,6 +19,8 @@ import { listActiveJobs, toJobDto } from '@/lib/jobs';
 import { listProjects } from '@/lib/projects';
 import type { SessionUser } from '@/lib/auth';
 import { getCurrentUser } from '@/lib/session';
+import { workerNotice } from '@/lib/shared/worker-notice';
+import { getWorkerStatus } from '@/lib/worker-status';
 
 export const metadata: Metadata = { title: 'Dashboard' };
 
@@ -35,7 +38,9 @@ export default async function DashboardPage() {
   const user = await getCurrentUser();
   if (!user) redirect('/login');
   // Staff see only their own projects and jobs; the owner sees everything.
-  const [projects, jobs, integrations] = await Promise.all([listProjects(user, { limit: 6 }), activeJobsWithTitles(user), getIntegrationStatuses()]);
+  const [projects, jobs, integrations, worker] = await Promise.all([listProjects(user, { limit: 6 }), activeJobsWithTitles(user), getIntegrationStatuses(), getWorkerStatus()]);
+  // Shown only when no worker heartbeat is fresh; the quieter wording when nothing is waiting yet.
+  const notice = workerNotice(worker, jobs.length > 0, { whenIdle: true });
   const firstName = user.displayName.split(/\s+/)[0] ?? '';
   const active = integrations.filter((i) => i.connected).length;
   const needsSetup = countNeedingSetup(integrations);
@@ -72,11 +77,16 @@ export default async function DashboardPage() {
         <div className="space-y-6">
           <Card>
             <CardHeader title="In progress" description="Clips being analysed and edits being rendered." />
-            <CardBody className="pt-2">
+            <CardBody className="space-y-3 pt-2">
+              {notice ? (
+                <Alert tone="warning" title={notice.title}>
+                  {notice.body}
+                </Alert>
+              ) : null}
               {jobs.length === 0 ? (
                 <div className="flex items-center gap-3 rounded-lg bg-charcoal-50 px-4 py-4 text-sm text-charcoal-600">
                   <Activity className="size-5 text-charcoal-400" aria-hidden="true" />
-                  Nothing is running right now.
+                  {notice ? 'Nothing is waiting right now.' : 'Nothing is running right now.'}
                 </div>
               ) : (
                 <JobList jobs={jobs} showProject />

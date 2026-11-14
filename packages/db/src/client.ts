@@ -40,6 +40,31 @@ export function createDatabase(connectionString: string, options: DatabaseOption
   };
 }
 
+/**
+ * Opens one short-lived connection and runs `select 1`, so a caller can tell "the database is not up yet" from a
+ * real problem before it starts anything else. Rejects with the driver's error (codes such as ECONNREFUSED or
+ * 57P03 are kept); a connection that takes longer than `timeoutMs` rejects with an ETIMEDOUT error.
+ */
+export async function probeDatabase(connectionString: string, options: { timeoutMs?: number; applicationName?: string } = {}): Promise<void> {
+  const client = new pg.Client({
+    connectionString,
+    connectionTimeoutMillis: options.timeoutMs ?? 10_000,
+    application_name: options.applicationName ?? 'studio-probe',
+    ssl: needsSsl(connectionString) ? { rejectUnauthorized: false } : undefined,
+  });
+  // A failed connect can also emit 'error'; without a listener that would crash the process.
+  client.on('error', () => {});
+  try {
+    await client.connect();
+    await client.query('select 1');
+  } catch (err) {
+    if (err instanceof Error && /timeout/i.test(err.message) && !(err as { code?: string }).code) Object.assign(err, { code: 'ETIMEDOUT' });
+    throw err;
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
 function needsSsl(connectionString: string): boolean {
   try {
     const url = new URL(connectionString);

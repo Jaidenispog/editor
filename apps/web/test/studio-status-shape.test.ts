@@ -251,6 +251,12 @@ describe('status payload shaping', () => {
     expect(isStudioBusy({ ...idle, generations: [{ ...idle.generations[0]!, edits: [{ ...idle.generations[0]!.edits[0]!, versions: [{ ...idle.generations[0]!.edits[0]!.versions[0]!, exportStatus: 'rendering' }] }] }] })).toBe(true);
   });
 
+  it('carries the worker status, or null when it was not checked', async () => {
+    expect((await shapeStudioStatus(rows(), sign)).worker).toBeNull();
+    const worker = { alive: false, lastSeenAt: '2026-11-14T00:00:00.000Z', startHint: 'dev' as const };
+    expect((await shapeStudioStatus(rows({ worker }), sign)).worker).toEqual(worker);
+  });
+
   it('lists all five styles with plain reasons, or asks for clips first', async () => {
     const styles = shapeStyleOptions(project().styleSupport);
     expect(styles.map((s) => s.id)).toEqual(['beat_montage', 'cinematic_reveal', 'before_after', 'clean_promo', 'process_story']);
