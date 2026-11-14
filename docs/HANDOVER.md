@@ -127,14 +127,21 @@ History of the background runs:
     ledger, send gate, Places rating), WP8 website check, prepared changes, WordPress apply and Search Console.
     Migrations `0007_square`, `0008_email_reviews` (ends with the hand-written `message_class` backfill) and
     `0009_website`. Everything is verified against fakes only; no real Square, Postmark, WordPress or Google call.
-    - **Independent review running** (run `wf_385679c2-cf6`): one read-only reviewer per package, then one fix-up in
-      a worktree (also the lead follow-ups: worker `scripts/**/*.ts` in tsconfig, `JOB_TYPE_LABELS` for the G4 jobs
-      with a registry test, a start-up `email.provider.check`, the WP6 mid-appointment attendance test, and the
-      Appointments review-request badge / Dashboard approval line if missing), then a re-check. Merge the fix-up only
-      after the full suite (typecheck, unit, integration, both browser tests) passes on the merged result.
-    - Seen on the showcase, not yet fixed: the Website page's "Connections" cards sit two-up in the narrow right
-      column, so titles truncate ("Google Search C…") and env var names break mid-word.
-    - **G5 next:** WP6b (`square_changes`) ∥ WP9 (`business_profile`, docs email-and-reviews + website-local-search).
+    - **Three independent review rounds, all merged and pushed** (runs `wf_385679c2-cf6`, `wf_e1e0fd0b-b1f`,
+      `wf_e67bcee8-d74`; each fix re-checked by a separate agent, then the full suite re-run by the lead):
+      - round 1 (f3d0e42): 2 blockers (sandbox Square bookings counted as real visits and could trigger real emails;
+        a campaign paused/cancelled during expansion switched itself back to sending) and 17 should_fix, plus the
+        lead follow-ups (worker scripts typechecked, compile-checked job labels, start-up email check, attendance
+        test, Appointments review-request badge);
+      - round 2 (b7b86aa): the reviewers' smaller findings and design gaps (change-bound WordPress write marker,
+        approval hash bound to the destination, pre-write re-check, IPv6/NAT64 ranges, per-host robots, crawl
+        budget, stable email link tokens in `0010_link_tokens`, honest unsubscribe page, Square revoke outcome on
+        the card), and the Website/Emails layout fixes;
+      - round 3 (9751dbf): checks that read no page make no claims; malformed Square bookings are left as stored.
+      - Result: 1,293 unit tests, integration 12/12, Stage A 51/51, Stage B 77/77. Plan §10.3 records what G5
+        must build on.
+    - **G5 running** (run `wf_57df34d0-732`): WP6b (`square_changes`) ∥ WP9 (`business_profile`, docs
+      email-and-reviews + website-local-search).
       **WP10 Zernio stays blocked:** the plan requires docs.zernio.com to be read first; this environment's proxy
       refuses docs.zernio.com and zernio.com (CONNECT 403) and WebFetch cannot resolve them. Needs the owner to
       allow those hosts (a network change) before WP10 can start.
