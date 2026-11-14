@@ -1,28 +1,30 @@
 /**
  * Stage A acceptance test at the worker level, on SYNTHETIC footage (scripts/make-sample-footage.sh):
  * ingest (incl. rotated HEVC HLG and a silent clip) → manual tags → five planned styles → preview renders →
- * revise one edit without losing the others → full-quality export → interrupted job → incomplete footage.
+ * revise one edit without losing the others → full-quality export → interrupted job → owner-uploaded music
+ * (tempo detection, beat-aligned cuts, stereo soundtrack) → incomplete footage.
  * Requires ffmpeg and TEST_DATABASE_URL. Synthetic footage is not a substitute for real haircut clips.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
 import { execa } from 'execa';
 import { asc, eq } from 'drizzle-orm';
 import { loadEnv } from '@studio/config';
-import { CancelledError, JOB_TYPES, STYLE_IDS, computeTimeline, newId, type JobType, type StyleId } from '@studio/core';
+import { CancelledError, JOB_TYPES, MusicLicenceSchema, STYLE_IDS, checkMusicForPlatforms, computeTimeline, newId, type JobType, type StyleId } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
 import { LocalDiskStore, storageKeys } from '@studio/storage';
-import { probeMedia } from '@studio/media';
+import { probeMedia, segmentFrameCount } from '@studio/media';
 import { createAiProviders } from '@studio/ai';
 import type { WorkerContext } from '../src/context.js';
 import type { TrackedRun } from '../src/lib/job-tracker.js';
 import { handleIngestAsset, refreshProjectReadiness } from '../src/handlers/ingest.js';
 import { handleGenerateEdits, handleReviseEdit } from '../src/handlers/generate.js';
 import { handleRender } from '../src/handlers/render.js';
+import { handleAnalyseMusic } from '../src/handlers/music.js';
 import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..', '..');
@@ -259,6 +261,101 @@ describe.skipIf(skip)('worker pipeline on synthetic footage', () => {
     expect(v?.exportKey).toBeNull();
     expect(v?.status).toBe('preview_ready');
   }, 120_000);
+
+  const musicTrackId = newId();
+  const musicGenerationId = newId();
+  const musicVersionByStyle: Partial<Record<StyleId, string>> = {};
+
+  it('analyses an owner-uploaded music track and finds its tempo', async () => {
+    const source = path.join(SAMPLES, 'sample_music_120bpm.mp3');
+    const storageKey = storageKeys.musicOriginal(musicTrackId, 'mp3');
+    await ctx.store.putFile(storageKey, source, { contentType: 'audio/mpeg' });
+    await handle.db.insert(schema.musicTracks).values({
+      id: musicTrackId,
+      projectId,
+      title: 'Synthetic click track',
+      storageKey,
+      mimeType: 'audio/mpeg',
+      byteSize: (await stat(source)).size,
+      licence: MusicLicenceSchema.parse({
+        kind: 'owner_upload',
+        source: 'Uploaded by owner',
+        permitted: { promotionalUse: true, instagram: true, tiktok: true },
+        confirmedByOwnerAt: new Date().toISOString(),
+      }),
+    });
+    await handleAnalyseMusic(ctx, fakeRun(), { trackId: musicTrackId });
+    const track = await handle.db.query.musicTracks.findFirst({ where: eq(schema.musicTracks.id, musicTrackId) });
+    expect(track?.status).toBe('ready');
+    expect(track?.durationSec).toBeGreaterThan(39);
+    expect(track?.bpm).toBeGreaterThan(118);
+    expect(track?.bpm).toBeLessThan(122);
+    expect(track?.beats?.beatTimesSec.length).toBeGreaterThan(60);
+    expect(checkMusicForPlatforms(track!.licence, ['instagram', 'tiktok']).ok).toBe(true);
+  });
+
+  it('cuts the beat montage on the music beats', async () => {
+    const styles: StyleId[] = ['beat_montage', 'before_after'];
+    await handle.db.insert(schema.generations).values({
+      id: musicGenerationId,
+      projectId,
+      requestedBy: userId,
+      settings: { durationSec: 12, styles, musicTrackId, keepOriginalSound: 'auto', captions: 'auto', instructions: '' },
+    });
+    for (const [slot, styleId] of styles.entries()) {
+      const editId = newId();
+      const versionId = newId();
+      musicVersionByStyle[styleId] = versionId;
+      await handle.db.insert(schema.edits).values({ id: editId, projectId, generationId: musicGenerationId, styleId, slot, currentVersionId: versionId });
+      await handle.db.insert(schema.editVersions).values({ id: versionId, editId, versionNo: 1, origin: 'initial', status: 'planning' });
+    }
+    await handleGenerateEdits(ctx, fakeRun(), { generationId: musicGenerationId, projectId });
+
+    const track = await handle.db.query.musicTracks.findFirst({ where: eq(schema.musicTracks.id, musicTrackId) });
+    const beats = track!.beats!.beatTimesSec;
+    const montage = await handle.db.query.editVersions.findFirst({ where: eq(schema.editVersions.id, musicVersionByStyle['beat_montage']!) });
+    expect(montage?.status).toBe('planned');
+    const plan = montage!.plan!;
+    expect(plan.audio.music?.trackId).toBe(musicTrackId);
+    const offset = plan.audio.music!.startOffsetSec;
+    const timeline = computeTimeline(plan);
+    // Music beat k plays at output time beats[k] - startOffsetSec.
+    const distanceToBeat = (t: number) => Math.min(...beats.map((b) => Math.abs(b - offset - t)));
+    const hardCuts = timeline.segments.filter((p) => p.index > 0 && !p.segment.transitionIn);
+    expect(hardCuts.length).toBeGreaterThanOrEqual(3);
+    for (const cut of hardCuts) expect(distanceToBeat(cut.startSec)).toBeLessThanOrEqual(0.06);
+    // The renderer quantises every segment to whole frames; the cuts must still land on the beat in the file.
+    const fps = plan.output.fps;
+    let renderedEnd = 0;
+    for (const placed of timeline.segments) {
+      const start = placed.index === 0 ? 0 : placed.segment.transitionIn ? placed.startSec : renderedEnd;
+      if (placed.index > 0 && !placed.segment.transitionIn) expect(distanceToBeat(start)).toBeLessThanOrEqual(0.06);
+      renderedEnd = start + segmentFrameCount(placed.playDurationSec, fps) / fps;
+    }
+    const total = timeline.totalDurationSec;
+    expect(offset + total).toBeLessThanOrEqual(track!.durationSec!);
+
+    const beforeAfter = await handle.db.query.editVersions.findFirst({ where: eq(schema.editVersions.id, musicVersionByStyle['before_after']!) });
+    expect(beforeAfter?.status).toBe('planned');
+    expect(beforeAfter!.plan!.audio.music?.trackId).toBe(musicTrackId);
+  });
+
+  it('renders the music previews with a stereo soundtrack', async () => {
+    for (const styleId of ['beat_montage', 'before_after'] as const) {
+      const versionId = musicVersionByStyle[styleId]!;
+      await handleRender(ctx, fakeRun(), { editVersionId: versionId, projectId }, 'preview');
+      const v = await handle.db.query.editVersions.findFirst({ where: eq(schema.editVersions.id, versionId) });
+      expect(v?.status).toBe('preview_ready');
+      const probe = await probeMedia((ctx.store as LocalDiskStore).resolvePath(v!.previewKey!));
+      expect(probe.video).toMatchObject({ codec: 'h264', displayWidth: 540, displayHeight: 960 });
+      expect(probe.audio).toMatchObject({ codec: 'aac', channels: 2, sampleRate: 48000 });
+      const total = computeTimeline(v!.plan!).totalDurationSec;
+      expect(Math.abs(probe.durationSec - total)).toBeLessThan(0.25);
+      expect(Math.abs((v!.previewDurationSec ?? 0) - total)).toBeLessThan(0.25);
+    }
+    const gen = await handle.db.query.generations.findFirst({ where: eq(schema.generations.id, musicGenerationId) });
+    expect(gen?.status).toBe('complete');
+  }, 300_000);
 
   it('explains incomplete footage instead of inventing shots', async () => {
     const tinyProject = newId();

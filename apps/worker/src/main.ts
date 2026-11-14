@@ -8,7 +8,7 @@ import { createDatabase } from '@studio/db';
 import { createBlobStore } from '@studio/storage';
 import { createQueue } from '@studio/queue';
 import { createAiProviders } from '@studio/ai';
-import { CancelledError, JOB_PAYLOAD_SCHEMAS, JOB_TYPES, newId, type JobPayload, type JobType } from '@studio/core';
+import { ALL_JOB_TYPES, CancelledError, JOB_PAYLOAD_SCHEMAS, JOB_TYPES, newId, type JobPayload, type JobType } from '@studio/core';
 import { repoRoot, type WorkerContext } from './context.js';
 import { recoverStaleJobs, runTracked, type TrackedRun } from './lib/job-tracker.js';
 import { refIdFor } from './lib/jobs.js';
@@ -34,6 +34,11 @@ export function resolveConfiguredPath(configured: string): string {
   return path.isAbsolute(configured) ? configured : path.resolve(repoRoot(), configured);
 }
 
+/**
+ * Boots the worker: loads the environment, connects the database, storage, queue and AI providers, recovers
+ * jobs a previous process left running, registers a handler for every job type and schedules hourly cleanup.
+ * Returns the shared context and a graceful `stop` that waits for active jobs before closing connections.
+ */
 export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => Promise<void> }> {
   loadRootEnvFile();
   const loaded = loadEnv();
@@ -64,6 +69,7 @@ export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => P
   });
   if (recovered) logger.warn({ recovered }, 'recovered jobs left running by a previous worker');
 
+  const registered: JobType[] = [];
   const register = async <T extends JobType>(type: T, handler: Handler<T>, concurrency: number) => {
     await queue.work(
       type,
@@ -95,6 +101,7 @@ export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => P
       },
       concurrency,
     );
+    registered.push(type);
   };
 
   const c = env.WORKER_CONCURRENCY;
@@ -107,7 +114,9 @@ export async function startWorker(): Promise<{ ctx: WorkerContext; stop: () => P
   await register(JOB_TYPES.CLEANUP, handleCleanup, 1);
   await queue.schedule(JOB_TYPES.CLEANUP, '17 * * * *', { olderThanHours: 24 });
 
-  logger.info({ workerId: ctx.workerId, concurrency: c, ai: ai.describe(), storage: store.driver, tmpRoot }, 'worker started');
+  const missing = ALL_JOB_TYPES.filter((type) => !registered.includes(type));
+  if (missing.length) throw new Error(`No handler registered for: ${missing.join(', ')}`);
+  logger.info({ workerId: ctx.workerId, concurrency: c, queues: registered, ai: ai.describe(), storage: store.driver, tmpRoot }, 'worker started');
 
   let stopping = false;
   const stop = async () => {
