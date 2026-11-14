@@ -12,7 +12,6 @@ import {
   timestamp,
   uniqueIndex,
   bigint,
-  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import type {
   AppSettings,
