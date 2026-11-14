@@ -430,8 +430,33 @@ export const ApplyResultSchema = z.object({
    */
   writeSentAt: z.string().optional(),
   preWriteHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /**
+   * SHA-256 of the change the marker was recorded for (`changeHash` in `@studio/core/website-approval`): a marker is
+   * only ever used for the very change it was written for, never for a re-worded or refreshed one.
+   */
+  changeHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /**
+   * SHA-256 of what the owner approved: the change (kind, page, before, after, image) and the destination (WordPress
+   * address and live/staging label) the dialog showed. The apply job refuses to write when either differs now.
+   */
+  approvalHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
 export type ApplyResult = z.infer<typeof ApplyResultSchema>;
+
+/** The fields of the durable "a write was sent" marker. */
+export const WRITE_MARKER_FIELDS = ['writeSentAt', 'preWriteHash', 'changeHash'] as const;
+
+/**
+ * The apply result without the write marker (and without an approval): used whenever the change itself changes (owner
+ * wording, an AI option, a check's refresh) or a write was definitely refused, so no later attempt reads a marker that
+ * belongs to something else. The outcome and message for the owner stay.
+ */
+export function clearWriteMarker(result: ApplyResult | Record<string, unknown> | null | undefined): ApplyResult {
+  const out: Record<string, unknown> = { ...(result ?? {}) };
+  for (const k of WRITE_MARKER_FIELDS) delete out[k];
+  delete out['approvalHash'];
+  return out as ApplyResult;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Hashing (browser-safe)
@@ -887,6 +912,38 @@ export function checkCopyClaims(value: string, input: { kind: WebsiteChangeKind;
   }
   if (input.kind === 'page_title' && input.businessName.trim() && !normaliseQueryText(v).includes(normaliseQueryText(input.businessName))) {
     problems.push('A page title should include the business name.');
+  }
+  return problems;
+}
+
+const NUMBER_RE = /\d+(?:[.,:]\d+)*/g;
+const NUMBER_WORD_SPAN_RE =
+  /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|a hundred|hundred)[- ]+(?:years?|yrs|decades?)\b/gi;
+const numberToken = (n: string) => n.replace(/,/g, '');
+
+/**
+ * A conservative check for invented facts in AI wording (design §6.7): every number in the wording (years, prices,
+ * percentages, counts, times, postcodes) and every spelled-out span of years ("ten years") must appear in what the AI
+ * was given (the business details and the page text). Wording without numbers passes, so ordinary wording is never
+ * refused; invented opening days or services in words are not caught here (the prompt and the "check before using"
+ * label cover those). Returns the problems in plain words (empty = passes).
+ */
+export function unsupportedFactClaims(value: string, sources: Array<string | null | undefined>): string[] {
+  const text = sources.filter((s): s is string => typeof s === 'string' && s !== '').join('\n');
+  const known = new Set((text.match(NUMBER_RE) ?? []).map(numberToken));
+  const lowerText = text.toLowerCase();
+  const problems: string[] = [];
+  for (const n of value.match(NUMBER_RE) ?? []) {
+    if (!known.has(numberToken(n))) {
+      problems.push(`It mentions “${n}”, which isn't in your business details or on the page.`);
+      break;
+    }
+  }
+  for (const span of value.match(NUMBER_WORD_SPAN_RE) ?? []) {
+    if (!lowerText.includes(span.toLowerCase())) {
+      problems.push(`It mentions “${span}”, which isn't in your business details or on the page.`);
+      break;
+    }
   }
   return problems;
 }

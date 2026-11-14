@@ -338,19 +338,25 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   no cookies or auth, every host resolved and refused if any address is private/reserved (`ssrf.ts`), the connection
   pinned to the checked address, ports 80/443 only, redirects followed by hand (≤ 5, each re-validated), size and time
   caps, ≤ 400 requests per check and polite spacing (500 ms, or robots.txt `Crawl-delay`) with a 12-minute budget for
-  that waiting (later requests to the owner's site are skipped and the check says so). A robots.txt with no HTTP answer
+  that waiting (later requests to the owner's site are skipped and the check says so; the home page's request is kept
+  back first, so even the longest Crawl-delay ends as a partial check, never an error). A robots.txt with no HTTP answer
   (unresolvable, refused, timed out, blocked host) means the site is unreachable: a complete check with one
   `site_unreachable` finding; a robots.txt 5xx stops the crawl with `robots_unreachable`. `crawl.ts` reads robots.txt
-  (RFC 9309), host variants, the root, the sitemap (fast-xml-parser, entities off), ≤ 25 HTML pages breadth-first,
+  (RFC 9309; per host, so the www./bare twin's own robots.txt is read before any page there, and every redirect hop
+  of a page must be allowed too), host variants, the root, the sitemap (fast-xml-parser, entities off), ≤ 25 HTML pages breadth-first,
   image sizes, links and a soft-404 probe. `extract.ts` parses pages with cheerio as data only. Tests inject a
   loopback policy in code; there is no environment variable that loosens the guard.
 - **Changes**: `website.audit` stores the validated result and summary and refreshes prepared changes in one
   transaction (`changes.ts`): one open change per dedupe key (partial unique index), owner/AI wording kept, superseded
   when the finding is gone or the page changed, applied changes verified from the next check.
 - **Apply** (`apply.ts`, `adapters/wordpress.ts`): only after the owner's explicit confirmation (`approved_by`). The old
-  text must occur exactly once; a durable marker stored before the write (`apply_result.writeSentAt`, `preWriteHash`)
-  lets a retry tell a write that landed (`already_applied`, no second write, deletions included) from one that never
-  did; WordPress calls use the guarded, pinned transport (`guarded-fetch.ts`, no redirects followed);
+  text must occur exactly once; a durable marker stored before the write (`apply_result.writeSentAt`, `preWriteHash`,
+  `changeHash`) lets a retry tell a write that landed (`already_applied`, no second write, deletions included) from one
+  that never did. The marker counts only for the change it was written for, is dropped when the wording changes or
+  WordPress refuses the write, and a page edited since falls back to the first-attempt rule. The approval is bound to
+  the change and its destination (`apply_result.approvalHash`, `@studio/core/website-approval`) and checked again
+  before writing; the page is re-read (content and `modified_gmt`) right before the write, and nothing is written if
+  it changed. WordPress calls use the guarded, pinned transport (`guarded-fetch.ts`, no redirects followed);
   read-back through WordPress, then a public read through the guarded fetcher. Only page text and image descriptions
   are written through core WordPress; titles, descriptions, structured data, header code and robots.txt stay
   copy-paste. A WordPress host other than the public website is labelled `staging`.
@@ -359,6 +365,7 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   upserts into `search_metrics`. Grouping (brand / local / service / other / not listed) happens when reading
   (`apps/web/src/lib/website.ts`), so edited word lists apply to all history.
 - **AI wording** (`packages/ai/src/website-copy.ts`): only on the owner's click, Haiku, page text as delimited data,
-  structured output, options filtered by `checkCopyClaims`; `null` (button hidden) unless `AI_PROVIDER=anthropic`.
+  structured output, options filtered by `checkCopyClaims` and `unsupportedFactClaims` (no number the AI was not
+  given); `null` (button hidden) unless `AI_PROVIDER=anthropic`.
 - **Not built here (WP9):** Business Profile Performance (`search.sync` source `business_profile`, its connection
   check branch and card) — they extend the payload enums in a backwards-compatible way.

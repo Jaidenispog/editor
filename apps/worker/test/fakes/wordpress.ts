@@ -7,6 +7,8 @@ export interface FakeWpItem {
   slug: string;
   link: string;
   raw: string;
+  /** `modified_gmt` (default 2026-11-01T00:00:00; every write moves it on). */
+  modified?: string;
 }
 
 /**
@@ -24,12 +26,15 @@ export function fakeWordPress(options: {
   restOff?: boolean;
 }) {
   const state = {
-    items: options.items.map((i) => ({ ...i })),
+    items: options.items.map((i) => ({ ...i, modified: i.modified ?? '2026-11-01T00:00:00' })),
     writes: [] as Array<{ id: number; content: string }>,
     /** Make the next write answer with this status (then reset). */
     failNextWrite: null as number | null,
     /** Throw (simulated crash) after the next write was stored. */
     crashAfterWrite: false,
+    /** Runs before each single-item GET is answered (tests use it to edit the page "in WordPress" meanwhile). */
+    beforeSingleGet: null as ((item: FakeWpItem & { modified: string }) => void) | null,
+    writeCount: 0,
   };
   const expected = `Basic ${Buffer.from(`${options.username ?? 'studio-assistant'}:${options.password ?? 'abcd efgh ijkl mnop'}`).toString('base64')}`;
   const base = options.base.replace(/\/+$/, '');
@@ -67,7 +72,7 @@ export function fakeWordPress(options: {
           id: i.id,
           link: i.link,
           content: { raw: i.raw, rendered: i.raw },
-          modified_gmt: '2026-11-01T00:00:00',
+          modified_gmt: i.modified,
         })),
       );
     }
@@ -75,7 +80,11 @@ export function fakeWordPress(options: {
     if (one) {
       const item = state.items.find((i) => i.type === one[1] && i.id === Number(one[2]));
       if (!item) return json(404, { code: 'rest_post_invalid_id' });
-      if (call.method === 'GET') return json(200, { id: item.id, content: { raw: item.raw } });
+      if (call.method === 'GET') {
+        state.beforeSingleGet?.(item);
+        const fields = (u.searchParams.get('_fields') ?? '').split(',');
+        return json(200, { id: item.id, content: { raw: item.raw }, ...(fields.includes('modified_gmt') ? { modified_gmt: item.modified } : {}) });
+      }
       if (call.method === 'POST') {
         if (state.failNextWrite) {
           const status = state.failNextWrite;
@@ -84,6 +93,8 @@ export function fakeWordPress(options: {
         }
         const body = JSON.parse(call.body) as { content: string };
         item.raw = body.content;
+        state.writeCount++;
+        item.modified = `2026-11-14T00:00:${String(state.writeCount).padStart(2, '0')}`;
         state.writes.push({ id: item.id, content: body.content });
         if (state.crashAfterWrite) {
           state.crashAfterWrite = false;

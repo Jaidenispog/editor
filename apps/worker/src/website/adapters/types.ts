@@ -30,6 +30,8 @@ export interface LocatedTarget {
   link: string;
   /** The stored (raw) content of the page or post. */
   current: string;
+  /** WordPress's `modified_gmt` when it was located (null when not given), compared again right before a write. */
+  modifiedGmt: string | null;
 }
 
 /** An adapter. `check`, `locate` and `readBack` are read-only; only `write` changes anything, and only after approval. */
@@ -40,6 +42,8 @@ export interface WebsiteEditAdapter {
   locate(change: WebsiteChange, signal: AbortSignal): Promise<LocatedTarget | null>;
   write(target: LocatedTarget, nextContent: string, signal: AbortSignal): Promise<{ outcome: ApplyOutcome; message: string }>;
   readBack(target: LocatedTarget, signal: AbortSignal): Promise<string>;
+  /** Reads the located item again (read-only), right before a write: its content and `modified_gmt`, or null if gone. */
+  recheck(target: LocatedTarget, signal: AbortSignal): Promise<{ current: string; modifiedGmt: string | null } | null>;
 }
 
 /** A failure another attempt may fix (network, 5xx, 409/412): the job retries; the already-applied rule keeps it safe. */

@@ -1,5 +1,6 @@
 import { CheckCircle2, CircleDashed, PlugZap } from 'lucide-react';
 import Link from 'next/link';
+import { Fragment, type ReactNode } from 'react';
 import type { IntegrationStatus } from '@/lib/shared/integration-types';
 import { cn } from '@/lib/shared/cn';
 import { StatusPill } from '@/components/ui/status-pill';
@@ -9,7 +10,8 @@ import { integrationPill } from './integration-pill';
  * Status cards for integrations: what is connected, what is configured but not yet connected, and what needs
  * setup — with the plain-language next step and the names (never values) of missing server settings. The pill
  * comes from each card's real state ({@link integrationPill}); when the name and pill do not fit on one line the pill
- * drops below the name, so the name is never squeezed.
+ * drops below the name, so the name is never squeezed or cut short. Server setting names in the text (such as
+ * GOOGLE_CLIENT_SECRET) are shown as code that may wrap only after an underscore, never mid-word.
  */
 export function IntegrationStatusList({ integrations, showEnv = false, className }: { integrations: IntegrationStatus[]; showEnv?: boolean; className?: string }) {
   return (
@@ -22,19 +24,19 @@ export function IntegrationStatusList({ integrations, showEnv = false, className
             <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1.5">
               <div className="flex min-w-0 items-center gap-2.5">
                 <Icon className={cn('size-5 shrink-0', pill.icon === 'connected' ? 'text-emerald-600' : pill.icon === 'ready' ? 'text-sky-600' : 'text-charcoal-400')} aria-hidden="true" />
-                <h3 className="truncate text-sm font-semibold text-charcoal-900">{i.name}</h3>
+                <h3 className="min-w-0 text-sm font-semibold text-pretty text-charcoal-900">{i.name}</h3>
               </div>
               <StatusPill status={pill.status} label={pill.label} />
             </div>
-            <p className="mt-2 text-sm leading-relaxed text-charcoal-600">{i.message}</p>
-            {i.detail ? <p className="mt-1.5 text-xs text-charcoal-500">{i.detail}</p> : null}
+            <p className="mt-2 text-sm leading-relaxed text-charcoal-600">{withSettingNames(i.message)}</p>
+            {i.detail ? <p className="mt-1.5 text-xs text-charcoal-500">{withSettingNames(i.detail)}</p> : null}
             {showEnv && i.missingEnv.length > 0 ? (
               <div className="mt-3">
                 <p className="text-xs font-medium text-charcoal-500">Missing server settings</p>
                 <ul className="mt-1 flex flex-wrap gap-1.5">
                   {i.missingEnv.map((name) => (
                     <li key={name}>
-                      <code className="rounded bg-charcoal-100 px-1.5 py-0.5 text-xs text-charcoal-700">{name}</code>
+                      <SettingName name={name} />
                     </li>
                   ))}
                 </ul>
@@ -45,6 +47,35 @@ export function IntegrationStatusList({ integrations, showEnv = false, className
       })}
     </ul>
   );
+}
+
+/** Upper-case setting names with underscores (GOOGLE_CLIENT_ID, SQUARE_WEBHOOK_SIGNATURE_KEY). */
+const SETTING_NAME = /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g;
+
+/** A server setting name as code that may break only after an underscore (a `<wbr>`), never in the middle of a word. */
+export function SettingName({ name }: { name: string }) {
+  const parts = name.split('_');
+  return (
+    <code className="rounded bg-charcoal-100 px-1 py-0.5 text-[0.85em] break-normal text-charcoal-700">
+      {parts.map((part, idx) => (
+        <Fragment key={idx}>
+          {part}
+          {idx < parts.length - 1 ? (
+            <>
+              _<wbr />
+            </>
+          ) : null}
+        </Fragment>
+      ))}
+    </code>
+  );
+}
+
+/** Text with any server setting names in it shown as {@link SettingName}. */
+export function withSettingNames(text: string): ReactNode {
+  const pieces = text.split(SETTING_NAME);
+  if (pieces.length === 1) return text;
+  return pieces.map((piece, idx) => (idx % 2 === 1 ? <SettingName key={idx} name={piece} /> : <Fragment key={idx}>{piece}</Fragment>));
 }
 
 /** Link to the integrations settings tab, for section pages. */

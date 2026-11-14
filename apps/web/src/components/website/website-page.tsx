@@ -56,8 +56,9 @@ export function WebsitePage({ initial, initialEdits, initialSearch }: { initial:
         <SearchPerformanceCard initial={initialSearch} queryGroups={overview.queryGroups} onChanged={() => void reload()} />
         <Card>
           <CardHeader title="Connections" description="Search Console is read-only. WordPress is optional; without it every change comes with copy-paste steps." />
-          <CardBody className="min-w-0 [overflow-wrap:anywhere]">
-            <IntegrationStatusList integrations={connections} />
+          <CardBody className="min-w-0">
+            {/* One card per row: this column is narrow, and two side by side cut the names short. */}
+            <IntegrationStatusList integrations={connections} className="md:grid-cols-1" />
           </CardBody>
         </Card>
       </div>

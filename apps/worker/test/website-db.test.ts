@@ -15,13 +15,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AnthropicWebsiteCopywriter } from '@studio/ai';
 import { loadEnv } from '@studio/config';
 import { AppSettingsSchema, CancelledError, NonRetryableError, WebsiteAuditResultSchema, newId, settingsSnapshot, siteScopeFrom, type JobType, type WebsiteChange } from '@studio/core';
+import { approvalHash } from '@studio/core/website-approval';
 import { schema, type DatabaseHandle } from '@studio/db';
 import type { WorkerContext } from '../src/context.js';
 import { handleSearchSync } from '../src/handlers/search-sync.js';
 import { handleWebsiteAudit, trimOldAuditResults } from '../src/handlers/website-audit.js';
 import { handleWebsiteConnectionCheck } from '../src/handlers/website-connection-check.js';
 import { DRAFTS_REJECTED_MESSAGE, handleWebsiteCopyDraft } from '../src/handlers/website-copy-draft.js';
-import { handleWebsiteEditApply } from '../src/handlers/website-edit-apply.js';
+import { APPROVAL_NO_LONGER_MATCHES, handleWebsiteEditApply } from '../src/handlers/website-edit-apply.js';
 import { encryptCredential } from '../src/lib/credentials.js';
 import { GOOGLE_TOKEN_URL } from '../src/lib/google/oauth.js';
 import type { TrackedRun } from '../src/lib/job-tracker.js';
@@ -403,16 +404,18 @@ describe.skipIf(skip)('website module on a real database with local fakes', () =
     let wp: ReturnType<typeof fakeWordPress>;
     const withWp = (): WorkerContext => ({ ...ctx, fetch: wp.fetch });
 
-    async function connect(password = 'abcd efgh ijkl mnop') {
+    async function connect(password = 'abcd efgh ijkl mnop', baseUrl = BASE) {
       await handle.db.delete(schema.integrationConnections).where(eq(schema.integrationConnections.provider, 'website'));
       await handle.db.insert(schema.integrationConnections).values({
         id: newId(),
         provider: 'website',
         status: 'connected',
         accessTokenEncrypted: encryptCredential(ctx.env, `studio-assistant:${password}`),
-        config: { baseUrl: BASE },
+        config: { baseUrl },
       });
     }
+    /** What the web app stores when the owner presses "Apply now" (the connection rows here carry no label: live). */
+    const approvalFor = (change: WebsiteChange, baseUrl = BASE) => approvalHash(change, { baseUrl, environment: 'live' });
     async function approvedEdit(change: WebsiteChange, extra: Partial<typeof schema.websiteEdits.$inferInsert> = {}): Promise<string> {
       const id = newId();
       await handle.db.insert(schema.websiteEdits).values({
@@ -424,9 +427,19 @@ describe.skipIf(skip)('website module on a real database with local fakes', () =
         source: 'owner',
         approvedBy: ownerId,
         approvedAt: NOW,
+        applyResult: { approvalHash: approvalFor(change) },
         ...extra,
       });
       return id;
+    }
+    /** The owner approves again (as `applyEdit` does): status `approved`, a fresh approval kept beside any marker. */
+    async function reapprove(id: string) {
+      const row = await edit(id);
+      const change = row.proposedChange as WebsiteChange;
+      await handle.db
+        .update(schema.websiteEdits)
+        .set({ status: 'approved', applyResult: { ...row.applyResult, approvalHash: approvalFor(change) } })
+        .where(eq(schema.websiteEdits.id, id));
     }
     const edit = async (id: string) =>
       (await handle.db.query.websiteEdits.findFirst({
@@ -556,6 +569,89 @@ describe.skipIf(skip)('website module on a real database with local fakes', () =
         )?.status,
       ).toBe('needs_reauth');
       expect(wp.state.writes).toEqual([]);
+    });
+
+    it('a write WordPress refused leaves no marker, so a later page edit never blocks the change (N1)', async () => {
+      await connect();
+      const change: WebsiteChange = { kind: 'text_replace', pageUrl: contactUrl, before: '(03) 9876 5432', after: '03 9499 1234' };
+      const id = await approvedEdit(change);
+      wp.state.failNextWrite = 403;
+      await handleWebsiteEditApply(withWp(), fakeRun(), { editId: id }, deps);
+      const refused = await edit(id);
+      expect(refused).toMatchObject({ status: 'apply_failed', statusReason: 'forbidden' });
+      expect(refused.applyResult.writeSentAt).toBeUndefined();
+      expect(refused.applyResult.preWriteHash).toBeUndefined();
+      expect(refused.applyResult.approvalHash).toBeUndefined();
+      // The page is edited in WordPress afterwards; the owner fixes the user's role and applies again.
+      wp.state.items[0]!.raw = `<p>Open Tuesday to Saturday.</p>${wp.state.items[0]!.raw}`;
+      await reapprove(id);
+      await handleWebsiteEditApply(withWp(), fakeRun(), { editId: id }, deps);
+      expect(await edit(id)).toMatchObject({ status: 'applied', applyResult: { outcome: 'applied' } });
+      expect(wp.state.items[0]?.raw).toBe('<p>Open Tuesday to Saturday.</p><h1>Contact</h1><p>Find us in Ivanhoe. Phone 03 9499 1234.</p>');
+    });
+
+    it('a marker left by a landed write is never taken as proof for re-worded text (N1)', async () => {
+      await connect();
+      const change: WebsiteChange = { kind: 'text_replace', pageUrl: contactUrl, before: '(03) 9876 5432', after: '03 9499 1234' };
+      const id = await approvedEdit(change);
+      // The write lands, then reading it back fails on the final attempt: apply_failed, the marker kept.
+      let singleGets = 0;
+      wp.state.beforeSingleGet = () => {
+        singleGets++;
+        if (singleGets === 2) throw new Error('read-back timed out');
+      };
+      await expect(handleWebsiteEditApply(withWp(), fakeRun({ willRetry: false }), { editId: id }, deps)).rejects.toBeInstanceOf(NonRetryableError);
+      wp.state.beforeSingleGet = null;
+      const failed = await edit(id);
+      expect(failed.status).toBe('apply_failed');
+      expect(failed.applyResult.writeSentAt).toEqual(expect.any(String));
+      expect(wp.state.items[0]?.raw).toContain('Phone 03 9499 1234.');
+      // Re-worded to a deletion with the marker still on the row (the worst case: web clears it too). The old number is
+      // gone, which would look like "deleted", but the marker belongs to the earlier wording: no false "applied".
+      const reworded: WebsiteChange = { ...change, after: '' };
+      await handle.db.update(schema.websiteEdits).set({ proposedChange: reworded }).where(eq(schema.websiteEdits.id, id));
+      await reapprove(id);
+      await handleWebsiteEditApply(withWp(), fakeRun(), { editId: id }, deps);
+      const after = await edit(id);
+      expect(after).toMatchObject({ status: 'apply_failed', statusReason: 'conflict' });
+      expect(after.statusMessage).not.toMatch(/Changed on your website/);
+      expect(wp.state.writes).toHaveLength(1);
+    });
+
+    it('refuses to write when the WordPress connection or the change differs from what was approved (WG2)', async () => {
+      const change: WebsiteChange = { kind: 'text_replace', pageUrl: contactUrl, before: '(03) 9876 5432', after: '03 9499 1234' };
+      // Approved for the staging site; the connection is then saved again for another WordPress site.
+      await connect('abcd efgh ijkl mnop', `https://other.${FIXTURE_HOST}`);
+      const moved = await approvedEdit(change);
+      await expect(handleWebsiteEditApply(withWp(), fakeRun(), { editId: moved }, deps)).rejects.toBeInstanceOf(NonRetryableError);
+      expect(await edit(moved)).toMatchObject({ status: 'apply_failed', statusMessage: APPROVAL_NO_LONGER_MATCHES });
+      // The old text was refreshed after the approval: the approval no longer covers it.
+      await connect();
+      const refreshed = await approvedEdit({ ...change, before: 'Phone (03) 9876 5432' }, { applyResult: { approvalHash: approvalFor(change) } });
+      await expect(handleWebsiteEditApply(withWp(), fakeRun(), { editId: refreshed }, deps)).rejects.toBeInstanceOf(NonRetryableError);
+      // A row without any recorded approval is never written either.
+      const unbound = await approvedEdit(change, { applyResult: {} });
+      await expect(handleWebsiteEditApply(withWp(), fakeRun(), { editId: unbound }, deps)).rejects.toBeInstanceOf(NonRetryableError);
+      expect(wp.calls).toEqual([]);
+      expect(wp.state.writes).toEqual([]);
+    });
+
+    it('the audit log keeps at most 200 characters of the old and new text', async () => {
+      await connect();
+      const long = `${'Fades, tapers and beard trims for every age. '.repeat(6)}Phone (03) 9876 5432.`;
+      wp.state.items[0]!.raw = `<p>${long}</p>`;
+      const change: WebsiteChange = { kind: 'text_replace', pageUrl: contactUrl, before: long, after: long.replace('(03) 9876 5432', '03 9499 1234') };
+      expect(long.length).toBeGreaterThan(250);
+      const id = await approvedEdit(change);
+      await handleWebsiteEditApply(withWp(), fakeRun(), { editId: id }, deps);
+      expect((await edit(id)).status).toBe('applied');
+      const [entry] = await handle.db
+        .select()
+        .from(schema.auditLog)
+        .where(and(eq(schema.auditLog.action, 'website.edit.applied'), eq(schema.auditLog.entityId, id)));
+      const data = entry?.data as { before: string; after: string };
+      expect(data.before.length).toBeLessThanOrEqual(200);
+      expect(data.after.length).toBeLessThanOrEqual(200);
     });
 
     it('never applies a change without the owner’s approval', async () => {

@@ -249,12 +249,15 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   changes host.
 - **SSRF guard** (`apps/worker/src/website/ssrf.ts`, `fetcher.ts`): the crawler resolves every host and refuses it if
   any address is in 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.168/16, 198.18/15, multicast,
-  reserved, ::1, fc00::/7, fe80::/10 or an IPv4-mapped private address; it connects to the checked address only (no
+  reserved, ::/96 (IPv4-compatible, incl. :: and ::1), ::ffff:0:0:0/96, NAT64 64:ff9b::/96 and 64:ff9b:1::/48,
+  100::/64, Teredo 2001::/32, 2001:db8::/32, 6to4 2002::/16, fc00::/7, fe80::/10, fec0::/10, ff00::/8 or an IPv4-mapped
+  private address (so a NAT64 gateway or tunnel cannot reach internal IPv4); it connects to the checked address only (no
   DNS rebinding), uses ports 80/443 only and re-validates every redirect. WordPress REST calls go through the same
   guard (`guarded-fetch.ts`): resolved, checked and pinned on every call, https on 443 only, redirects never followed
   (a 3xx is refused, so page content and the password are never re-sent elsewhere); the apply job checks the address
-  again before writing. Saving the WordPress address refuses private and reserved IP literals, `localhost` and local
-  network names. The ranges live in `packages/core/src/address-ranges.ts` (server-only). Only test code can allow
+  again before writing. Saving the WordPress address refuses private and reserved IP literals, `localhost`, local
+  network names and names that resolve to a private or reserved address (one that doesn't resolve yet is left to the
+  worker's check). The ranges live in `packages/core/src/address-ranges.ts` (server-only). Only test code can allow
   loopback; no setting turns the guard off.
 - **Fetched pages are data**: parsed with cheerio into capped fields, never executed; nothing on a page is followed
   except plain links in scope; React renders every string as text. The optional AI step wraps page text in a JSON
@@ -266,7 +269,14 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
 - **No live change without the owner**: connection checks are read-only; apply needs `approved_by` from the explicit
   confirmation; a retry never writes twice: a durable marker (`apply_result.writeSentAt` and the SHA-256 of the content
   the write was computed from) is stored before the write, and only that record, never the page text alone, decides
-  `already_applied`. Edits, AI drafts and audit refreshes change a prepared change only while it is still open, and an
-  approval holds only for the wording the dialog showed. Search Console is read-only (`webmasters.readonly`).
+  `already_applied`. The marker carries the hash of the change it was written for and counts for nothing else; it is
+  dropped when the wording changes (owner, AI option, a check's refresh) or WordPress refuses the write. Edits, AI
+  drafts and audit refreshes change a prepared change only while it is still open (proven by a lock-interleaving
+  test). An approval holds only for the change and destination the dialog showed: the web app stores
+  `approvalHash` (change kind, page, before, after, image, WordPress address and live/staging label) and the worker
+  refuses to write when the connection was saved again for another site or the change moved on. Right before the
+  write the page is read again (content and `modified_gmt`), so an edit made in WordPress meanwhile is never
+  overwritten. Search Console is read-only (`webmasters.readonly`).
 - **Privacy**: checks store extracted facts, never page HTML or images. Search queries stay server-side and owner-only
-  and can be deleted on disconnect ("Also delete stored search data").
+  and can be deleted on disconnect ("Also delete stored search data"): every stored Search Console row goes, for
+  every property this connection synced, since choosing another property keeps the earlier rows.

@@ -345,7 +345,7 @@ apply internals beyond `outcome`, `message` and `verification`. Shapes: `apps/we
 | PATCH | `/api/website/edits/[id]` | `{ after }` | `{ edit, warnings }`; kind limits (titles 10–70, descriptions 50–170); `checkCopyClaims` warnings are soft for the owner's text; source → `owner`. 409 when the change was claimed for applying meanwhile (also for `choose-draft`) |
 | POST | `/api/website/edits/[id]/draft` | `{}` | 202 `{ job }` (`website.copy_draft`); 422 when AI isn't configured or the kind isn't a title/description |
 | POST | `/api/website/edits/[id]/choose-draft` | `{ index: 0..2 }` | `{ edit }` (source `ai_draft`, always labelled) |
-| POST | `/api/website/edits/[id]/apply` | `{ confirm: true, expectedAfter }` | 202 `{ edit, job }`; 409 when the wording changed since the dialog opened; 422 without a connected adapter or for an unsupported kind. Sets `approved_by/at`; audit `website.edit.apply_requested` |
+| POST | `/api/website/edits/[id]/apply` | `{ confirm: true, expectedAfter, expectedBefore?, expectedDestination?: { host, environment } }` | 202 `{ edit, job }`; 409 when the wording, the old text or the WordPress destination changed since the dialog opened (or the change changed between reading and approving it); 422 without a connected adapter or for an unsupported kind. Sets `approved_by/at` and `apply_result.approvalHash` (the change and destination approved; the worker refuses to write when either differs); audit `website.edit.apply_requested` (before/after trimmed to 200 characters) |
 | POST | `/api/website/edits/[id]/mark-done` | `{}` | `{ edit }`: `applied`, `applied_via = 'manual'`, verification `pending` (the next check confirms it) |
 | POST | `/api/website/edits/[id]/reject` | `{ reason? }` | `{ edit }` |
 | POST | `/api/website/edits/[id]/undo` | `{}` | 201 `{ edit }`: the reverse change (source `undo`), applied with the normal confirmation; only for WordPress-applied text and image descriptions (not for a removal, whose reverse could never find the text: 422) |
@@ -354,8 +354,8 @@ apply internals beyond `outcome`, `message` and `verification`. Shapes: `apps/we
 | PUT | `/api/website/query-groups` | `{ brandTerms?, placeTerms?, serviceTerms? }` | `{ website }` |
 | PUT | `/api/integrations/google-search-console/property` | `{ siteUrl }` (one of the readable listed properties) | `{ property, job }` + queues `search.sync` (`connect`) |
 | POST | `/api/integrations/google-search-console/check` | `{}` | 202 `{ job }` (read-only) |
-| DELETE | `/api/integrations/google-search-console` | `?deleteData=true\|false` | 202; status `disconnected`, queues the shared `google.disconnect`, optionally deletes stored search numbers |
-| POST | `/api/integrations/website/wordpress` | `{ baseUrl (https), username, applicationPassword }` | 202 `{ state: 'checking', job }`; the credential is encrypted and never echoed. 400 for a non-443 port, a private or reserved IP address, `localhost` or a local network name |
+| DELETE | `/api/integrations/google-search-console` | `?deleteData=true\|false` | 202; status `disconnected`, queues the shared `google.disconnect`; `deleteData=true` deletes every stored Search Console row (all properties this connection ever synced, since choosing another property keeps the earlier rows) |
+| POST | `/api/integrations/website/wordpress` | `{ baseUrl (https), username, applicationPassword }` | 202 `{ state: 'checking', job }`; the credential is encrypted and never echoed. 400 for a non-443 port, a private or reserved IP address, `localhost`, a local network name, or a name that resolves to a private or reserved address (a name that doesn't resolve yet is accepted; the worker checks again before every connection) |
 | POST | `/api/integrations/website/check` | `{}` | 202 `{ job }` (read-only) |
 | DELETE | `/api/integrations/website` | — | 204; wipes the credential; approved changes go back to "To review" |
 

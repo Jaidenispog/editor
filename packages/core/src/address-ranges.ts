@@ -3,7 +3,7 @@ import { BlockList, isIP } from 'node:net';
 /**
  * Address ranges an outbound request from the server must never reach (SSRF guard, design §7.1): private, loopback,
  * link-local, carrier-grade NAT, benchmark, documentation, multicast and reserved ranges, IPv4 and IPv6, including
- * IPv4-mapped IPv6 forms. Server-only (uses `node:net`), so it is imported by path (`@studio/core/address-ranges`) and
+ * IPv4-mapped IPv6 forms and the IPv6 ranges that embed or translate IPv4 (NAT64, 6to4, Teredo). Server-only (uses `node:net`), so it is imported by path (`@studio/core/address-ranges`) and
  * is not part of the browser-safe index. Used by the worker's crawler and WordPress transport, and by the web app to
  * refuse such addresses when the owner saves them.
  */
@@ -27,14 +27,24 @@ for (const [net, prefix] of [
 ] as const) {
   BLOCKED.addSubnet(net, prefix, 'ipv4');
 }
+// IPv6, including every range that embeds or translates an IPv4 address (so a NAT64 gateway, a tunnel or an old
+// IPv4-compatible form cannot reach an internal IPv4 address): IPv4-compatible ::/96 (covers :: and ::1),
+// IPv4-translated ::ffff:0:0:0/96, NAT64 64:ff9b::/96 and its local-use 64:ff9b:1::/48, Teredo 2001::/32 and 6to4
+// 2002::/16. IPv4-mapped ::ffff:0:0/96 is not listed: its IPv4 address is checked against the IPv4 list instead.
 for (const [net, prefix] of [
-  ['::', 128],
+  ['::', 96],
   ['::1', 128],
+  ['::ffff:0:0:0', 96],
+  ['64:ff9b::', 96],
+  ['64:ff9b:1::', 48],
+  ['100::', 64],
+  ['2001::', 32],
+  ['2001:db8::', 32],
+  ['2002::', 16],
   ['fc00::', 7],
   ['fe80::', 10],
+  ['fec0::', 10],
   ['ff00::', 8],
-  ['64:ff9b::', 96],
-  ['2001:db8::', 32],
 ] as const) {
   BLOCKED.addSubnet(net, prefix, 'ipv6');
 }
@@ -81,4 +91,34 @@ export function privateHostReason(hostname: string): string | null {
   if (!host.includes('.')) return 'a local network name';
   if (/\.(local|internal|lan|home|intranet|corp|private)$/.test(host)) return 'a local network name';
   return null;
+}
+
+/** Resolves a host name to its addresses (`dns.lookup` with `all: true`; injectable for tests). */
+export type AddressLookup = (host: string) => Promise<Array<{ address: string }>>;
+
+/**
+ * Why a host name the owner typed points at an address the server must never reach, after resolving it (every address
+ * is checked, as the worker does when it connects), or null. A name that does not resolve (yet), or a lookup slower
+ * than `timeoutMs`, gives null: the worker checks the address again, with DNS, before every connection.
+ */
+export async function resolvedPrivateHostReason(hostname: string, lookup: AddressLookup, timeoutMs = 3000): Promise<string | null> {
+  const literal = privateHostReason(hostname);
+  if (literal) return literal;
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (isIP(host)) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const addresses = await Promise.race([
+      lookup(host),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+    if (!addresses) return null;
+    return addresses.some((a) => isBlockedAddress(a.address)) ? 'a private or reserved address' : null;
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
