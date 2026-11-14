@@ -329,6 +329,14 @@ project with "YouTube Data API v3" enabled, restrict it to that API, and give it
 app only checks that it is set). One read a day plus manual refreshes uses about 1–5 of the default 10,000 daily
 quota units. Without it the chart shows "Optional, not configured" and everything else works.
 
+## Instagram hashtag watch (Stage B, WP5)
+
+No new server settings: it uses the Instagram connection from Publishing (`META_APP_ID`, `META_APP_SECRET`,
+`META_LOGIN_CONFIG_ID`, optional `META_GRAPH_VERSION`). To turn it on, add the hashtag search permission (and the
+"Instagram Public Content Access" feature, if the App Dashboard lists it) to the same Facebook Login for Business
+configuration, reconnect Instagram in Settings → Integrations, then add a hashtag in Settings → Trends. If Meta does
+not allow it for this app setup, the card says "Not available" and everything else works.
+
 ## Publishing (Stage B, WP4)
 
 - Manual posting needs nothing. Instagram direct publishing needs `META_APP_ID`, `META_APP_SECRET` and

@@ -162,17 +162,21 @@ trend-label.ts`) and never says "trending" or "viral". No trend data is ever pas
 
 | Method | Route | Notes |
 | --- | --- | --- |
-| GET | `/api/trends` | Signed in. `{ live: [{ watch, items }], noted: TrendItemDto[], curated: TrendItemDto[], sources: [{ provider, status, watch }], viewer: { id, isOwner } }`. `TrendItemDto` has `kind` (`curated`, `noted`, `live`), `label`, `dueForReview` (curated, 180 days), `editorSuggestion` (no source link), `sources`, `stale` and the YouTube row fields (`channelTitle`, `categoryName`, `position`) |
+| GET | `/api/trends` | Signed in. `{ live: [{ watch, items, posts? }], noted: TrendItemDto[], curated: TrendItemDto[], sources: [{ provider, status, watch, watches?, budget? }], viewer: { id, isOwner } }`. `TrendItemDto` has `kind` (`curated`, `noted`, `live`), `label`, `dueForReview` (curated, 180 days), `editorSuggestion` (no source link), `sources`, `stale` and the YouTube row fields (`channelTitle`, `categoryName`, `position`). Instagram hashtag groups (WP5) are in Instagram's `top_media` order and carry `posts` (`rank`, `mediaType`, `mediaTypeLabel`, `postedAt`, `likeCount`, `commentsCount`, `countsLine`, `permalink`; never captions, images or account names); the `instagram_hashtag` source has `watches` (one per hashtag) and `budget` (`used`, `limit` 30, `enabled`, `maxEnabled` 10, `nextFreeAt`) |
 | POST / PUT / DELETE | `/api/trends` | Owner. Curated references only (`sourceKind` cannot be set by clients; noted and live rows give 404). PUT `markVerified: true` = "Mark reviewed" |
 | POST | `/api/trends/notes` | Signed in. `{ title, summary?, platform: tiktok\|instagram\|youtube\|in_person\|other, sourceUrl? (http/https), seenOn: YYYY-MM-DD (not in the future), category? }` → 201 `{ trend }` labelled "Noted by <name> on <date> · seen on <platform>"; audit `trends.noted` |
 | DELETE | `/api/trends/notes/[id]` | The owner, or the person who noted it (otherwise 403); audit `trends.note_deleted` |
-| POST | `/api/trends/watches` | Owner. `{ provider: 'youtube_chart' }` → `{ watch, jobId }` and queues `trends.refresh` (the first read is the capability check); already on → `jobId: null`. 422 `INTEGRATION_NOT_CONFIGURED` without `YOUTUBE_API_KEY`; `{ provider: 'instagram_hashtag' }` → 422 `UNSUPPORTED` until WP5. Audit `trends.watch_added` |
+| POST | `/api/trends/watches` | Owner. `{ provider: 'youtube_chart' }` or `{ provider: 'instagram_hashtag', hashtag }` → `{ watch, jobId }` and queues `trends.refresh` (the first read is the capability check); already on → `jobId: null`. YouTube: 422 `INTEGRATION_NOT_CONFIGURED` without `YOUTUBE_API_KEY`. Instagram (WP5): the hashtag is lower-cased without `#`; 400 `VALIDATION` unless it is letters, digits and underscores (≤ 100) and free of "trending"/"viral"; 422 `INTEGRATION_NOT_CONFIGURED` without the Meta app settings or a connected Instagram account ("Reconnect …" when it needs re-authorisation); 409 `CONFLICT` with 10 hashtags watched; 429 `RATE_LIMITED` (`details.nextFreeAt`) when 30 distinct hashtags were queried in the last 7 days (turned-off ones included); a hashtag already counted this week can be turned back on. Audit `trends.watch_added` |
 | DELETE | `/api/trends/watches/[id]` | Owner. Turns the source off and deletes its items; the row stays 7 days (hashtag budget). Audit `trends.watch_removed` |
 | POST | `/api/trends/watches/[id]/refresh` | Owner. `{ jobId }`; reuses a queued or running read. 429 `RATE_LIMITED` (with `details.nextRefreshAt`) within 6 h of the last query, or 5 min after a failed one |
 
 `GET /api/integrations/status` has a `youtube_chart` entry: `not_configured` without the key (names
 `YOUTUBE_API_KEY` only), otherwise `not_connected` with `liveMode: 'read_only'`; the list there does not read the
 watch, so the chart's own state (`connected`, `error` for quota or a bad key) is in the `sources` of `GET /api/trends`.
+It also has an `instagram_hashtags` entry (WP5): `not_configured` without `META_APP_ID`, `META_APP_SECRET`,
+`META_LOGIN_CONFIG_ID`; `not_connected` until Instagram is connected (publishing) and while no hashtag is watched;
+`needs_reauth` when the `meta` connection or a watch needs reconnecting; `unavailable` once Meta refused hashtag search
+(`social_accounts.capabilities.hashtagSearch = false`); `connected` (`liveMode: 'read_only'`) after a successful read.
 
 Job `trends.refresh` `{ watchId: string | null }`: null (the daily 5:41 am Melbourne schedule, key `daily`) queues one
 read per enabled watch. One read: `GET https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&
@@ -181,6 +185,17 @@ missing from the result deleted, watch `ok`. `quotaExceeded`/`dailyLimitExceeded
 `badRequest`) → "The YouTube API key isn't valid."; `accessNotConfigured` → "Turn on YouTube Data API v3 in your Google
 Cloud project."; 5xx/429/network → one retry after 5 minutes, then `error`. `maintenance.cleanup` deletes live items
 fetched over 7 days ago and turned-off watches last queried over 7 days ago.
+
+Instagram hashtag watch reads (WP5, worker `modules/trends/instagram.ts`), as the watch's Instagram account with the
+`meta` connection's token in an `Authorization: Bearer` header (never in a URL or payload) plus `appsecret_proof`,
+15 s per call: first `GET graph.facebook.com/{META_GRAPH_VERSION}/ig_hashtag_search?user_id&q` (stores the hashtag id
+in `external_id`), then on every read `GET /{hashtag-id}/top_media?user_id&fields=id,media_type,permalink,timestamp,
+like_count,comments_count&limit=9`. Before each read the watch takes a place in the weekly limit under an advisory
+lock (a hashtag already counted this week always may; a new one is refused as `quota` with the date a place frees
+up, and nothing is called). Mapping: 190 → `needs_reauth`; 10, 200–299 or a permission/feature message →
+`unavailable` and `capabilities.hashtagSearch = false`; 4, 17, 32, 613 → `quota` ("Instagram asked us to slow down;
+trying again tomorrow"); Instagram's 30-hashtag message → `quota`; empty search → `error` ("Instagram found no hashtag
+with that name"); other 4xx → `error` with Meta's message; 5xx/429/network/time-out → one retry, then `error`.
 
 ## Publishing (Stage B, WP4 and WP10)
 

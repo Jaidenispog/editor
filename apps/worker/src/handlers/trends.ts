@@ -6,11 +6,13 @@ import { writeWorkerAudit } from '../lib/audit.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
 import { trendSourceName, type LiveTrendItemInput, type TrendSourceOutcome, type TrendSourceRegistry } from '../modules/trends/sources.js';
+import { claimHashtagQuery, refreshInstagramHashtag, type HashtagLimitRefusal } from '../modules/trends/instagram.js';
 import { refreshYouTubeChart } from '../modules/trends/youtube.js';
 
-/** Live sources this version can read. WP5 adds `instagram_hashtag` from `modules/trends/instagram.ts`. */
+/** Live sources this version can read: the YouTube AU popular chart (WP3) and the Instagram hashtag watch (WP5). */
 export const TREND_SOURCES: TrendSourceRegistry = {
   youtube_chart: refreshYouTubeChart,
+  instagram_hashtag: refreshInstagramHashtag,
 };
 
 /** Shown on a watch whose provider this version cannot read. */
@@ -47,14 +49,16 @@ export async function handleTrendsRefresh(ctx: WorkerContext, run: TrackedRun, p
     return;
   }
 
-  // Recorded before the call, so a query always counts (the Instagram budget counts every hashtag touched).
-  const marked = await ctx.db
-    .update(w)
-    .set({ lastQueriedAt: new Date(), updatedAt: new Date() })
-    .where(and(eq(w.id, watch.id), eq(w.enabled, true)))
-    .returning({ id: w.id });
-  if (!marked.length) {
+  // Recorded before the call, so a query always counts (the Instagram budget counts every hashtag touched). An
+  // Instagram hashtag is checked against the weekly limit of 30 in the same step.
+  const claim = await markQueried(ctx, watch);
+  if (claim === 'off') {
     await run.progress(1, 'This source was turned off; nothing to fetch');
+    return;
+  }
+  if (claim !== 'claimed') {
+    await setWatchStatus(ctx, watch, claim);
+    await run.progress(1, claim.message);
     return;
   }
 
@@ -83,6 +87,21 @@ export async function handleTrendsRefresh(ctx: WorkerContext, run: TrackedRun, p
   const stored = await storeLiveItems(ctx, watch, outcome.items);
   if (stored === null) await run.progress(1, 'This source was turned off while it was being read; nothing was kept');
   else await run.progress(1, `Fetched ${stored} item${stored === 1 ? '' : 's'}`);
+}
+
+/**
+ * Sets `last_queried_at` just before a read. For an Instagram hashtag this also takes a place in the weekly limit
+ * (or returns the refusal with the date a place frees up). `off` means the watch was turned off meanwhile.
+ */
+async function markQueried(ctx: WorkerContext, watch: TrendWatch): Promise<'claimed' | 'off' | HashtagLimitRefusal> {
+  if (watch.provider === 'instagram_hashtag') return claimHashtagQuery(ctx.db, watch);
+  const w = schema.trendWatches;
+  const marked = await ctx.db
+    .update(w)
+    .set({ lastQueriedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(w.id, watch.id), eq(w.enabled, true)))
+    .returning({ id: w.id });
+  return marked.length ? 'claimed' : 'off';
 }
 
 /**

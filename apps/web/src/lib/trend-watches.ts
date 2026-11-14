@@ -7,20 +7,24 @@ import type { SessionUser } from './auth.js';
 import { writeAudit } from './audit.js';
 import { getDb } from './db.js';
 import { getEnv } from './env.js';
-import { youTubeChartStatus, type TrendWatchFact } from './integrations/trends.js';
+import { addHashtagWatch, hashtagBudgetDto, loadInstagramFacts, loadInstagramPosts, type HashtagBudgetDto, type InstagramPostDto } from './hashtag-watches.js';
+import { instagramHashtagStatus, youTubeChartStatus, type TrendWatchFact } from './integrations/trends.js';
+import type { ConnectionFacts, IntegrationEnv } from './integrations/types.js';
 import { ACTIVE_JOB_STATUSES, createTrackedJob } from './jobs.js';
 import type { IntegrationStatus } from './shared/integration-types.js';
 import { listTrends, type TrendItemDto } from './trends.js';
+
+export type { HashtagBudgetDto, InstagramPostDto } from './hashtag-watches.js';
 
 /**
  * Live trend sources the owner turns on (`trend_watches`). Turning one on, removing it and refreshing it by hand
  * are owner actions and are audit-logged. Every fetch is read-only and runs in the worker (`trends.refresh`).
  */
 
-/** Body for POST /api/trends/watches. The Instagram hashtag watch is accepted by the schema but built by WP5. */
+/** Body for POST /api/trends/watches: the YouTube chart, or one Instagram hashtag (checked by `hashtagProblem`). */
 export const AddWatchSchema = z.discriminatedUnion('provider', [
   z.object({ provider: z.literal('youtube_chart') }),
-  z.object({ provider: z.literal('instagram_hashtag'), hashtag: z.string().trim().min(1).max(100) }),
+  z.object({ provider: z.literal('instagram_hashtag'), hashtag: z.string().trim().min(1, 'Type a hashtag to watch').max(101) }),
 ]);
 
 /** A watch as sent to the browser (never any credential). */
@@ -37,16 +41,23 @@ export interface TrendWatchDto {
   nextRefreshAt: string | null;
 }
 
-/** One live source card: its status (shared integration contract) and its watch, if turned on. */
+/**
+ * One live source card: its status (shared integration contract) and its watch, if turned on. The Instagram hashtag
+ * watch has one watch per hashtag: `watches` lists them (newest first), `watch` is the one still fetching, if any,
+ * else the newest, and `budget` is the weekly hashtag limit.
+ */
 export interface TrendSourceDto {
   provider: TrendWatchProvider;
   status: IntegrationStatus;
   watch: TrendWatchDto | null;
+  watches?: TrendWatchDto[];
+  budget?: HashtagBudgetDto;
 }
 
 /** Everything Settings → Trends shows, in its three groups. */
 export interface TrendsOverview {
-  live: Array<{ watch: TrendWatchDto; items: TrendItemDto[] }>;
+  /** Per watch, its items; Instagram hashtag groups also carry each post's facts, in Instagram's order. */
+  live: Array<{ watch: TrendWatchDto; items: TrendItemDto[]; posts?: InstagramPostDto[] }>;
   noted: TrendItemDto[];
   curated: TrendItemDto[];
   sources: TrendSourceDto[];
@@ -73,24 +84,48 @@ export async function listWatches(): Promise<TrendWatch[]> {
   return getDb().select().from(schema.trendWatches).orderBy(desc(schema.trendWatches.createdAt));
 }
 
-/** The status of each live source this version offers, from the server settings and the stored watches. */
-export function trendSourceStatuses(env: { YOUTUBE_API_KEY?: string | undefined }, watches: TrendWatch[], now: Date = new Date()): TrendSourceDto[] {
+/**
+ * The status of each live source this version offers, from the server settings and the stored watches. The
+ * Instagram card also needs the Instagram connection facts; without them it says Instagram is not connected.
+ */
+export function trendSourceStatuses(
+  env: Partial<IntegrationEnv>,
+  watches: TrendWatch[],
+  now: Date = new Date(),
+  instagram: Pick<ConnectionFacts, 'connections' | 'socialAccounts'> = { connections: [], socialAccounts: [] },
+): TrendSourceDto[] {
   const facts: TrendWatchFact[] = watches.map((w) => ({ provider: w.provider, enabled: w.enabled, status: w.status, statusMessage: w.statusMessage, lastSuccessAt: w.lastSuccessAt }));
   const youtube = watches.find((w) => w.provider === 'youtube_chart' && w.enabled) ?? null;
-  return [{ provider: 'youtube_chart', status: youTubeChartStatus(env, facts), watch: youtube ? toWatchDto(youtube, now) : null }];
+  const hashtags = watches.filter((w) => w.provider === 'instagram_hashtag' && w.enabled).map((w) => toWatchDto(w, now));
+  return [
+    { provider: 'youtube_chart', status: youTubeChartStatus(env, facts), watch: youtube ? toWatchDto(youtube, now) : null },
+    {
+      provider: 'instagram_hashtag',
+      status: instagramHashtagStatus(env as IntegrationEnv, instagram, facts),
+      watch: hashtags.find((w) => w.status === 'pending') ?? hashtags[0] ?? null,
+      watches: hashtags,
+      budget: hashtagBudgetDto(watches, now),
+    },
+  ];
 }
 
 /** The three groups plus the source cards, for GET /api/trends and the Settings page. */
 export async function getTrendsOverview(viewer: SessionUser, now: Date = new Date()): Promise<TrendsOverview> {
-  const [items, watches] = await Promise.all([listTrends(now), listWatches()]);
-  const live = watches
-    .filter((w) => w.enabled)
-    .map((w) => ({ watch: toWatchDto(w, now), items: items.filter((i) => i.kind === 'live' && i.watchId === w.id) }));
+  const [items, watches, instagram] = await Promise.all([listTrends(now), listWatches(), loadInstagramFacts()]);
+  const enabled = watches.filter((w) => w.enabled);
+  const posts = await loadInstagramPosts(enabled.filter((w) => w.provider === 'instagram_hashtag').map((w) => w.id));
+  const live = enabled.map((w) => {
+    const own = items.filter((i) => i.kind === 'live' && i.watchId === w.id);
+    if (w.provider !== 'instagram_hashtag') return { watch: toWatchDto(w, now), items: own };
+    // Instagram's own order (top posts first); items whose facts do not parse are not shown.
+    const ranked = own.filter((i) => posts.has(i.id)).sort((a, b) => (posts.get(a.id)?.rank ?? 99) - (posts.get(b.id)?.rank ?? 99));
+    return { watch: toWatchDto(w, now), items: ranked, posts: ranked.map((i) => posts.get(i.id) as InstagramPostDto) };
+  });
   return {
     live,
     noted: items.filter((i) => i.kind === 'noted'),
     curated: items.filter((i) => i.kind === 'curated'),
-    sources: trendSourceStatuses(getEnv(), watches, now),
+    sources: trendSourceStatuses(getEnv(), watches, now, instagram),
     viewer: { id: viewer.id, isOwner: viewer.role === 'owner' },
   };
 }
@@ -114,7 +149,9 @@ async function queueRefresh(watchId: string): Promise<string> {
  */
 export async function addWatch(user: SessionUser, input: z.infer<typeof AddWatchSchema>): Promise<{ watch: TrendWatchDto; jobId: string | null }> {
   if (input.provider === 'instagram_hashtag') {
-    throw new AppError('UNSUPPORTED', 'The Instagram hashtag watch isn’t available in this version yet. Everything else on this page works without it.');
+    const now = new Date();
+    const added = await addHashtagWatch(user, input.hashtag, now);
+    return { watch: toWatchDto(added.watch, now), jobId: added.queue ? await queueRefresh(added.watch.id) : null };
   }
   if (!getEnv().YOUTUBE_API_KEY?.trim()) {
     throw new AppError('INTEGRATION_NOT_CONFIGURED', 'Add a YouTube Data API key (YOUTUBE_API_KEY) to the server first.');

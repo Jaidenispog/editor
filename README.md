@@ -117,3 +117,13 @@ against a fake (it needs the Anthropic key).
   post was made), the music rule, duplicate protection and restart recovery.
 - **Waiting on account access**: a Meta business app, configuration and the first real verification post (see the
   owner checklist in `docs/design/stage-bc-plan.md` §7). TikTok stays manual until the optional Zernio route (WP10).
+
+## Instagram hashtag watch (Stage B, WP5)
+
+- **Built**: hashtags the owner chooses in Settings → Trends → Live signals, read once a day through the Instagram
+  account connected for publishing (top 9 posts each: type, posted date, counts as reported, link; no captions,
+  images or names), with Instagram's 30-hashtags-a-week limit and at most 10 watched at once.
+- **Verified with fakes**: every read and refusal against a fake of Meta's API on a test database (no real call).
+- **Waiting on account access**: a connected Instagram account and the hashtag search permission on the Meta app.
+  Whether Meta allows hashtag search for this kind of app setup is unknown until the first real read; "Not
+  available" is then a valid answer.
