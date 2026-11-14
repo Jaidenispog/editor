@@ -144,6 +144,24 @@ suite('Email and review routes (database-backed)', () => {
     });
   });
 
+  describe('email status', () => {
+    it('stops saying "Waiting for approval" once a live send outside the domain recorded approved: true (R10)', async () => {
+      signIn(owner);
+      const t = schema.integrationConnections;
+      const { sql } = await import('drizzle-orm');
+      const statusRoute = await import('../src/app/api/email/status/route');
+      const read = async () => (await call(statusRoute.GET, 'GET', '/api/email/status')).json;
+      await db.update(t).set({ capabilities: { deliveryType: 'live', webhooksConfigured: true, approved: false } }).where(eq(t.provider, 'postmark'));
+      const waiting = await read();
+      expect(waiting).toMatchObject({ state: 'awaiting_approval', approved: false, pill: { label: 'Waiting for approval' } });
+      // The worker's recordApprovalSeen merges { approved: true } into the stored capabilities.
+      await db.update(t).set({ capabilities: sql`${t.capabilities} || '{"approved": true}'::jsonb` }).where(eq(t.provider, 'postmark'));
+      const approved = await read();
+      expect(approved).toMatchObject({ state: 'connected', approved: true, pill: { label: 'Live' } });
+      await db.update(t).set({ capabilities: { deliveryType: 'live', webhooksConfigured: true } }).where(eq(t.provider, 'postmark'));
+    });
+  });
+
   describe('public unsubscribe', () => {
     it('GET changes nothing; POST unsubscribes once, suppresses queued marketing and queues the Postmark push; repeats are harmless', async () => {
       const c = await customer();
@@ -177,6 +195,52 @@ suite('Email and review routes (database-backed)', () => {
 
       const invalid = await call(r.POST, 'POST', '/api/public/unsubscribe/nope', { token: 'nope' }, '', { 'content-type': 'application/x-www-form-urlencoded' });
       expect(invalid.res.headers.get('location')).toBe(`${ORIGIN}/u/nope?invalid=1`);
+    });
+
+    it('the page shows "You are unsubscribed" only when an unsubscribe or withdrawal is recorded (never from ?done=1)', async () => {
+      const { unsubscribePageFacts, unsubscribePageView } = await import('../src/lib/email');
+      const c = await customer();
+      await grant(c);
+      const token = 'D'.repeat(43);
+      const id = randomUUID();
+      await db.insert(schema.emailMessages).values({ id, customerId: c.id, toEmail: c.email, subject: 'News', bodyHtml: '', bodyText: '', purpose: 'campaign', messageClass: 'campaign', origin: 'campaign', dedupeKey: `t:${id}`, status: 'sent', unsubscribeTokenHash: createHash('sha256').update(token).digest('hex') });
+      expect(unsubscribePageView(await unsubscribePageFacts(token))).toBe('form');
+      // Postmark's own block on the address is not the client's request: the button stays.
+      await db.insert(schema.emailSuppressions).values({ id: randomUUID(), emailLower: c.email, scope: 'marketing', reason: 'provider_inactive', source: 'send_error' });
+      expect(unsubscribePageView(await unsubscribePageFacts(token))).toBe('form');
+      // A withdrawal recorded elsewhere (for example Square's email preference) counts.
+      await db.insert(schema.consentEvents).values({ id: randomUUID(), customerId: c.id, emailLower: c.email, kind: 'withdrawn', method: 'square_preference', occurredAt: new Date() });
+      expect(unsubscribePageView(await unsubscribePageFacts(token))).toBe('done');
+      expect(unsubscribePageView({ valid: false, alreadyUnsubscribed: true })).toBe('invalid');
+    });
+
+    it('tells the owner when Postmark still blocks a re-consented address, until Postmark reports it reactivated', async () => {
+      const { consentDetail } = await import('../src/lib/email');
+      const c = await customer();
+      await grant(c);
+      expect((await consentDetail(c.id)).providerStillSuppressed).toBe(false);
+      const entityId = `email:${createHash('sha256').update(c.email.toLowerCase()).digest('hex').slice(0, 12)}`;
+      await db.insert(schema.auditLog).values({ id: randomUUID(), action: 'email.provider_still_suppressed', entityType: 'email_address', entityId, createdAt: new Date(Date.now() - 60_000) });
+      expect((await consentDetail(c.id)).providerStillSuppressed).toBe(true);
+      await db.insert(schema.auditLog).values({ id: randomUUID(), action: 'email.postmark_reactivated', entityType: 'email_address', entityId });
+      expect((await consentDetail(c.id)).providerStillSuppressed).toBe(false);
+    });
+
+    it('an unsubscribe link from an earlier attempt of a message that was sent again still works', async () => {
+      const { unsubscribePageFacts, unsubscribeByToken } = await import('../src/lib/email');
+      const c = await customer();
+      await grant(c);
+      const id = randomUUID();
+      const current = 'C'.repeat(43);
+      const earlier = 'E'.repeat(43);
+      await db.insert(schema.emailMessages).values({ id, customerId: c.id, toEmail: c.email, subject: 'A quick favour', bodyHtml: '', bodyText: '', purpose: 'review_request', messageClass: 'review_request', origin: 'manual', dedupeKey: `t:${id}`, status: 'sent', unsubscribeTokenHash: createHash('sha256').update(current).digest('hex') });
+      await db.insert(schema.emailLinkTokens).values({ tokenHash: createHash('sha256').update(earlier).digest('hex'), kind: 'unsubscribe', emailMessageId: id });
+      expect(await unsubscribePageFacts(earlier)).toMatchObject({ valid: true, alreadyUnsubscribed: false });
+      expect(await unsubscribeByToken(earlier, 'unsubscribe_page', null)).toBe('done');
+      expect(await db.select().from(schema.emailSuppressions).where(eq(schema.emailSuppressions.emailLower, c.email))).toEqual([expect.objectContaining({ reason: 'unsubscribe', emailMessageId: id })]);
+      // A review-click token is not an unsubscribe token.
+      await db.insert(schema.emailLinkTokens).values({ tokenHash: createHash('sha256').update('K'.repeat(43)).digest('hex'), kind: 'review_click', emailMessageId: id });
+      expect((await unsubscribePageFacts('K'.repeat(43))).valid).toBe(false);
     });
   });
 
@@ -294,6 +358,17 @@ suite('Email and review routes (database-backed)', () => {
       const row = await db.query.reviewRequests.findFirst({ where: eq(schema.reviewRequests.customerId, c.id) });
       expect(row).toMatchObject({ clickCount: 1 });
       expect(row.firstClickedAt).not.toBeNull();
+
+      // A request that was sent again: the first copy's token (kept in email_link_tokens) still counts for it.
+      const msgId = randomUUID();
+      await db.insert(schema.emailMessages).values({ id: msgId, customerId: c.id, toEmail: c.email, subject: 'A quick favour', bodyHtml: '', bodyText: '', purpose: 'review_request', messageClass: 'review_request', origin: 'manual', dedupeKey: `t:${msgId}`, status: 'sent' });
+      const again = randomUUID();
+      const oldToken = 'O'.repeat(43);
+      await db.insert(schema.reviewRequests).values({ id: again, customerId: c.id, channel: 'email', emailMessageId: msgId, status: 'sent', clickTokenHash: createHash('sha256').update('N'.repeat(43)).digest('hex'), dedupeKey: `t:${again}` });
+      await db.insert(schema.emailLinkTokens).values({ tokenHash: createHash('sha256').update(oldToken).digest('hex'), kind: 'review_click', emailMessageId: msgId, reviewRequestId: again });
+      const old = await call(r.GET, 'GET', `/r/${oldToken}`, { token: oldToken }, undefined, {});
+      expect(old.res.headers.get('location')).toBe('https://g.page/r/ivanhoe/review');
+      expect((await db.query.reviewRequests.findFirst({ where: eq(schema.reviewRequests.id, again) })).clickCount).toBe(1);
     });
 
     it('a manual request needs the attestation, skips clients without permission, and refuses a second one for the same visit', async () => {
@@ -331,6 +406,28 @@ suite('Email and review routes (database-backed)', () => {
       const on = await call(auto.PUT, 'PUT', '/api/email/automations/review_request', { name: 'review_request' }, body);
       expect(on.json.automation).toMatchObject({ enabled: true, mode: 'approve_each' });
       expect(on.json.automation.enabledAt).toBeTruthy();
+
+      // While the automation is on, ticking "Square sends feedback or review requests" is refused (switch it off first).
+      const tick = await call(set.PUT, 'PUT', '/api/email/settings', {}, { squareSends: { confirmations: true, reminders: true, feedbackOrReviews: true } });
+      expect(tick.status).toBe(422);
+      expect(tick.json.error.message).toMatch(/Switch them off first/);
+      const { getSettings } = await import('../src/lib/settings');
+      expect((await getSettings()).email.squareSends.feedbackOrReviews).toBe(false);
+      await call(auto.PUT, 'PUT', '/api/email/automations/review_request', { name: 'review_request' }, { ...body, enabled: false });
+      expect((await call(set.PUT, 'PUT', '/api/email/settings', {}, { squareSends: { confirmations: true, reminders: true, feedbackOrReviews: true } })).status).toBe(200);
+      await call(set.PUT, 'PUT', '/api/email/settings', {}, { squareSends: { confirmations: true, reminders: true, feedbackOrReviews: false } });
+    });
+
+    it('switching the review automation on needs a review link that passes the review-link check, not just https', async () => {
+      signIn(owner);
+      const { updateSettingsLocked } = await import('../src/lib/settings');
+      await updateSettingsLocked((s: any) => ({ ...s, business: { ...s.business, googleReviewLink: 'https://evil.example/review' } }));
+      const auto = await import('../src/app/api/email/automations/[name]/route');
+      const body = { enabled: true, mode: 'approve_each', templateId: null, delayHours: 3, dailyCap: 10 };
+      const refused = await call(auto.PUT, 'PUT', '/api/email/automations/review_request', { name: 'review_request' }, body);
+      expect(refused.status).toBe(422);
+      expect(refused.json.error.message).toMatch(/review link/);
+      await updateSettingsLocked((s: any) => ({ ...s, business: { ...s.business, googleReviewLink: 'https://g.page/r/ivanhoe/review' } }));
     });
 
     it('limits the Google rating refresh to once every 10 minutes', async () => {

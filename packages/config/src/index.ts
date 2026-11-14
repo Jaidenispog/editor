@@ -102,6 +102,7 @@ export const EnvSchema = z.object({
   POSTMARK_SERVER_TOKEN: z.string().optional(),
   POSTMARK_TRANSACTIONAL_STREAM: z.string().min(1).default('outbound'),
   POSTMARK_BROADCAST_STREAM: z.string().min(1).default('broadcast'),
+  /** HTTP Basic credentials Postmark sends with each webhook; the password must be random and at least 32 characters. */
   POSTMARK_WEBHOOK_USERNAME: z.string().optional(),
   POSTMARK_WEBHOOK_PASSWORD: z.string().optional(),
   /** Not used: Postmark replaced Resend. Kept so older .env files still load. */
@@ -152,6 +153,13 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   }
   if (env.EMAIL_PROVIDER === 'postmark' && (!env.POSTMARK_SERVER_TOKEN || !env.EMAIL_FROM)) {
     throw new Error('EMAIL_PROVIDER=postmark requires POSTMARK_SERVER_TOKEN and EMAIL_FROM');
+  }
+  // The Basic credentials are the Postmark webhook's only authentication (email design §8.1.5): random, 32+ characters.
+  if (env.POSTMARK_WEBHOOK_PASSWORD && env.POSTMARK_WEBHOOK_PASSWORD.length < 32) {
+    throw new Error('POSTMARK_WEBHOOK_PASSWORD must be a random value of at least 32 characters');
+  }
+  if (Boolean(env.POSTMARK_WEBHOOK_PASSWORD) !== Boolean(env.POSTMARK_WEBHOOK_USERNAME)) {
+    throw new Error('Set both POSTMARK_WEBHOOK_USERNAME and POSTMARK_WEBHOOK_PASSWORD (or neither)');
   }
   if (source === process.env) cached = env;
   return env;

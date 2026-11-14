@@ -228,8 +228,15 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   nothing a webhook says can grant consent, lift a suppression or cause a send. The unsubscribe POST is CSRF-exempt by
   design because it can only reduce sending; viewing the page changes nothing (mail scanners pre-fetch links).
 - **Tokens**: unsubscribe and review-link tokens are random 32 bytes (base64url), stored only as SHA-256, never expire
-  and do not depend on `APP_SECRET`. Stored message bodies hold `[unsubscribe link]` / `[review link]` markers, never a
-  usable token. The unsubscribe page masks the address.
+  and do not depend on `APP_SECRET`. When the owner sends a message again after checking an unknown outcome, the new
+  attempt gets new tokens and the earlier hashes move to `email_link_tokens`, so a copy that did arrive keeps a working
+  unsubscribe link. Stored message bodies hold `[unsubscribe link]` / `[review link]` markers, never a usable token.
+  The unsubscribe page masks the address, and shows "You're unsubscribed" only when one is recorded.
+- **Webhook credentials**: `POSTMARK_WEBHOOK_PASSWORD` must be at least 32 characters and set together with
+  `POSTMARK_WEBHOOK_USERNAME`; otherwise the app and worker refuse to start (they are the webhook's only
+  authentication).
+- **Owner-supplied links in emails**: `{{booking_link}}` becomes a link only when `business.bookingLink` is https
+  (otherwise its label is plain text), and Settings → Business accepts only an https booking link.
 - **Secrets**: `POSTMARK_SERVER_TOKEN` and `GOOGLE_MAPS_API_KEY` are read by the worker only; the web app needs only the
   webhook credentials. Logs redact `X-Postmark-Server-Token`, `X-Goog-Api-Key` and hash email addresses; job payloads
   and audit entries hold ids and reason codes, never addresses or bodies.

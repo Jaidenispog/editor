@@ -386,6 +386,7 @@ its process alive, and five clips sat on "Waiting to be analysed" with no hint w
   sync and idempotent second run, three ≤ 31-day windows, six statuses verbatim, stale versions, webhook processing and
   merchant mismatch, missed `booking.created`, reconcile, payment match and refund, 23-hour DST availability,
   deleted customer scrubbed, token refresh and revoked token, revoke, environment purge, cleanup, no writes to Square;
+  a revoke for a connection made in the other environment makes no call and is audited `environment_changed`;
   a sandbox payment match is labelled but never completes, live completion runs as a production connection; an
   "attended" mark made while the appointment runs completes once it ends; two locations with none chosen copy no
   bookings and another location's booking is ignored; a disconnect with purge during a sync leaves no bookings or
@@ -396,17 +397,24 @@ its process alive, and five clips sat on "Waiting to be analysed" with no hint w
   owner only, service confirmation, `writesEnabled` refused, availability validation, disconnect with purge and revoke,
   reconnecting in the other environment purges; the webhook stores only the minimal envelope; nothing listed until a
   location is chosen and choosing removes the other location's bookings; a sandbox mark never completes; the
-  review-request badge on past bookings).
+  review-request badge on past bookings, including "Sent before the booking changed"; a signed delivery for another
+  merchant or after a disconnect does not update "last update received"; the revoke outcome on the card: waiting,
+  failed with the App integrations instruction, revoked; owner only). `apps/worker/test/square-map.test.ts`: a booking
+  whose `start_at` is not an RFC 3339 instant is skipped and its id reported.
 - Sandbox smoke test (developer, read-only, needs the owner's Square developer application):
   `pnpm --filter @studio/worker square:smoke` refuses to run unless `SQUARE_ENVIRONMENT=sandbox`; record its output in
-  `docs/research/square-sandbox-results.md`. The write checks belong to WP6b.
+  `docs/research/square-sandbox-results.md`. It searches tomorrow's availability (one Melbourne day, 24 hours); the
+  23-hour daylight-saving day cannot be checked live once its date has passed, so the summary says
+  "not verifiable live" and that case rests on the unit and fake-Square tests. `customers.allPages` is the count over
+  every page. The write checks belong to WP6b.
 - Only verifiable with the owner's accounts: `session=false` and the code lifetime, webhook delivery to the production
   URL, payment-match quality, the location time zone and the Dashboard deep links.
 
 ## Email and review requests (Stage C, WP7)
 
 - Unit: `packages/core/test/email-render.test.ts` (escaping, Markdown subset, footer, commercial footer, markers in
-  stored copies), `email-lint.test.ts` (every word list, whole words only, built-in templates pass),
+  stored copies, `{{booking_link}}` linked only when https, the state required in the sender address),
+  `email-lint.test.ts` (every word list, whole words only, built-in templates pass),
   `email-policy.test.ts` (one case per gate reason, window and caps across Melbourne days, preview only to the owner,
   sandbox label, consent fold incl. inferred rule and ties, auto-pause, spread by daily cap, audience reasons),
   `reviews.test.ts` (parameter-key pin test, completion evidence, `enabledAt`/`maxAgeDays` boundaries, link
@@ -425,13 +433,22 @@ its process alive, and five clips sat on "Waiting to be analysed" with no hint w
   window still reach the newest; a cancel during expansion leaves nothing approved; queued campaign messages are not
   sent after a pause, a cancel or an automatic pause; with webhooks missing, dispatch creates no job for commercial
   email and a held message is pushed forward; a live send outside the sender's domain clears "pending approval"; the
-  start-up provider check is queued once and only when email is configured.
+  start-up provider check is queued once and only when email is configured; "Send again" after an owner check keeps
+  the first attempt's unsubscribe and review-link token hashes (`email_link_tokens`); a cancel that arrives after the
+  claim releases it (no provider call, no owner check); a 406 caused by the app's own earlier unsubscribe push to a
+  re-consented address says so and adds no block.
 - Database-backed routes: `apps/web/test/email-routes.integration.test.ts` — webhook with wrong credentials → 401 and
   nothing stored, replayed delivery → one row and one job; unsubscribe POST idempotent (form and one-click), GET
   changes nothing; staff 403 and the CSRF guard; approval refused by the gate (422); stale campaign preview → 409;
   consent with the wording hash; review link validation and the `/r` redirect; manual review requests; the review
-  automation blocked while Square sends feedback; Places refresh limit; pause hands queued messages back, resume
-  re-expands, cancel cancels them.
+  automation blocked while Square sends feedback, and ticking "Square sends feedback" refused while the automation is
+  on; the automation needs a review link that passes `validateReviewLink`; Places refresh limit; pause hands queued
+  messages back, resume re-expands, cancel cancels them; `/u/[token]` shows "You're unsubscribed" only when an
+  unsubscribe or withdrawal is recorded (never from `?done=1`); earlier tokens of a message sent again still
+  unsubscribe and still count review-link opens; the client page flags an address Postmark still blocks after new
+  consent; `/api/email/status` leaves "Waiting for approval" once `approved: true` is stored.
+  `apps/web/test/preferences.test.ts`: the booking link must be https. `packages/config/test/env.test.ts`: a webhook
+  password shorter than 32 characters, or only one of the two webhook credentials, refuses to start.
 - Sandbox smoke test (owner present, Postmark **Sandbox** server, never a client):
   `pnpm --filter @studio/worker exec tsx scripts/email-smoke.ts` runs the read-only check; add
   `--send-to-self <your address>` to send one Transactional and one Broadcast message to yourself and look both up by

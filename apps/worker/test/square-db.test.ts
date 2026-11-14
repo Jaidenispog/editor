@@ -494,6 +494,17 @@ describe.skipIf(skip)('Square Tier 0 with a fake Square API', () => {
     fake.scenario.revoked = false;
   });
 
+  it('does not try to revoke a connection made in the other environment (the server’s app keys are for this one)', async () => {
+    const before = fake.callsTo('revoke').length;
+    const run = fakeRun();
+    // The server runs with SQUARE_ENVIRONMENT=sandbox; the disconnected connection was a live (production) one.
+    await handleSquareRevoke(ctx, run, { merchantId: fake.scenario.merchantId, environment: 'production' });
+    expect(fake.callsTo('revoke')).toHaveLength(before);
+    expect(run.messages.at(-1)).toMatch(/other Square environment/);
+    const failed = await handle.db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'integration.square.revoke_failed'));
+    expect(failed.at(-1)?.data).toMatchObject({ reason: 'environment_changed', environment: 'production', merchantId: fake.scenario.merchantId });
+  });
+
   it('environment switch: purges the sandbox rows and scrubs customers that email rows still reference', async () => {
     const jordan = (await handle.db.query.customers.findFirst({ where: eq(schema.customers.squareCustomerId, 'CUST_JORDAN') }))!;
     await handle.db.insert(schema.emailMessages).values({ id: newId(), customerId: jordan.id, toEmail: 'jordan@example.com', subject: 'Thanks', bodyHtml: '<p>x</p>', bodyText: 'x', purpose: 'follow_up', dedupeKey: 'follow_up:test', status: 'draft' });

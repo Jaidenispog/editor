@@ -20,6 +20,16 @@ describe('PUT /api/settings patch rules', () => {
     expect(SettingsPatchSchema.safeParse({ preferences: { pacing: 'fast' } }).success).toBe(true);
   });
 
+  it('accepts only an https booking link (it becomes a link in client emails)', () => {
+    for (const bad of ['http://book.example/studio', 'javascript:alert(1)', 'book.example']) {
+      const r = SettingsPatchSchema.safeParse({ business: { bookingLink: bad } });
+      expect(r.success).toBe(false);
+      expect(r.error?.issues[0]?.path).toEqual(['business', 'bookingLink']);
+    }
+    expect(SettingsPatchSchema.safeParse({ business: { bookingLink: 'https://book.example/studio' } }).success).toBe(true);
+    expect(SettingsPatchSchema.safeParse({ business: { bookingLink: '' } }).success).toBe(true);
+  });
+
   it('pins every learnable field a save changes, and keeps server-owned fields', () => {
     const learned = { ...DEFAULT_SETTINGS.preferences.learned, computedAt: NOW.toISOString(), eventsConsidered: 3 };
     const current: AppSettings = { ...DEFAULT_SETTINGS, preferences: { ...DEFAULT_SETTINGS.preferences, learned, styleAffinity: { clean_promo: 4 } } };

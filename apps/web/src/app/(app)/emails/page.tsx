@@ -39,7 +39,7 @@ export default async function EmailsPage() {
         eyebrow="Emails"
         title="Emails"
         description="Follow-ups, occasional campaigns and one-off emails to clients — written or prepared for you, approved by you, and marketing only to clients who agreed to hear from you."
-        actions={<StatusPill status={status.pill.status} label={status.pill.label} />}
+        status={<StatusPill status={status.pill.status} label={status.pill.label} />}
       />
       {status.state !== 'connected' ? (
         <Alert tone={status.state === 'error' || status.state === 'needs_reauth' ? 'danger' : 'info'} className="mb-6" title={status.state === 'not_configured' ? 'Email sending isn’t set up yet' : undefined}>

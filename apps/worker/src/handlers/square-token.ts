@@ -53,6 +53,11 @@ export async function handleSquareTokenRefresh(ctx: WorkerContext, run: TrackedR
  * Square revokes EVERY token of the app for that seller, so a revoke that runs after the owner has already
  * reconnected the same Square account (a busy or restarted worker, or a retry) would kill the new connection. It is
  * skipped then (audited as `integration.square.revoke_skipped`): the owner's reconnect wins.
+ *
+ * The server's application id and secret belong to `SQUARE_ENVIRONMENT`. A disconnect of a connection made in the
+ * other environment (the server was switched since) cannot be revoked with them, so no call is made: it is audited as
+ * `revoke_failed { reason: 'environment_changed' }` and the Square card tells the owner to remove the app in that
+ * environment's App integrations page.
  */
 export async function handleSquareRevoke(ctx: WorkerContext, run: TrackedRun, payload: JobPayload<'square.revoke'>): Promise<void> {
   const env = ctx.env;
@@ -68,16 +73,29 @@ export async function handleSquareRevoke(ctx: WorkerContext, run: TrackedRun, pa
     await run.progress(1, 'Square is not set up on the server, so access could not be revoked. Remove Studio Assistant in Square’s App integrations page.');
     return;
   }
-  const res = await httpRequest(
-    ctx,
-    `${squareBaseUrl(env, payload.environment)}/oauth2/revoke`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Client ${env.SQUARE_APPLICATION_SECRET}`, 'square-version': '2026-09-16' },
-      body: JSON.stringify({ client_id: env.SQUARE_APPLICATION_ID, merchant_id: payload.merchantId }),
-    },
-    { label: 'square.revoke', signal: run.signal, timeoutMs: 20_000 },
-  );
+  if (payload.environment !== env.SQUARE_ENVIRONMENT) {
+    await audit('integration.square.revoke_failed', { reason: 'environment_changed' });
+    await run.progress(1, 'Studio Assistant is now set to the other Square environment, so it cannot revoke this access. Remove Studio Assistant in Square’s App integrations page for that account.');
+    return;
+  }
+  let res: Response;
+  try {
+    res = await httpRequest(
+      ctx,
+      `${squareBaseUrl(env, payload.environment)}/oauth2/revoke`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Client ${env.SQUARE_APPLICATION_SECRET}`, 'square-version': '2026-09-16' },
+        body: JSON.stringify({ client_id: env.SQUARE_APPLICATION_ID, merchant_id: payload.merchantId }),
+      },
+      { label: 'square.revoke', signal: run.signal, timeoutMs: 20_000 },
+    );
+  } catch (err) {
+    // Square could not be reached: retried by the queue; after the last attempt the owner is told (audited outcome).
+    if (run.willRetry || run.signal.aborted) throw err;
+    await audit('integration.square.revoke_failed', { reason: 'unreachable' });
+    throw new NonRetryableError('PROCESSING_FAILED', 'Square could not be reached to revoke access. Remove Studio Assistant in Square’s App integrations page.');
+  }
   const body = (await readJson(res)) as { success?: boolean; errors?: Array<{ code?: string }> } | null;
   if (res.ok && body?.success !== false) {
     await audit('integration.square.revoked', {});

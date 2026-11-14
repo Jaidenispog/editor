@@ -372,12 +372,16 @@ not allow it for this app setup, the card says "Not available" and everything el
 - Settings (all optional; nothing is sent until they are set): `EMAIL_PROVIDER=postmark`, `POSTMARK_SERVER_TOKEN`
   (worker), `EMAIL_FROM` (e.g. `"Your Studio" <hello@yourstudio.com.au>`), `POSTMARK_TRANSACTIONAL_STREAM` (default
   `outbound`), `POSTMARK_BROADCAST_STREAM` (default `broadcast`), `POSTMARK_WEBHOOK_USERNAME` /
-  `POSTMARK_WEBHOOK_PASSWORD` (web; long random values), `GOOGLE_MAPS_API_KEY` (worker; restricted to Places API (New)).
+  `POSTMARK_WEBHOOK_PASSWORD` (web; random values, set both or neither; the password must be at least 32 characters
+  or start-up is refused), `GOOGLE_MAPS_API_KEY` (worker; restricted to Places API (New)).
   `RESEND_API_KEY` is not used.
 - The public paths `/api/webhooks/postmark`, `/api/public/unsubscribe/…`, `/u/…` and `/r/…` must be reachable over
   HTTPS at `APP_URL` (unsubscribe links in sent emails must keep working for at least 30 days, so keep `APP_URL`
   stable). Add the webhook URL `https://<app address>/api/webhooks/postmark` with the Basic credentials to both streams
-  (Delivery, Bounce, Spam complaint, Subscription change; Open and Click off).
+  (Delivery, Bounce, Spam complaint, Subscription change; Open and Click off). Leave the Broadcast stream's unsubscribe
+  handling managed by Postmark (the app's check cannot read that setting). If a client who unsubscribed later gives
+  permission again, remove the address from the Broadcast stream's suppression list in Postmark; the app never does
+  that itself and flags the client when Postmark still refuses.
 - Outbound HTTPS from the worker to `api.postmarkapp.com` and `places.googleapis.com`, plus DNS look-ups for the
   advisory DMARC / Return-Path hints.
 - The worker schedules `email.dispatch` every minute, `email.automation.sweep` every 10 minutes, the read-only

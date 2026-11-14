@@ -44,6 +44,8 @@ describe('email integration cards', () => {
     expect(postmarkCard(env(), conn({ status: 'needs_reauth' }))).toMatchObject({ state: 'needs_reauth' });
     expect(postmarkCard(env(), conn({ status: 'error', lastError: 'Postmark has no Broadcast stream' }))).toMatchObject({ state: 'error', message: 'Postmark has no Broadcast stream' });
     expect(postmarkCard(env(), conn({ capabilities: { deliveryType: 'live', approved: false } }))).toMatchObject({ state: 'awaiting_approval' });
+    // The integration card follows the stored flag: once a live send recorded approved: true it is connected again.
+    expect(postmarkCard(env(), conn({ capabilities: { deliveryType: 'live', webhooksConfigured: true, approved: true } }))).toMatchObject({ state: 'connected', stateLabel: 'Live' });
     expect(postmarkCard(env(), conn({ capabilities: { deliveryType: 'sandbox', webhooksConfigured: true } }))).toMatchObject({ state: 'connected', liveMode: 'sandbox', stateLabel: 'Test server' });
     expect(postmarkCard(env(), conn({ capabilities: { deliveryType: 'live', webhooksConfigured: false } }))).toMatchObject({ state: 'connected', stateLabel: 'Webhooks missing' });
     expect(postmarkCard(env(), conn())).toMatchObject({ state: 'connected', liveMode: 'live', stateLabel: 'Live', verified: false });

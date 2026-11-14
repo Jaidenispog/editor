@@ -118,6 +118,11 @@ function ClientDialog({ client, isOwner, onClose, onChanged }: { client: ClientD
             {client.reviewOptOut ? <StatusPill status="skipped" label="No review requests" /> : null}
           </div>
           {detail.postmarkReactivated ? <Alert tone="info">Postmark reactivated this address; the app still blocks it until you record new permission (or confirm the address was fixed).</Alert> : null}
+          {detail.providerStillSuppressed ? (
+            <Alert tone="warning">
+              Postmark still blocks marketing emails to this address: the app added it to Postmark&rsquo;s unsubscribe list when this client unsubscribed, and the app never removes addresses from that list itself. The client has given permission again, so remove the address from your Broadcast stream&rsquo;s suppression list in Postmark.
+            </Alert>
+          ) : null}
           <div className="flex flex-wrap gap-2">
             {client.email ? (
               <Button className="min-h-11" onClick={() => setView('consent')}>

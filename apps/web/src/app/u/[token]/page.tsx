@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { connection } from 'next/server';
-import { unsubscribePageFacts } from '@/lib/email';
+import { unsubscribePageFacts, unsubscribePageView } from '@/lib/email';
 
 export const metadata: Metadata = { title: 'Unsubscribe', robots: { index: false, follow: false } };
 
@@ -8,16 +8,17 @@ export const metadata: Metadata = { title: 'Unsubscribe', robots: { index: false
  * Public unsubscribe page (no sign-in, no app navigation, works without JavaScript). Viewing it changes nothing (mail
  * scanners pre-fetch links); only the button's plain form post unsubscribes. It never expires and asks for nothing.
  */
-export default async function UnsubscribePage({ params, searchParams }: { params: Promise<{ token: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+export default async function UnsubscribePage({ params }: { params: Promise<{ token: string }> }) {
   await connection();
   const { token } = await params;
-  const sp = await searchParams;
   const facts = await unsubscribePageFacts(token);
+  // The `?done=1` / `?invalid=1` the form post redirects with are ignored: the state comes from what is recorded.
+  const view = unsubscribePageView(facts);
   const phone = facts.phone ? ` or call ${facts.phone}` : '';
   let body;
-  if (!facts.valid || sp['invalid']) {
+  if (view === 'invalid') {
     body = <p>{`This link isn't valid. Reply to any email from us${phone} and we'll remove you the same day.`}</p>;
-  } else if (sp['done'] || facts.alreadyUnsubscribed) {
+  } else if (view === 'done') {
     body = (
       <>
         <h1 className="text-xl font-semibold text-charcoal-950">You&rsquo;re unsubscribed</h1>

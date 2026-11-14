@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import { timestamps } from './common.js';
 // Circular import is safe: the references are only resolved lazily inside the callbacks below.
-import { customers, emailMessages, emailTemplates, users, webhookEvents } from '../schema.js';
+import { customers, emailMessages, emailTemplates, reviewRequests, users, webhookEvents } from '../schema.js';
 
 /**
  * Tables of the email and review requests module (WP7, email design §5.2). `../schema.ts` re-exports this file, so
@@ -102,6 +102,27 @@ export const emailSuppressions = pgTable(
     uniqueIndex('email_suppressions_active_idx').on(t.emailLower, t.scope, t.reason).where(sql`${t.liftedAt} IS NULL`),
     index('email_suppressions_email_idx').on(t.emailLower),
   ],
+);
+
+/**
+ * Earlier personal link tokens of a message that was claimed more than once ("Send again" after the owner checked an
+ * unknown outcome). The current token hashes stay on `email_messages.unsubscribe_token_hash` and
+ * `review_requests.click_token_hash`; a re-claim moves the previous hash here first, so a copy of the email that did
+ * reach the client keeps a working `/u/{token}` and `/r/{token}` link. Only SHA-256 hashes are stored.
+ */
+export const emailLinkTokens = pgTable(
+  'email_link_tokens',
+  {
+    tokenHash: text('token_hash').primaryKey(),
+    kind: text('kind', { enum: ['unsubscribe', 'review_click'] }).notNull(),
+    emailMessageId: text('email_message_id')
+      .notNull()
+      .references(() => emailMessages.id, { onDelete: 'cascade' }),
+    /** The review request a `review_click` token counts opens for. */
+    reviewRequestId: text('review_request_id').references(() => reviewRequests.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('email_link_tokens_message_idx').on(t.emailMessageId)],
 );
 
 export type EmailCampaignRow = typeof emailCampaigns.$inferSelect;

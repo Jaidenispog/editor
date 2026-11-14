@@ -22,6 +22,7 @@ import {
   normaliseEmail,
   renderEmail,
   spreadByDailyCap,
+  validateReviewLink,
   type AppSettings,
   type AutomationName,
   type CampaignAudienceFilter,
@@ -333,18 +334,52 @@ export async function recordUnsubscribe(input: {
 /** The message an unsubscribe token belongs to, or null (tokens are looked up by their SHA-256 only). */
 export async function messageForUnsubscribeToken(token: string): Promise<MessageRow | null> {
   if (!/^[A-Za-z0-9_-]{20,100}$/.test(token)) return null;
-  const row = await getDb().query.emailMessages.findFirst({ where: eq(schema.emailMessages.unsubscribeTokenHash, hashLinkToken(token)) });
-  return row ?? null;
+  const hash = hashLinkToken(token);
+  const row = await getDb().query.emailMessages.findFirst({ where: eq(schema.emailMessages.unsubscribeTokenHash, hash) });
+  if (row) return row;
+  // A token from an earlier attempt of a message that was sent again (the owner's "Send again") keeps working.
+  const earlier = await getDb().query.emailLinkTokens.findFirst({ where: and(eq(schema.emailLinkTokens.tokenHash, hash), eq(schema.emailLinkTokens.kind, 'unsubscribe')) });
+  if (!earlier) return null;
+  return (await getDb().query.emailMessages.findFirst({ where: eq(schema.emailMessages.id, earlier.emailMessageId) })) ?? null;
+}
+
+export interface UnsubscribePageFacts {
+  valid: boolean;
+  maskedEmail: string | null;
+  businessName: string;
+  phone: string;
+  accentColour: string;
+  /** The address really is unsubscribed: an active unsubscribe block, or its latest consent event is a withdrawal. */
+  alreadyUnsubscribed: boolean;
 }
 
 /** What the public unsubscribe page shows for a token (masked address only). */
-export async function unsubscribePageFacts(token: string): Promise<{ valid: boolean; maskedEmail: string | null; businessName: string; phone: string; accentColour: string; alreadyUnsubscribed: boolean }> {
+export async function unsubscribePageFacts(token: string): Promise<UnsubscribePageFacts> {
   const settings = await getSettings();
   const msg = await messageForUnsubscribeToken(token);
   const base = { businessName: settings.brand.businessName, phone: settings.business.phone, accentColour: settings.brand.accentColour };
   if (!msg) return { ...base, valid: false, maskedEmail: null, alreadyUnsubscribed: false };
-  const active = await activeSuppressions(getDb(), normaliseEmail(msg.toEmail));
-  return { ...base, valid: true, maskedEmail: maskEmail(msg.toEmail), alreadyUnsubscribed: active.some((s) => s.scope === 'marketing' && s.reason === 'unsubscribe') };
+  const emailLower = normaliseEmail(msg.toEmail);
+  const active = await activeSuppressions(getDb(), emailLower);
+  const [latest] = await getDb()
+    .select({ kind: schema.consentEvents.kind })
+    .from(schema.consentEvents)
+    .where(eq(schema.consentEvents.emailLower, emailLower))
+    .orderBy(desc(schema.consentEvents.occurredAt), desc(schema.consentEvents.createdAt))
+    .limit(1);
+  // Only a recorded unsubscribe or withdrawal counts. Another block (for example Postmark reporting the address as
+  // inactive) is not the client's own request, so the page still offers the button.
+  const alreadyUnsubscribed = active.some((s) => s.reason === 'unsubscribe') || latest?.kind === 'withdrawn';
+  return { ...base, valid: true, maskedEmail: maskEmail(msg.toEmail), alreadyUnsubscribed };
+}
+
+/**
+ * Which state the unsubscribe page shows. Decided only from what is recorded, never from the address bar: adding
+ * `?done=1` to a link must not show "You're unsubscribed" when nothing was recorded.
+ */
+export function unsubscribePageView(facts: Pick<UnsubscribePageFacts, 'valid' | 'alreadyUnsubscribed'>): 'invalid' | 'done' | 'form' {
+  if (!facts.valid) return 'invalid';
+  return facts.alreadyUnsubscribed ? 'done' : 'form';
 }
 
 /** Unsubscribes the address a token belongs to (the public page's POST and RFC 8058 one-click). */
@@ -397,12 +432,14 @@ export async function consentDetail(customerId: string): Promise<ConsentDetailDt
   const customer = await getDb().query.customers.findFirst({ where: eq(schema.customers.id, customerId) });
   if (!customer) throw new AppError('NOT_FOUND', 'That client no longer exists.');
   const { wording, wordingHash } = currentWording(settings);
-  if (!customer.email) return { state: { status: 'none', label: 'No email address' }, events: [], suppressions: [], wording, wordingHash, postmarkReactivated: false };
+  if (!customer.email) return { state: { status: 'none', label: 'No email address' }, events: [], suppressions: [], wording, wordingHash, postmarkReactivated: false, providerStillSuppressed: false };
   const emailLower = normaliseEmail(customer.email);
   const { consent } = await consentFor(customer.email, settings);
   const events = await getDb().select().from(schema.consentEvents).where(eq(schema.consentEvents.emailLower, emailLower)).orderBy(desc(schema.consentEvents.occurredAt));
   const suppressions = await getDb().select().from(schema.emailSuppressions).where(eq(schema.emailSuppressions.emailLower, emailLower)).orderBy(desc(schema.emailSuppressions.createdAt));
-  const reactivated = await getDb().query.auditLog.findFirst({ where: and(eq(schema.auditLog.action, 'email.postmark_reactivated'), eq(schema.auditLog.entityId, `email:${sha256(emailLower).slice(0, 12)}`)) });
+  const addressEntity = `email:${sha256(emailLower).slice(0, 12)}`;
+  const reactivated = await getDb().query.auditLog.findFirst({ where: and(eq(schema.auditLog.action, 'email.postmark_reactivated'), eq(schema.auditLog.entityId, addressEntity)), orderBy: desc(schema.auditLog.createdAt) });
+  const stillSuppressed = await getDb().query.auditLog.findFirst({ where: and(eq(schema.auditLog.action, 'email.provider_still_suppressed'), eq(schema.auditLog.entityId, addressEntity)), orderBy: desc(schema.auditLog.createdAt) });
   return {
     state: { status: consent.status, label: consentLabel(consent) },
     events: events.map((e) => ({ id: e.id, kind: e.kind, method: e.method, wording: e.wording, occurredAt: e.occurredAt.toISOString(), recordedBy: e.recordedBy })),
@@ -410,6 +447,9 @@ export async function consentDetail(customerId: string): Promise<ConsentDetailDt
     wording,
     wordingHash,
     postmarkReactivated: Boolean(reactivated) && suppressions.some((s) => !s.liftedAt),
+    // Postmark refused a marketing email after new permission because of the app's own earlier unsubscribe push,
+    // and Postmark has not reported the address reactivated since.
+    providerStillSuppressed: Boolean(stillSuppressed) && (!reactivated || reactivated.createdAt < stillSuppressed!.createdAt),
   };
 }
 
@@ -899,7 +939,7 @@ export async function updateAutomation(user: SessionUser, name: AutomationName, 
     if (input.enabled && name === 'review_request') {
       if (current.email.squareSends.feedbackOrReviews === true) throw new AppError('UNSUPPORTED', 'Square is already asking your clients for feedback; turn that off in Square first to avoid asking twice.');
       const link = current.business.googleReviewLink;
-      if (!link || !/^https:\/\//.test(link)) throw new AppError('UNSUPPORTED', 'Add your Google review link in Reviews → Review link first.');
+      if (!link || !validateReviewLink(link).valid) throw new AppError('UNSUPPORTED', 'Add your Google review link in Reviews → Review link first.');
     }
     const next = { ...input, enabledAt: input.enabled ? (prev.enabled && prev.enabledAt ? prev.enabledAt : new Date().toISOString()) : null };
     return name === 'review_request' ? { ...current, reviews: { ...current.reviews, automation: next } } : { ...current, email: { ...current.email, followUp: next } };
@@ -921,6 +961,11 @@ export async function updateAutomation(user: SessionUser, name: AutomationName, 
 export async function updateEmailSettings(user: SessionUser, input: z.infer<typeof UpdateEmailSettingsSchema>) {
   const saved = await updateSettingsLocked((current) => {
     const email = { ...current.email, ...input, squareSends: input.squareSends ?? current.email.squareSends, sendWindow: input.sendWindow ?? current.email.sendWindow };
+    // Square asking for feedback and the app's automatic review requests would ask clients twice (design §4.3): the
+    // owner switches the automation off first, which also cancels the requests it scheduled by itself.
+    if (email.squareSends.feedbackOrReviews === true && current.email.squareSends.feedbackOrReviews !== true && current.reviews.automation.enabled) {
+      throw new AppError('UNSUPPORTED', 'Automatic review requests are switched on. Switch them off first in Reviews → Requests (that also cancels the ones already scheduled), then tick this so clients are not asked twice.');
+    }
     return { ...current, email };
   });
   await writeAudit({ userId: user.id, action: 'email.settings.update', entityType: 'settings', entityId: 'email', data: { fields: Object.keys(input) } });

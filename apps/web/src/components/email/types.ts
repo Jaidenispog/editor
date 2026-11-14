@@ -106,6 +106,8 @@ export interface ConsentDetailDto {
   wording: string;
   wordingHash: string;
   postmarkReactivated: boolean;
+  /** Postmark still has the address on its Broadcast unsubscribe list after the client gave permission again. */
+  providerStillSuppressed: boolean;
 }
 
 export interface EmailStatusDto {
@@ -133,6 +135,8 @@ export interface ReviewRequestDto {
   customerName: string;
   appointment: string;
   status: string;
+  /** Sent, but the booking was cancelled, marked a no-show or "Didn't happen" afterwards (design §4.3 step 6). */
+  bookingChanged: boolean;
   skipReason: string | null;
   skipLabel: string | null;
   origin: string;

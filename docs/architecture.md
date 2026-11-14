@@ -289,7 +289,11 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   NO_SHOW/cancellation or "didn't attend" resets the source to `none`; sandbox bookings keep their attendance label
   but never complete. Verified webhooks store a minimal envelope and only queue `square.refresh`, which re-reads the
   object from Square. Stale versions never overwrite newer ones. Opening the connection (and its token refresh) runs
-  inside each handler's error handling, so its failures reach the card and fail an availability search.
+  inside each handler's error handling, so its failures reach the card and fail an availability search. A booking whose
+  `start_at` is not an RFC 3339 instant is skipped and its id logged (design §4.8). Only a signed delivery for the
+  connected seller (not after a disconnect) updates "last update received". `square.revoke` makes no call when the
+  server has since been switched to the other Square environment; the card shows the revoke outcome after a
+  disconnect and, when Square did not confirm it, tells the owner to remove the app in Square's App integrations page.
 - **Times**: everything stored in UTC; availability searches use `availabilityRange` (a 23-hour DST day is widened to
   Square's 24-hour minimum and the extra slots dropped); lists are grouped by Melbourne day.
 
@@ -307,9 +311,13 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   notes or staff input; pinned by a test).
 - **`email.send` state machine**: only `approved`/`queued` messages; the gate runs on fresh facts immediately before
   the call; a conditional claim sets `submitted_at` (the non-repeatable call marker), the hashed tokens and the
-  token-free stored copy, then Postmark is called once. Transient errors release the claim and retry; an unknown
-  outcome keeps it and the retry calls `findSent` first (found → sent, else `check_before_retry` for the owner).
-  406 suppresses the address, 412 records "waiting for approval" (cleared by the next accepted live send to an address
+  token-free stored copy, then Postmark is called once. A cancel that arrives between the claim and the call releases
+  the claim (Postmark was not called). Transient errors release the claim and retry; an unknown outcome keeps it and
+  the retry calls `findSent` first (found → sent, else `check_before_retry` for the owner). The owner's "Send again"
+  claims the message anew with new tokens; the earlier token hashes move to `email_link_tokens` (migration 0010) and
+  keep working on `/u/…` and `/r/…`. 406 suppresses the address (unless it is the app's own earlier unsubscribe push to
+  a client who has since given permission again: then no block is added and the owner is told to remove the address
+  from the Broadcast stream's suppression list in Postmark), 412 records "waiting for approval" (cleared by the next accepted live send to an address
   outside the sender's domain), auth/sender errors stop dispatch until the next successful check. Campaign messages
   are sent only while their campaign is `approved`/`sending`; a held message (`provider_not_ready`,
   `webhooks_missing`) is pushed 30 minutes forward, and dispatch leaves commercial email waiting while the webhooks
@@ -324,7 +332,10 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   the only sources of truth (the `customers` consent columns are a display cache). Webhooks (Basic auth) may only
   restrict sending or update delivery display; campaigns pause automatically above 0.1% complaints or 5% bounces.
 - **Reviews**: the owner's pasted review link (never built by the app), a tracked `/r/{token}` redirect that never
-  branches, requests tracked separately from reviews, and the Places API rating (latest snapshot only, daily).
+  branches, requests tracked separately from reviews, and the Places API rating (latest snapshot only, daily). A sent
+  request whose booking later stopped counting as a visit reads "Sent before the booking changed" (Reviews and
+  Appointments); nothing else happens. The review automation needs a link that passes `validateReviewLink`, and
+  "Square sends feedback or review requests" cannot be ticked while it is on.
 
 ## Website and local search (Stage C, WP8)
 
