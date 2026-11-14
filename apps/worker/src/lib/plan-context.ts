@@ -51,6 +51,7 @@ export interface LoadedMusic {
   beatTimesSec: number[];
 }
 
+/** Loads a music track that has finished analysing (null when none was chosen or it is not ready). */
 export async function loadMusic(ctx: WorkerContext, trackId: string | null): Promise<LoadedMusic | null> {
   if (!trackId) return null;
   const track = await ctx.db.query.musicTracks.findFirst({ where: and(eq(schema.musicTracks.id, trackId), isNull(schema.musicTracks.deletedAt)) });
@@ -58,6 +59,7 @@ export async function loadMusic(ctx: WorkerContext, trackId: string | null): Pro
   return { track, durationSec: track.durationSec, bpm: track.bpm ?? null, beatTimesSec: track.beats?.beatTimesSec ?? [] };
 }
 
+/** The owner's saved settings, or the defaults when none are stored or the stored copy no longer parses. */
 export async function loadSettings(ctx: WorkerContext): Promise<AppSettings> {
   const row = await ctx.db.query.settings.findFirst({ where: eq(schema.settings.id, 'default') });
   if (!row) return DEFAULT_SETTINGS;
@@ -71,6 +73,7 @@ export function durationBoundsFor(targetSec: number): { min: number; max: number
   return { min: Math.max(3, targetSec - slack), max: targetSec + slack };
 }
 
+/** Records one AI call's tokens and estimated cost for the usage page (nothing is written without usage). */
 export async function recordAiUsage(ctx: WorkerContext, projectId: string | null, purpose: string, usage: AiUsage | null): Promise<void> {
   if (!usage) return;
   await ctx.db.insert(schema.aiUsage).values({

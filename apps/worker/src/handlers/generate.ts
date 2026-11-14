@@ -206,6 +206,7 @@ export async function handleReviseEdit(
   }
 }
 
+/** The facts a plan is validated against: real clip lengths and audio, the music length, transcripts and the length window. */
 export function validationContextFor(footage: LoadedFootage, music: LoadedMusic | null, targetDurationSec: number, restrainedTransitionsOnly = false): PlanValidationContext {
   return {
     assets: footage.planAssets,
@@ -216,6 +217,7 @@ export function validationContextFor(footage: LoadedFootage, music: LoadedMusic 
   };
 }
 
+/** Assembles the planner's input for one style from the loaded footage, music, owner settings and any revision. */
 export function buildPlannerInput(args: {
   styleId: StyleId;
   settings: GenerationSettings;

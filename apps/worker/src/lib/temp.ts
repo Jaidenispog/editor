@@ -8,6 +8,7 @@ export async function createJobTempDir(root: string, jobId: string): Promise<str
   return dir;
 }
 
+/** Removes a job's temp directory and everything in it (missing directories are fine). */
 export async function removeTempDir(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true });
 }
