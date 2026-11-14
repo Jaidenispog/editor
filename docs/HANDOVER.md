@@ -190,16 +190,27 @@ STORAGE_DRIVER=local, STORAGE_LOCAL_ROOT=./data/storage, WORKER_TMP_DIR=./tmp/wo
 
 ### Research-driven changes still to apply (after the current agent run finishes)
 
-1. **Safe zone.** `packages/core/src/safe-zones.ts` (top 250, bottom 450, left 70, right 150) is less conservative
-   than the researched union of Meta and TikTok guidance: text only in x 120–780, y 270–1248, with a wider
-   "head" region x 120–960 for boxes ending at y ≤ 840; subtitles centred, ≤ 480 px wide, ≥ 56 px type, bottom
-   ≤ 1248. Needs a two-region SafeZone in core and matching changes in `packages/media/src/render/ass.ts` and its
-   pixel-diff test. Deferred so the in-flight integration tests are not disturbed.
+1. **Safe zone. DONE.** `packages/core/src/safe-zones.ts` now holds the researched model at 1080x1920:
+   R_strict x 120–780, y 270–1248 (all text by default); R_head x 120–960, y 270–840 (boxes ending at y ≤ 840);
+   forbidden areas y < 270, y ≥ 1248, x < 120, x ≥ 960 and the action column x ≥ 780 where y ≥ 840; subtitles
+   centred on x 540, ≤ 480 px wide, bottom ≤ 1248, ≥ 56 px type. `safeZoneFor`/`scaleSafeZone` scale it (previews
+   halve exactly). `packages/media/src/render/ass.ts` (`layoutAssDocument`) wraps and sizes text itself from
+   conservative font metrics so every box, outline, shadow, pop scale and rise travel included, stays in its region;
+   `top` text uses R_head when it fits above y 840. Tests: `packages/core/test/safe-zones.test.ts` (region maths),
+   `packages/media/test/render-ass.test.ts` (layout) and `render.test.ts` (libass every frame over grey at both sizes,
+   plus a real preview pixel diff with zero changed pixels in every forbidden area). See `packages/media/README.md`.
+   Consequence: captions at 56 px in 480 px hold about 10–16 characters per line, so a long caption takes 3+ lines;
+   splitting long captions into timed pages is a possible follow-up.
 2. **Transcription.** OpenAI `whisper-1` is scheduled to shut down on 26 Feb 2027 and newer OpenAI models give no
    documented timestamps. Default to a Deepgram Nova-3 adapter (VAD-gated); keep whisper-1 as optional.
 3. **Vision requests.** At most 20 images per Claude request; frames at 768 px; no person identification.
-4. **Export preset.** Level 4.1 at ≤ 30 fps (4.2 only for 60 fps), constant 30 fps unless every source is ≥ 50 fps,
-   closed 2 s GOP, 180 s cap, ffprobe check after every export (the renderer currently uses level 4.2 always).
+4. **Export preset. DONE** (`packages/media/src/render/command.ts`, `verify.ts`): libx264 High, level 4.1 at ≤ 30 fps
+   and 4.2 above, CRF 18 with `-maxrate 20M` (24M at 60 fps, 12M over 90 s), yuv420p, progressive, CFR, closed 2 s
+   GOP (`-g`/`-keyint_min` 2×fps, `-sc_threshold 0`, `-flags +cgop`), BT.709 tags, AAC-LC 48 kHz stereo, faststart;
+   previews keep veryfast/CRF 27 with the same GOP/CFR settings. Renders over 180 s are refused with a plain
+   `AppError('VALIDATION')`. Every export is checked with `verifyExport` (ffprobe) and fails with a plain message if
+   it does not match. Still open: the worker always exports `VERTICAL_1080` at 30 fps; choosing 60 fps when every
+   source is ≥ 50 fps is not wired up (the 4.2 path is ready for it).
 5. **Stage B/C approaches changed by the follow-ups:** Spotify links/embeds only (no Web API); TikTok export +
    manual post, optional Zernio provider later; Instagram direct publishing only after a live smoke test; Meta
    Sound Collection tracks locked to Instagram/Facebook renders; Square writes gated on plan, fee-free services and

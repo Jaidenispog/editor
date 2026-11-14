@@ -1,4 +1,5 @@
 import type { AssetProbe, EditPlan, OutputFormat, TranscriptSegment } from '@studio/core';
+import type { ExportCheck } from './verify.js';
 
 /** Preview renders are fast and small (540x960); exports are full quality (1080x1920). */
 export type RenderQuality = 'preview' | 'export';
@@ -64,6 +65,8 @@ export interface RenderResult {
   ffmpegArgs: string[];
   /** Path of the generated ASS subtitle file, or null when the plan has no on-screen text. */
   assPath: string | null;
+  /** The ffprobe check of an export (always passing, or the render would have failed); null for previews. */
+  exportCheck: ExportCheck | null;
 }
 
 /** The pure, inspectable output of buildRenderCommand. */
@@ -71,4 +74,6 @@ export interface RenderCommand {
   args: string[];
   filterComplex: string;
   totalDurationSec: number;
+  /** False when the command writes no audio stream (`-an`). */
+  hasAudio: boolean;
 }

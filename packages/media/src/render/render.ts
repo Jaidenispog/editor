@@ -1,19 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import {
-  AppError,
-  CancelledError,
-  VERTICAL_SAFE_ZONE_1080x1920,
-  scaleSafeZone,
-  validateEditPlan,
-  type PlanValidationContext,
-} from '@studio/core';
+import { AppError, CancelledError, safeZoneFor, validateEditPlan, type PlanValidationContext } from '@studio/core';
 import { FfmpegError, runFfmpeg } from '../ffmpeg.js';
 import { probeMedia } from '../ffprobe.js';
 import { buildAssDocument } from './ass.js';
-import { buildRenderCommand, resolveOutputFormat } from './command.js';
+import { assertRenderableDuration, buildRenderCommand, exportLevelFor, resolveOutputFormat } from './command.js';
 import type { RenderInputs, RenderResult } from './types.js';
+import { verifyExport, type ExportCheck } from './verify.js';
 
 /** Validation window around the target: generous, because the planners already enforced the real bounds. */
 export const DURATION_BOUNDS_FACTOR = { min: 0.5, max: 1.6 } as const;
@@ -38,10 +32,12 @@ export function planHasText(inputs: Pick<RenderInputs, 'plan' | 'brand'>): boole
 /**
  * Renders a validated edit plan to an MP4 at `outputPath`.
  *
- * Steps: re-validate the plan against the real probes (defence in depth), write the ASS overlay
- * file into tmpDir, build the FFmpeg command, run it with progress, probe the result. A cancelled
- * render rethrows CancelledError and removes the partial file; an FFmpeg failure becomes an
- * AppError('PROCESSING_FAILED') carrying the stderr tail and arguments for the logs.
+ * Steps: re-validate the plan against the real probes (defence in depth), refuse edits over
+ * MAX_RENDER_DURATION_SEC, write the ASS overlay file into tmpDir, build the FFmpeg command, run it
+ * with progress, and for exports check the file with verifyExport (codec, profile, level, size,
+ * colour tags, audio format, duration); then probe the result. A cancelled render rethrows
+ * CancelledError and removes the partial file; an FFmpeg failure, or an export that fails the
+ * check, becomes an AppError('PROCESSING_FAILED') with the details for the logs and no file left behind.
  */
 export async function renderEditPlan(inputs: RenderInputs, outputPath: string): Promise<RenderResult> {
   if (inputs.signal?.aborted) {
@@ -56,6 +52,7 @@ export async function renderEditPlan(inputs: RenderInputs, outputPath: string): 
   }
   const plan = validation.plan;
   const timeline = validation.timeline;
+  assertRenderableDuration(timeline.totalDurationSec);
 
   for (const segment of plan.segments) {
     const asset = inputs.assets[segment.assetId];
@@ -65,7 +62,7 @@ export async function renderEditPlan(inputs: RenderInputs, outputPath: string): 
   }
 
   const output = resolveOutputFormat(inputs);
-  const safeZone = scaleSafeZone(VERTICAL_SAFE_ZONE_1080x1920, output.width, output.height);
+  const safeZone = safeZoneFor(output.width, output.height);
 
   await mkdir(inputs.tmpDir, { recursive: true });
   await mkdir(dirname(outputPath), { recursive: true });
@@ -117,6 +114,23 @@ export async function renderEditPlan(inputs: RenderInputs, outputPath: string): 
     throw err;
   }
 
+  let exportCheck: ExportCheck | null = null;
+  if (inputs.quality === 'export') {
+    exportCheck = await verifyExport(
+      outputPath,
+      { width: output.width, height: output.height, fps: output.fps, level: exportLevelFor(output.fps), hasAudio: command.hasAudio, durationSec: total },
+      inputs.ffprobePath,
+    );
+    if (!exportCheck.ok) {
+      await rm(outputPath, { force: true });
+      throw new AppError(
+        'PROCESSING_FAILED',
+        'The exported video did not come out in the format Instagram and TikTok expect, so it was not saved. Please try exporting again.',
+        { details: { problems: exportCheck.problems, ffmpegArgs: command.args } },
+      );
+    }
+  }
+
   const probe = await probeMedia(outputPath, inputs.ffprobePath);
   onProgress?.(1);
   return {
@@ -126,5 +140,6 @@ export async function renderEditPlan(inputs: RenderInputs, outputPath: string): 
     probe,
     ffmpegArgs: command.args,
     assPath,
+    exportCheck,
   };
 }

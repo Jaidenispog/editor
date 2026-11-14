@@ -293,7 +293,7 @@ Build notes (origin top-left):
 - `R_strict`, the default for all text: x 120–780, y 270–1248.
 - `R_head`, for boxes whose bottom edge is at y ≤ 840: x 120–960, y 270–840.
 - Subtitles: centred at x = 540, at most 480 px wide, box bottom at y ≤ 1248, at least 56 px type.
-- The repo's current constants differ and are less conservative: `packages/core/src/safe-zones.ts` uses top 250, bottom 450, left 70, right 150. Bring them into line with these values, or record why not.
+- Applied: `packages/core/src/safe-zones.ts` now uses exactly these regions (it previously used top 250, bottom 450, left 70, right 150), and the renderer lays text out inside them (see `packages/media/README.md`).
 - Export preset:
   - libx264 High profile, level 4.1 (≤30 fps) or 4.2 (60 fps), yuv420p, progressive
   - Constant 30 fps. Use 60 fps only when every source is at least 50 fps.

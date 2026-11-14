@@ -1,12 +1,13 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execa } from 'execa';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { AppError, CancelledError, VERTICAL_PREVIEW, VERTICAL_SAFE_ZONE_1080x1920, computeTimeline, scaleSafeZone, type AssetProbe } from '@studio/core';
-import { probeMedia } from '../src/ffprobe.js';
+import { AppError, CancelledError, VERTICAL_1080, VERTICAL_PREVIEW, computeTimeline, safeZoneFor, type AssetProbe, type EditPlan, type SafeRect } from '@studio/core';
+import { ffprobeRaw, probeMedia } from '../src/ffprobe.js';
 import { runFfmpegToBuffer } from '../src/ffmpeg.js';
-import { renderEditPlan, type RenderInputs, type RenderResult } from '../src/render/index.js';
+import { escapeFilterPath, layoutAssDocument, renderEditPlan, verifyExport, type RenderInputs, type RenderResult } from '../src/render/index.js';
 import { ASSET_IDS, FONTS_DIR, MUSIC_TRACK_ID, SAMPLE_FILES, TEST_BRAND, samplePlan, shortPlan } from './render-fixtures.js';
 
 const RENDER_TIMEOUT = 240_000;
@@ -35,17 +36,72 @@ async function greyFrame(path: string, timeSec: number): Promise<Buffer> {
   return runFfmpegToBuffer(['-ss', timeSec.toFixed(3), '-i', path, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'gray', '-']);
 }
 
-function countChanged(a: Buffer, b: Buffer, width: number, region: { x0: number; x1: number; y0: number; y1: number }, threshold = 40): { changed: number; pixels: number } {
+/**
+ * Pixels in `region` whose grey level differs by more than `threshold`. Two encodes of the same
+ * footage differ by up to ~60 grey levels near sharp edges in the footage (the encoder spends bits
+ * differently once text is in the frame); a text stroke differs from its background by far more
+ * (white fill or black outline), so 64 separates the two. The libass-only test below is exact.
+ */
+function countChanged(a: Buffer, b: Buffer, width: number, region: SafeRect, threshold = 64): { changed: number; pixels: number } {
   let changed = 0;
   let pixels = 0;
-  for (let y = region.y0; y < region.y1; y++) {
-    for (let x = region.x0; x < region.x1; x++) {
+  for (let y = region.top; y < region.bottom; y++) {
+    for (let x = region.left; x < region.right; x++) {
       const i = y * width + x;
       pixels++;
       if (Math.abs((a[i] ?? 0) - (b[i] ?? 0)) > threshold) changed++;
     }
   }
   return { changed, pixels };
+}
+
+/** Transcript that makes the safe-zone plan's caption valid. */
+const SAFE_ZONE_TRANSCRIPTS = { [ASSET_IDS.a]: [{ startSec: 0.5, endSec: 3.0, text: 'clean skin fade today' }] };
+
+/**
+ * The sample plan plus a caption under the centre label, so top, centre, lower text and captions
+ * all appear. The last segment is the flat opening scene of sample C: the moving checkerboard at the
+ * end of sample A makes the encoder's noise there exceed any sensible threshold whether or not text
+ * is present, which would hide what this test is looking for.
+ */
+function safeZonePlan(): EditPlan {
+  const plan = samplePlan();
+  plan.segments[3] = { ...plan.segments[3]!, assetId: ASSET_IDS.c, inSec: 0, outSec: 1.95 };
+  plan.captions = [{ text: 'Clean skin fade today', startSec: 4.1, endSec: 5.9 }];
+  return plan;
+}
+
+/**
+ * Burns an ASS file over flat grey at the given size and returns a mask (1 = touched) of every
+ * pixel any frame changed. Frames are read one second at a time to keep memory small.
+ */
+async function textMask(assPath: string, width: number, height: number, durationSec: number, fps: number): Promise<Uint8Array> {
+  const source = ['-f', 'lavfi', '-i', `color=c=0x808080:s=${width}x${height}:r=${fps}:d=${durationSec.toFixed(3)}`];
+  const background = await runFfmpegToBuffer([...source, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'gray', '-']);
+  const mask = new Uint8Array(width * height);
+  const frameBytes = width * height;
+  for (let t = 0; t < durationSec; t += 1) {
+    const chunk = await runFfmpegToBuffer([
+      ...source,
+      '-vf',
+      `ass=filename=${escapeFilterPath(assPath)}:fontsdir=${escapeFilterPath(FONTS_DIR)}`,
+      '-ss',
+      t.toFixed(3),
+      '-t',
+      '1',
+      '-f',
+      'rawvideo',
+      '-pix_fmt',
+      'gray',
+      '-',
+    ]);
+    for (let offset = 0; offset + frameBytes <= chunk.length; offset += frameBytes) {
+      for (let i = 0; i < frameBytes; i++) {
+        if (Math.abs((chunk[offset + i] ?? 0) - (background[i] ?? 0)) > 2) mask[i] = 1;
+      }
+    }
+  }
+  return mask;
 }
 
 beforeAll(async () => {
@@ -89,40 +145,108 @@ describe('renderEditPlan with real footage', () => {
     'renders a 1080x1920 export of the same plan',
     async () => {
       const result = await renderEditPlan(inputs({ quality: 'export' }), join(workDir, 'export.mp4'));
+      const total = computeTimeline(samplePlan()).totalDurationSec;
       expect(result.probe.video).toMatchObject({ codec: 'h264', displayWidth: 1080, displayHeight: 1920, pixelFormat: 'yuv420p' });
       expect(result.probe.audio).toMatchObject({ codec: 'aac', sampleRate: 48000, channels: 2 });
-      expect(Math.abs(result.durationSec - computeTimeline(samplePlan()).totalDurationSec)).toBeLessThan(0.15);
-      expect(result.ffmpegArgs).toEqual(expect.arrayContaining(['-preset', 'slow', '-crf', '18']));
+      expect(Math.abs(result.durationSec - total)).toBeLessThan(1 / 30 + 0.001);
+      expect(result.ffmpegArgs).toEqual(expect.arrayContaining(['-preset', 'slow', '-crf', '18', '-level:v', '4.1', '-sc_threshold', '0', '-flags', '+cgop']));
+      expect(result.exportCheck).toEqual({ ok: true, problems: [] });
+
+      // The preset, read back from the file itself.
+      const raw = await ffprobeRaw(result.outputPath);
+      const video = raw.streams.find((s) => s.codec_type === 'video')!;
+      const audio = raw.streams.find((s) => s.codec_type === 'audio')!;
+      expect(video).toMatchObject({ codec_name: 'h264', profile: 'High', level: 41, pix_fmt: 'yuv420p', field_order: 'progressive', r_frame_rate: '30/1' });
+      expect(video).toMatchObject({ color_space: 'bt709', color_transfer: 'bt709', color_primaries: 'bt709' });
+      expect(audio).toMatchObject({ codec_name: 'aac', profile: 'LC', sample_rate: '48000', channels: 2 });
+
+      // Closed 2 s GOP: keyframes exactly every 60 frames, none on scene changes.
+      const keyframes = await execa('ffprobe', ['-v', 'error', '-select_streams', 'v', '-skip_frame', 'nokey', '-show_entries', 'frame=pts_time', '-of', 'json', result.outputPath]);
+      const times = (JSON.parse(keyframes.stdout) as { frames: Array<{ pts_time: string }> }).frames.map((f) => Number(f.pts_time));
+      expect(times.map((t) => Math.round(t * 1000) / 1000)).toEqual([0, 2, 4, 6, 8]);
+      // A file whose properties do not match the preset is reported, not passed.
+      const mismatch = await verifyExport(preview.outputPath, { width: 1080, height: 1920, fps: 30, level: '4.1', hasAudio: true, durationSec: total });
+      expect(mismatch.ok).toBe(false);
+      expect(mismatch.problems.join('\n')).toMatch(/frame is 540x960, expected 1080x1920/);
     },
     RENDER_TIMEOUT,
   );
 
   it(
-    'keeps burnt-in text inside the safe area and out of the platform margins',
+    'keeps burnt-in top, centre, lower text and captions out of every forbidden area of the rendered preview',
     async () => {
-      const plain = samplePlan();
+      const { width, height } = VERTICAL_PREVIEW;
+      const zone = safeZoneFor(width, height);
+      const plan = safeZonePlan();
+      const withText = await renderEditPlan(inputs({ plan, transcripts: SAFE_ZONE_TRANSCRIPTS }), join(workDir, 'safe-zone-text.mp4'));
+      const plain = safeZonePlan();
       plain.textOverlays = [];
+      plain.captions = [];
       const withoutText = await renderEditPlan(inputs({ plan: plain, brand: { ...TEST_BRAND, socialHandle: '' } }), join(workDir, 'plain.mp4'));
       expect(withoutText.assPath).toBeNull();
+      const layout = layoutAssDocument(plan, computeTimeline(plan), VERTICAL_PREVIEW, zone, TEST_BRAND, { headline: TEST_BRAND.fontHeadline, body: TEST_BRAND.fontBody });
 
-      // At 2.0 s the top headline (rise, settled) and the lower accent headline (pop, settled) are both on screen.
-      const { width, height } = VERTICAL_PREVIEW;
-      const [withText, noText] = await Promise.all([greyFrame(preview.outputPath, 2.0), greyFrame(withoutText.outputPath, 2.0)]);
-      expect(withText.length).toBe(width * height);
-      expect(noText.length).toBe(width * height);
+      // 2.0 s: top headline (rise, settled) + lower accent headline (pop, settled).
+      // 5.0 s: centre label + caption.   7.6 s: lower subtitle + brand handle at the top.
+      const moments: Array<{ at: number; refs: string[] }> = [
+        { at: 2.0, refs: ['t1', 't2'] },
+        { at: 5.0, refs: ['t3', 'caption-0'] },
+        { at: 7.6, refs: ['t4', 'handle'] },
+      ];
+      for (const { at, refs } of moments) {
+        const [a, b] = await Promise.all([greyFrame(withText.outputPath, at), greyFrame(withoutText.outputPath, at)]);
+        expect(a.length).toBe(width * height);
+        expect(b.length).toBe(width * height);
+        for (const area of zone.forbidden) {
+          expect(countChanged(a, b, width, area.rect).changed, `${area.name} at ${at}s`).toBe(0);
+        }
+        for (const ref of refs) {
+          const box = layout.boxes.find((x) => x.ref === ref)!;
+          expect(box, ref).toBeDefined();
+          const region = box.region === 'head' ? zone.head : zone.strict;
+          expect(countChanged(a, b, width, box.box).changed, `${ref} at ${at}s`).toBeGreaterThan(100);
+          expect(countChanged(a, b, width, region).changed).toBeGreaterThan(100);
+        }
+      }
+    },
+    RENDER_TIMEOUT,
+  );
 
-      const zone = scaleSafeZone(VERTICAL_SAFE_ZONE_1080x1920, width, height);
-      const safe = countChanged(withText, noText, width, { x0: zone.left, x1: width - zone.right, y0: zone.top, y1: height - zone.bottom });
-      const bottomBand = countChanged(withText, noText, width, { x0: 0, x1: width, y0: height - zone.bottom, y1: height });
-      const topBand = countChanged(withText, noText, width, { x0: 0, x1: width, y0: 0, y1: zone.top });
-      const rightRail = countChanged(withText, noText, width, { x0: width - zone.right, x1: width, y0: zone.top, y1: height - zone.bottom });
-      const leftGutter = countChanged(withText, noText, width, { x0: 0, x1: zone.left, y0: zone.top, y1: height - zone.bottom });
-
-      expect(safe.changed).toBeGreaterThan(400);
-      expect(bottomBand.changed).toBeLessThan(bottomBand.pixels * 0.005);
-      expect(topBand.changed).toBeLessThan(topBand.pixels * 0.005);
-      expect(rightRail.changed).toBeLessThan(rightRail.pixels * 0.005);
-      expect(leftGutter.changed).toBeLessThan(leftGutter.pixels * 0.005);
+  it(
+    'draws every frame of every animation inside the laid-out boxes, at preview and export sizes',
+    async () => {
+      // libass over flat grey (no video codec in the way), every frame of the edit: any pixel that
+      // differs from the background is text, outline or shadow.
+      const plan = safeZonePlan();
+      plan.textOverlays.push(
+        { id: 'pop-top', text: 'Sharp lines', startSec: 4.0, endSec: 6.0, placement: 'top', style: 'subtitle', animation: 'pop', emphasis: 'accent' },
+        { id: 'rise-lower', text: 'Walk-ins welcome', startSec: 2.6, endSec: 3.8, placement: 'lower', style: 'label', animation: 'rise', emphasis: 'normal' },
+      );
+      const timeline = computeTimeline(plan);
+      for (const output of [VERTICAL_PREVIEW, VERTICAL_1080]) {
+        const zone = safeZoneFor(output.width, output.height);
+        const layout = layoutAssDocument(plan, timeline, output, zone, TEST_BRAND, { headline: TEST_BRAND.fontHeadline, body: TEST_BRAND.fontBody });
+        const assPath = join(workDir, `layout-${output.width}.ass`);
+        await writeFile(assPath, layout.document, 'utf8');
+        const mask = await textMask(assPath, output.width, output.height, timeline.totalDurationSec, output.fps);
+        const touched = (r: SafeRect) => {
+          let n = 0;
+          for (let y = r.top; y < r.bottom; y++) for (let x = r.left; x < r.right; x++) n += mask[y * output.width + x] ?? 0;
+          return n;
+        };
+        for (const area of zone.forbidden) {
+          expect(touched(area.rect), `${area.name} at ${output.width}x${output.height}`).toBe(0);
+        }
+        for (const box of layout.boxes) {
+          expect(touched(box.box), `${box.ref} at ${output.width}`).toBeGreaterThan(50);
+        }
+        // Nothing is drawn outside the boxes the layout computed, so those boxes are true upper bounds.
+        const inBoxes = new Uint8Array(output.width * output.height);
+        for (const { box } of layout.boxes) for (let y = box.top; y < box.bottom; y++) inBoxes.fill(1, y * output.width + box.left, y * output.width + box.right);
+        let outside = 0;
+        for (let i = 0; i < mask.length; i++) if (mask[i] && !inBoxes[i]) outside++;
+        expect(outside, `pixels outside the layout boxes at ${output.width}`).toBe(0);
+      }
     },
     RENDER_TIMEOUT,
   );
@@ -147,8 +271,9 @@ describe('renderEditPlan with real footage', () => {
       const ass = await readFile(result.assPath!, 'utf8');
       const captionLines = ass.split('\n').filter((l) => l.startsWith('Dialogue:') && l.includes(',Caption,'));
       expect(captionLines).toHaveLength(2);
-      expect(captionLines[0]).toContain('Clean skin fade today');
-      expect(captionLines[1]).toContain('See you next time mate');
+      // Wrapped to the 480 px (240 px in the preview) caption width, so lines may break with \N.
+      expect(captionLines[0]!.replace(/^.*\}/, '').split('\\N').join(' ')).toBe('Clean skin fade today');
+      expect(captionLines[1]!.replace(/^.*\}/, '').split('\\N').join(' ')).toBe('See you next time mate');
       expect(ass).toMatch(/^Style: Caption,Inter,/m);
 
       // Without a transcript the same captions are refused before FFmpeg runs.
