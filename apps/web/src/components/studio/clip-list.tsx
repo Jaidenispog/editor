@@ -1,7 +1,7 @@
 'use client';
 
-import { Film, RotateCcw, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { ArrowDown, ArrowUp, Film, RotateCcw, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
@@ -12,6 +12,8 @@ import { apiRequest } from '@/lib/client/api-client';
 import { formatSeconds } from '@/lib/format';
 import type { AssetDto, StyleOptionDto } from '@/lib/shared/studio-dto';
 import { CLIP_TAG_OPTIONS, clipTagName } from '@/lib/shared/studio-schemas';
+import { moveInOrder, type MoveDirection } from '@/lib/shared/clip-order';
+import { ShotsPanel } from './shots-panel';
 import { useStableLink } from './use-studio-status';
 
 const ASSET_STATUS_LABELS: Record<AssetDto['status'], string> = {
@@ -31,18 +33,48 @@ function shotSummary(asset: AssetDto): string | null {
   return named.length ? `${base}: ${named.join(', ')}` : base;
 }
 
-/** One clip: thumbnail, duration, badges, analysis status, the "What's in this clip?" tag, retry and remove. */
+/**
+ * One clip: position controls, thumbnail, duration, badges, analysis status, the "What's in this clip?" tag,
+ * the per-shot "Shots" panel, retry and remove. Alt + Up/Down arrow anywhere on the card (outside a menu)
+ * moves the clip too.
+ */
 function ClipCard({
   asset,
+  index,
+  total,
+  focusMove,
   ttlSeconds,
+  onMove,
   onChanged,
   onStyles,
 }: {
   asset: AssetDto;
+  index: number;
+  total: number;
+  /** Set right after this clip moved by keyboard or button, so focus stays on its move controls. */
+  focusMove: MoveDirection | null;
   ttlSeconds: number;
+  onMove: (direction: MoveDirection) => void;
   onChanged: (options?: { expectBusy?: boolean }) => void;
   onStyles: (styles: StyleOptionDto[]) => void;
 }) {
+  const upRef = useRef<HTMLButtonElement>(null);
+  const downRef = useRef<HTMLButtonElement>(null);
+  const isFirst = index === 0;
+  const isLast = index === total - 1;
+  useEffect(() => {
+    if (!focusMove) return;
+    const preferred = focusMove === 'up' ? (isFirst ? downRef : upRef) : isLast ? upRef : downRef;
+    preferred.current?.focus();
+  }, [focusMove, index, isFirst, isLast]);
+  const onKeyDown = (e: KeyboardEvent<HTMLLIElement>) => {
+    if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    const tag = (e.target as HTMLElement).tagName;
+    if (tag === 'SELECT' || tag === 'INPUT' || tag === 'TEXTAREA') return;
+    e.preventDefault();
+    if (e.key === 'ArrowUp' && !isFirst) onMove('up');
+    if (e.key === 'ArrowDown' && !isLast) onMove('down');
+  };
   const toast = useToast();
   const thumb = useStableLink(asset.id, asset.thumbnailUrl, ttlSeconds);
   const [tag, setTag] = useState(asset.clipLabel ?? '');
@@ -95,7 +127,20 @@ function ClipCard({
   };
 
   return (
-    <li className="flex gap-3 rounded-[var(--radius-card)] border border-charcoal-200/70 bg-white p-3 shadow-[var(--shadow-card)]">
+    <li onKeyDown={onKeyDown} className="flex gap-3 rounded-[var(--radius-card)] border border-charcoal-200/70 bg-white p-3 shadow-[var(--shadow-card)]">
+      <div className="flex shrink-0 flex-col items-center gap-1">
+        <span className="text-xs font-semibold text-charcoal-500 tabular-nums">
+          <span className="sr-only">Clip </span>
+          {index + 1}
+          <span className="sr-only"> of {total}</span>
+        </span>
+        <Button ref={upRef} size="icon" variant="ghost" className="size-8" disabled={isFirst} onClick={() => onMove('up')} aria-label={`Move ${asset.filename} up`} title="Move up (Alt + Up arrow)" aria-keyshortcuts="Alt+ArrowUp">
+          <ArrowUp className="size-4" aria-hidden="true" />
+        </Button>
+        <Button ref={downRef} size="icon" variant="ghost" className="size-8" disabled={isLast} onClick={() => onMove('down')} aria-label={`Move ${asset.filename} down`} title="Move down (Alt + Down arrow)" aria-keyshortcuts="Alt+ArrowDown">
+          <ArrowDown className="size-4" aria-hidden="true" />
+        </Button>
+      </div>
       <div className="relative aspect-[9/16] w-20 shrink-0 overflow-hidden rounded-lg bg-charcoal-900 sm:w-24">
         {thumb.url ? (
           // eslint-disable-next-line @next/next/no-img-element -- signed, expiring private link; next/image cannot optimise it
@@ -132,6 +177,9 @@ function ClipCard({
           options={CLIP_TAG_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
           className="h-9 text-sm"
         />
+        {asset.status === 'ready' && asset.shots && asset.shots.count > 0 ? (
+          <ShotsPanel assetId={asset.id} filename={asset.filename} shotCount={asset.shots.count} onStyles={onStyles} onChanged={() => onChanged()} />
+        ) : null}
         <div className="flex flex-wrap gap-1.5">
           {asset.status === 'failed' ? (
             <Button size="sm" variant="secondary" onClick={retry} loading={busy}>
@@ -163,18 +211,71 @@ function ClipCard({
   );
 }
 
-/** The project's clips in order, or skeletons while nothing has arrived yet. */
+/**
+ * The project's clips in order. "Move up" / "Move down" (or Alt + arrow keys) change the order the editor
+ * uses: the new order shows straight away and is saved in one request; if saving fails it snaps back.
+ */
 export function ClipList({
+  projectId,
   assets,
   ttlSeconds,
   onChanged,
   onStyles,
 }: {
+  projectId: string;
   assets: AssetDto[];
   ttlSeconds: number;
   onChanged: (options?: { expectBusy?: boolean }) => void;
   onStyles: (styles: StyleOptionDto[]) => void;
 }) {
+  const toast = useToast();
+  const [pendingOrder, setPendingOrder] = useState<string[] | null>(null);
+  const [focus, setFocus] = useState<{ id: string; direction: MoveDirection } | null>(null);
+  const [announcement, setAnnouncement] = useState('');
+  const saveChain = useRef<Promise<void>>(Promise.resolve());
+
+  const serverOrder = useMemo(() => assets.map((a) => a.id), [assets]);
+  const ordered = useMemo(() => {
+    if (!pendingOrder) return assets;
+    const byId = new Map(assets.map((a) => [a.id, a]));
+    const listed = pendingOrder.map((id) => byId.get(id)).filter((a): a is AssetDto => Boolean(a));
+    const rest = assets.filter((a) => !pendingOrder.includes(a.id));
+    return [...listed, ...rest];
+  }, [assets, pendingOrder]);
+
+  // Focus is moved by the card's own effect (children run first); the request is then cleared so a later
+  // refresh never steals focus.
+  useEffect(() => {
+    if (focus) setFocus(null);
+  }, [focus]);
+
+  // Once the server reports the order we asked for, stop overriding it.
+  useEffect(() => {
+    if (pendingOrder && pendingOrder.length === serverOrder.length && pendingOrder.every((id, i) => serverOrder[i] === id)) setPendingOrder(null);
+  }, [pendingOrder, serverOrder]);
+
+  const move = useCallback(
+    (asset: AssetDto, direction: MoveDirection) => {
+      const current = ordered.map((a) => a.id);
+      const next = moveInOrder(current, asset.id, direction);
+      if (next.every((id, i) => current[i] === id)) return;
+      setPendingOrder(next);
+      setFocus({ id: asset.id, direction });
+      setAnnouncement(`${asset.filename} moved to position ${next.indexOf(asset.id) + 1} of ${next.length}.`);
+      saveChain.current = saveChain.current.then(async () => {
+        try {
+          await apiRequest(`/api/projects/${projectId}/assets/order`, { method: 'POST', body: { assetIds: next } });
+          onChanged();
+        } catch (err) {
+          setPendingOrder(null);
+          setAnnouncement('The clip order could not be saved.');
+          toast.error('Could not change the clip order', err instanceof Error ? err.message : undefined);
+        }
+      });
+    },
+    [onChanged, ordered, projectId, toast],
+  );
+
   if (assets.length === 0) return null;
   const processing = assets.filter((a) => a.status === 'uploaded' || a.status === 'processing').length;
   return (
@@ -184,14 +285,27 @@ export function ClipList({
           Clips <span className="text-sm font-normal text-charcoal-500">({assets.length})</span>
         </h2>
         <p className="text-sm text-charcoal-500">
-          {processing ? `Analysing ${processing} clip${processing === 1 ? '' : 's'}…` : 'Tag what each clip shows to unlock more styles.'}
+          {processing ? `Analysing ${processing} clip${processing === 1 ? '' : 's'}…` : 'Tag what each clip shows to unlock more styles. The order here is the order of the story.'}
         </p>
       </div>
-      <ul className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {assets.map((a) => (
-          <ClipCard key={a.id} asset={a} ttlSeconds={ttlSeconds} onChanged={onChanged} onStyles={onStyles} />
+      <p className="sr-only" aria-live="polite">
+        {announcement}
+      </p>
+      <ol className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3" aria-label="Clips in order">
+        {ordered.map((a, i) => (
+          <ClipCard
+            key={a.id}
+            asset={a}
+            index={i}
+            total={ordered.length}
+            focusMove={focus?.id === a.id ? focus.direction : null}
+            ttlSeconds={ttlSeconds}
+            onMove={(direction) => move(a, direction)}
+            onChanged={onChanged}
+            onStyles={onStyles}
+          />
         ))}
-      </ul>
+      </ol>
     </section>
   );
 }

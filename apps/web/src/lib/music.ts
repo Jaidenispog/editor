@@ -138,7 +138,9 @@ export async function createLibraryTrack(userId: string, input: z.infer<typeof C
 export async function updateTrack(id: string, userId: string, input: z.infer<typeof UpdateMusicTrackSchema>): Promise<MusicTrackSummary> {
   const track = await getTrackOrThrow(id);
   const licenceSource = input.licence ?? track.licence;
-  const licence = input.licence !== undefined || input.confirmLicence !== undefined ? applyConfirmation(licenceSource, input.confirmLicence, track.licence) : track.licence;
+  // New licence details confirmed again are dated now; confirming unchanged details keeps the first date.
+  const previous = input.licence !== undefined && input.confirmLicence === true ? null : track.licence;
+  const licence = input.licence !== undefined || input.confirmLicence !== undefined ? applyConfirmation(licenceSource, input.confirmLicence, previous) : track.licence;
   const updated = await getDb()
     .update(schema.musicTracks)
     .set({

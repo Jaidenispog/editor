@@ -195,13 +195,23 @@ STORAGE_DRIVER=local, STORAGE_LOCAL_ROOT=./data/storage, WORKER_TMP_DIR=./tmp/wo
 
 ### Gaps reported by the Video Studio agent (to schedule)
 
-- Staff access: studio routes let staff open only projects they created, but the foundation's `/api/projects` and
-  `/api/projects/[id]` routes do not apply that rule. Use `getAccessibleProject` (`apps/web/src/lib/studio-access.ts`)
-  everywhere, or drop the staff restriction.
-- Music licence confirmation: Generate only accepts tracks whose licence is confirmed, but Settings → Music has no
-  control to confirm a track registered without confirmation (only `PATCH /api/music/[id]`).
-- Not built yet: clip reordering in the UI (API accepts `sortOrder`), per-shot tagging in the UI (API accepts
-  `manualLabels`), the music start-offset picker over the energy curve.
+- ~~Staff access~~ **Closed (2026-11-14).** `getAccessibleProject` / `projectVisibilityFilter` / `getAccessibleJob`
+  (`apps/web/src/lib/studio-access.ts`) now apply to GET/POST `/api/projects`, GET/PATCH/DELETE `/api/projects/[id]`,
+  `/api/projects/[id]/jobs`, `/api/jobs/[id]/cancel|retry`, the dashboard, the project list and the Content
+  Library (owner sees all, staff only their own; project-less jobs are the owner's). Tests:
+  `apps/web/test/studio-access.integration.test.ts`.
+- ~~Music licence confirmation~~ **Closed.** Settings → Music library shows each track's licence status and has a
+  "Licence details" form with the explicit rights checkbox (`PATCH /api/music/[id]` `confirmLicence`), plus
+  "Upload licensed track" using the Studio uploader (`POST /api/music/uploads`). Remaining limitation: library
+  uploads ride on the user's most recent project because `upload_sessions.project_id` is NOT NULL; making it
+  nullable (migration) would let a user with no project upload music.
+- ~~Not built yet: clip reordering, per-shot tagging, music start-offset picker~~ **Closed.** Move up/down
+  (+ Alt + arrows) backed by `POST /api/projects/[id]/assets/order`; an expandable "Shots" panel per clip
+  (`GET /api/assets/[id]/shots`, tags via `manualLabels`); `GenerationSettings.musicStartSec` (core) → worker
+  `buildPlannerInput` → `PlannerInput.musicStartSec` → rules planner snaps to the first beat at or after it
+  (`beatGrid(..., fixedStartSec)`, `snapMusicStart`), the Anthropic planner gets `music.fixedStartOffsetSec` and
+  the plan's start is forced to it; the generate route checks it against the track length; the Studio shows BPM,
+  the energy curve and an Automatic / slider (mm:ss) picker.
 - Local-driver media links carry a readable (HMAC-signed, not encrypted) payload with the storage key; keys hold only
   ids. Encrypt or use opaque references if keys must never reach browsers.
 

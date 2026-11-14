@@ -97,6 +97,11 @@ export interface PlannerInput {
   analyses: AssetAnalysis[];
   assets: PlanAssetInfo[];
   music: PlannerMusic | null;
+  /**
+   * Where the owner chose to start the music (seconds into the track); null or absent = the planner chooses.
+   * Planners snap it to the first beat at or after this point and treat it as fixed.
+   */
+  musicStartSec?: number | null;
   preferences: EditingPreferences;
   brand: BrandConfig;
   businessName: string;

@@ -51,7 +51,7 @@ export function SettingsTabs(props: {
         { id: 'branding', label: 'Branding', content: <>{ownerOnly}<BrandingTab brand={props.settings.brand} logoUrl={props.logoUrl} disabled={!props.isOwner} /></> },
         { id: 'business', label: 'Business', content: <>{ownerOnly}<BusinessTab business={props.settings.business} disabled={!props.isOwner} /></> },
         { id: 'preferences', label: 'Editing preferences', content: <>{ownerOnly}<PreferencesTab preferences={props.settings.preferences} disabled={!props.isOwner} /></> },
-        { id: 'music', label: 'Music library', content: <MusicTab tracks={props.tracks} /> },
+        { id: 'music', label: 'Music library', content: <MusicTab tracks={props.tracks} maxUploadBytes={props.storage.maxUploadBytes} /> },
         { id: 'trends', label: 'Trends & references', content: <TrendsTab trends={props.trends} disabled={!props.isOwner} /> },
         { id: 'integrations', label: 'Integrations', content: <IntegrationsTab integrations={props.integrations} /> },
         { id: 'security', label: 'Users & security', content: <SecurityTab user={props.user} sessions={props.sessions} /> },

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS, type AssetAnalysis, type EditPlan, type MusicLicence } from '@studio/core';
 import type { Edit, EditVersion, Generation, MediaAsset, MusicTrack, Project } from '@studio/db';
-import { isStudioBusy, licenceSummary, shapeStudioStatus, shapeStyleOptions, type LinkSigner } from '../src/lib/studio-status-shape';
+import { isStudioBusy, licenceSummary, shapeAssetShots, shapeMusicOption, shapeStudioStatus, shapeStyleOptions, type LinkSigner } from '../src/lib/studio-status-shape';
 
 const t0 = new Date('2026-11-14T00:00:00Z');
 const sign: LinkSigner = async (key) => `https://signed.example/${Buffer.from(key).toString('base64url')}`;
@@ -161,7 +161,7 @@ const generation: Generation = {
   id: 'g1',
   projectId: 'p1',
   requestedBy: 'u1',
-  settings: { durationSec: 25, styles: ['beat_montage'], musicTrackId: null, keepOriginalSound: 'auto', captions: 'auto', instructions: '' },
+  settings: { durationSec: 25, styles: ['beat_montage'], musicTrackId: null, keepOriginalSound: 'auto', captions: 'auto', instructions: '', musicStartSec: null },
   status: 'complete',
   statusMessage: '',
   plannerUsed: 'rules',
@@ -245,5 +245,65 @@ describe('status payload shaping', () => {
     expect(styles[2]).toMatchObject({ supported: false, reason: 'Needs a "before" shot.' });
     const none = await shapeStudioStatus(rows({ assets: [] }), sign);
     expect(none.styles.every((s) => !s.supported && /Add your clips first/.test(s.reason))).toBe(true);
+  });
+
+  it('counts shot labels with the owner tags applied', async () => {
+    const dto = await shapeStudioStatus(rows({ assets: [asset('a2', { manualLabels: { s2: 'result' } })] }), sign);
+    expect(dto.assets[0]?.shots).toEqual({ count: 2, identified: 2, labels: { cutting: 1, result: 1 } });
+  });
+
+  it('sends a small energy curve for analysed music only', () => {
+    const energy = Array.from({ length: 160 }, (_, i) => (i % 4) / 4);
+    const ready = shapeMusicOption(track('t1', { beats: { beatTimesSec: [0.5, 1], energy, energyStepSec: 0.25 } }));
+    expect(ready.energy?.values.length).toBeLessThanOrEqual(120);
+    expect(ready.energy?.stepSec).toBe(0.5);
+    expect(JSON.stringify(ready)).not.toContain('beatTimesSec');
+    expect(shapeMusicOption(track('t2', { status: 'processing', beats: { beatTimesSec: [], energy, energyStepSec: 0.25 } })).energy).toBeNull();
+    expect(shapeMusicOption(track('t3')).energy).toBeNull();
+  });
+});
+
+describe('per-shot panel shaping', () => {
+  const withFrames = (overrides: Partial<MediaAsset> = {}) => {
+    const base = asset('a2', overrides);
+    const a = base.analysis!;
+    return {
+      ...base,
+      analysis: {
+        ...a,
+        shots: [a.shots[0]!, { ...a.shots[1]!, labelSource: 'vision_model' as const, label: 'fade_detail' as const, description: 'Close-up of the fade' }],
+        sampledFrames: [
+          { timeSec: 0.5, storageKey: 'projects/p1/assets/a2/frames/f0.jpg', width: 768, height: 432, shotId: 's1' },
+          { timeSec: 2.1, storageKey: 'projects/p1/assets/a2/frames/f1.jpg', width: 768, height: 432, shotId: 's1' },
+          { timeSec: 9.5, storageKey: 'projects/p1/assets/a2/frames/f2.jpg', width: 768, height: 432, shotId: null },
+        ],
+      },
+    };
+  };
+
+  it('lists each shot with its range, the label in use, where it came from and the middle frame', async () => {
+    const dto = await shapeAssetShots(withFrames(), sign);
+    expect(dto.shots.map((s) => [s.id, s.startSec, s.endSec, s.label, s.source])).toEqual([
+      ['s1', 0, 4, 'cutting', 'heuristic'],
+      ['s2', 4, 10, 'fade_detail', 'vision_model'],
+    ]);
+    // s1 runs 0–4 s: the frame at 2.1 s is closest to its middle.
+    expect(dto.shots[0]?.frameUrl).toBe(await sign('projects/p1/assets/a2/frames/f1.jpg'));
+    // s2 has no frame tagged with its id, but one falls inside its time range.
+    expect(dto.shots[1]?.frameUrl).toBe(await sign('projects/p1/assets/a2/frames/f2.jpg'));
+    expect(dto.shots[1]?.description).toBe('Close-up of the fade');
+    expect(JSON.stringify(dto)).not.toContain('storageKey');
+  });
+
+  it('marks shot tags and clip tags as the owner\'s', async () => {
+    const dto = await shapeAssetShots(withFrames({ clipLabel: 'result', manualLabels: { s1: 'before' } }), sign);
+    expect(dto.shots[0]).toMatchObject({ label: 'before', source: 'shot_tag', manualLabel: 'before', detectedLabel: 'cutting' });
+    expect(dto.shots[1]).toMatchObject({ label: 'result', source: 'clip_tag', manualLabel: null, detectedLabel: 'fade_detail' });
+    expect(dto.manualLabels).toEqual({ s1: 'before' });
+    expect(dto.clipLabel).toBe('result');
+  });
+
+  it('returns no shots for a clip that has not been analysed', async () => {
+    expect((await shapeAssetShots(asset('a1', { analysis: null }), sign)).shots).toEqual([]);
   });
 });

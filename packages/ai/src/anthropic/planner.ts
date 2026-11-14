@@ -6,7 +6,7 @@ import { DEFAULT_MODEL_RATES, type RateTable } from '../pricing.js';
 import { effectiveSettings } from '../rules/settings.js';
 import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '../types.js';
 import { mapAnthropicError, usageFrom, type AnthropicMessagesClient, type StructuredResponse } from './client.js';
-import { PLANNER_SYSTEM_PROMPT, buildPlannerUserContent } from './prompts.js';
+import { PLANNER_SYSTEM_PROMPT, buildPlannerUserContent, fixedMusicStartFor } from './prompts.js';
 import { PlannerWireSchema, type PlannerWire } from './schemas.js';
 
 /** Output limit for a planning call (fits the SDK's non-streaming limit). */
@@ -98,12 +98,17 @@ function cut(text: string, max: number): string {
 
 /**
  * Turns the model's wire output into an EditPlan-shaped object. Only fields the model does not decide are set
- * here (version, output format, target, style, the real music track id); everything else is passed through
+ * here (version, output format, target, style, the real music track id, and the music start when the owner
+ * fixed it); everything else is passed through
  * for validateEditPlan to judge, so a mistake becomes a repairable validation error rather than a silent fix.
  */
 export function toPlanCandidate(wire: PlannerWire, input: PlannerInput): unknown {
   const s = effectiveSettings(input);
-  const music = input.music && s.musicOn && wire.audio.music ? { ...wire.audio.music, trackId: input.music.trackId } : null;
+  const fixedStart = fixedMusicStartFor(input);
+  const music =
+    input.music && s.musicOn && wire.audio.music
+      ? { ...wire.audio.music, trackId: input.music.trackId, ...(fixedStart !== null ? { startOffsetSec: fixedStart } : {}) }
+      : null;
   return {
     version: EDIT_PLAN_VERSION,
     styleId: input.styleId,

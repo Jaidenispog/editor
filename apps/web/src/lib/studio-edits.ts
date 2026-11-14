@@ -1,6 +1,6 @@
 import 'server-only';
 import { and, eq, inArray, isNull, max, sql } from 'drizzle-orm';
-import { AppError, GenerationSettingsSchema, STYLES, STYLE_IDS, newId, type GenerationSettings, type StyleId } from '@studio/core';
+import { AppError, GenerationSettingsSchema, STYLES, STYLE_IDS, formatSeconds, newId, type GenerationSettings, type StyleId } from '@studio/core';
 import { schema, type Edit, type EditVersion, type Generation } from '@studio/db';
 import { z } from 'zod';
 import type { SessionUser } from './auth.js';
@@ -20,6 +20,23 @@ export const GenerateRequestSchema = GenerationSettingsSchema.refine((s) => new 
   message: 'Each style can only be chosen once',
   path: ['styles'],
 });
+
+/** Small allowance for rounding in the browser's slider (the planner snaps the start to a beat anyway). */
+const MUSIC_START_SLACK_SEC = 0.05;
+
+/**
+ * Checks the owner's music start point against the real track: it must be inside the track and leave enough
+ * music for the whole edit. Throws a plain VALIDATION error otherwise.
+ */
+export function assertMusicStartFits(startSec: number, editSec: number, trackSec: number | null): void {
+  const fail = (message: string) => new AppError('VALIDATION', message, { details: [{ path: 'musicStartSec', message }] });
+  if (trackSec === null || !(trackSec > 0)) throw fail('The length of that track is not known yet, so the music start cannot be chosen. Leave it on Automatic.');
+  if (startSec >= trackSec) throw fail(`The track is only ${formatSeconds(trackSec)} long, so the music cannot start at ${formatSeconds(startSec)}.`);
+  const left = trackSec - startSec;
+  if (left + MUSIC_START_SLACK_SEC < editSec) {
+    throw fail(`Starting the music at ${formatSeconds(startSec)} leaves ${Math.floor(left)} seconds of the track, but the edit is ${editSec} seconds. Choose an earlier start or a shorter length.`);
+  }
+}
 
 /**
  * Starts a generation: checks the clips are ready and every chosen style is supported, then in one
@@ -54,6 +71,9 @@ export async function startGeneration(projectId: string, user: SessionUser, raw:
     if (!track) throw new AppError('VALIDATION', 'That music track is no longer in the library. Choose another one.', { details: [{ path: 'musicTrackId', message: 'Not found' }] });
     if (track.status !== 'ready') throw new AppError('CONFLICT', 'That music track is still being analysed. Wait for it to finish or choose another one.');
     if (!track.licence.confirmedByOwnerAt) throw new AppError('VALIDATION', 'Confirm the licence for that track in Settings → Music before using it.');
+    if (settings.musicStartSec !== null) assertMusicStartFits(settings.musicStartSec, settings.durationSec, track.durationSec);
+  } else if (settings.musicStartSec !== null) {
+    throw new AppError('VALIDATION', 'Choose a music track before picking where the music starts.', { details: [{ path: 'musicStartSec', message: 'No music chosen' }] });
   }
 
   const busy = await db.query.generations.findFirst({

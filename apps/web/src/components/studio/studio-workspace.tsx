@@ -91,7 +91,7 @@ export function StudioWorkspace({ initialStatus }: { initialStatus: StudioStatus
         onDismiss={(k) => uploader.dismiss(k)}
       />
 
-      <ClipList assets={status.assets} ttlSeconds={ttl} onChanged={changed} onStyles={onStyles} />
+      <ClipList projectId={projectId} assets={status.assets} ttlSeconds={ttl} onChanged={changed} onStyles={onStyles} />
 
       {status.assets.length > 0 ? <StyleControls key={status.project.id} status={status} onGenerated={() => changed({ expectBusy: true })} onUploadMusic={addMusic} /> : null}
 
