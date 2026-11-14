@@ -173,3 +173,26 @@ No real YouTube call is made by any test (an injected fake `fetch`):
 
 The first real fetch needs `YOUTUBE_API_KEY` (1 quota unit): Settings → Trends → **Show the chart** is that smoke test.
 Record its result and date in `docs/HANDOVER.md`.
+
+## Publishing (Stage B, WP4)
+
+- Unit: `packages/core/test/publishing.test.ts` (eligibility matrix incl. Meta Sound Collection and CC BY, removing
+  music keeps a valid plan, Melbourne scheduling incl. 2026-10-04 02:30 nonexistent and 2027-04-04 02:30 ambiguous,
+  `checkMediaForPlatform` boundaries, captions in graphemes, `derivePostStatus`, target actions, link validation,
+  request schemas, poll schedule); `apps/worker/test/publishing.test.ts` (`mapGraphError`, `appsecret_proof`, module
+  registration); `apps/web/test/publishing.test.ts` (integration cards, ref ids, composer logic: nothing preselected,
+  five at most).
+- Database + ffmpeg + a local fake of Meta's Graph and rupload hosts (`apps/worker/test/fakes/graph-server.ts`):
+  `apps/worker/test/publishing-db.test.ts` (read-only check and discovery, happy path, crash after `media_publish`,
+  container ERROR and Retry, copyright match → post without music (real `no_music` render), quota requeue, error 190,
+  partial post, scheduling and cancel, licence changed, Meta-only music to TikTok, an interrupted upload resuming on the
+  same container, two claimers, `stately` queues on pg-boss 12.38.1). Runs in `pnpm -r test` when `TEST_DATABASE_URL`
+  is set.
+- Database-backed routes: `apps/web/test/publishing-routes.integration.test.ts` (drafts and refusals, owner-only
+  approval with no feedback or ledger row, consent tick, manual confirmation with link validation, feedback and ledger
+  once, undo, duplicate rule, reschedule and cancel, staff visibility, Instagram connect/callback against a local fake
+  token exchange, disconnect).
+- Only verifiable with the owner's accounts (publishing design §11.4): Unified Login publishing in Development mode,
+  whether `business_management` is needed, the resumable size limit, quota and token expiry, `thumb_offset` with
+  resumable upload, Sound Collection copyright matching, Web Share on iOS. The first verification post is a real public
+  reel the owner chooses.

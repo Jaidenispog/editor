@@ -147,3 +147,32 @@ Built once so every Stage B/C module integrates the same way and parallel work p
 - **Spotify**: link-only by default; the official embed only on signed-in pages once the legal pages exist and the
   owner acknowledged Spotify's terms. Nothing from Spotify reaches the planner, AI prompts, publishing, email or the
   website module (a unit test checks the imports).
+
+## Publishing (Stage B, WP4)
+
+- **Contracts** (`packages/core/src/publishing.ts`): `checkPublishEligibility` (built on `musicClearanceFor`: an
+  unconfirmed, non-promotional, expired or unknown licence gives only the music-free file everywhere; a platform the
+  licence does not tick gets only `no_music`; Meta Sound Collection music never goes to TikTok), `methodVariantRefusal`,
+  `validateCaption` (2,200 graphemes, the CC BY credit appended once), `resolveSchedule` (Melbourne, DST-aware, 10 min
+  to 90 days), `checkMediaForPlatform` (memo §3/§4 limits incl. 25 Mbps video and AAC ≤ 128 kbps; resumable cap),
+  `derivePostStatus`, `targetActionsFor`, `validatePostLink`, request schemas. Jobs in `jobs/publishing.ts`, the
+  `publishing.captionFooter` setting in `settings/publishing.ts`.
+- **Data**: `publish_posts` (one per video and compose action; `approved_by/at`, `music_check` with the licence
+  snapshot, derived `status` and `status_message`), `publish_targets` (one per post and platform, unique; `method`,
+  `media_variant`, `media_key`, `manual_step`, `submitted_at`, `provider_state` without tokens, unique
+  `idempotency_key = pt_<id>`), `social_accounts` (discovered Instagram accounts; the credential lives encrypted on the
+  `meta` row of `integration_connections`).
+- **Flow**: composer → drafts (`POST /api/publish-posts`) → owner approval → `publish.prepare` → manual targets: the
+  owner downloads/shares, copies the caption and taps "I've posted it"; Instagram direct: `publish.target` claims the
+  target with one conditional update (queued, or processing waiting at the publish step, or claimed by this same job
+  before a restart), creates the Reels container (`upload_type=resumable`, `thumb_offset`), saves its id, streams the
+  file from private storage to `rupload.facebook.com`, then `publish.poll` reads `status_code` and
+  `copyright_check_status` (a match never publishes: the owner chooses "Post without music" or "Post it yourself"),
+  and `publish.target` sets `submitted_at` just before `media_publish` and reads the permalink back. A retry always reads
+  the container first: `PUBLISHED` is never published again (the media id is recovered from the account's media list).
+- **Effects only when published**: the `publish` feedback event (`recordFeedback`, plan facts) and the `music_usage` row
+  (`purpose 'publish'`, the platform) are written when a destination becomes `published` (platform read-back or the
+  owner's confirmation), never at approval.
+- **Export-ready hook**: when `render.export` stores a version's file (standard or `no_music`), posts waiting for it get
+  `publish.prepare` again. `publish.dispatch` hands due scheduled targets on, turns due manual ones into "Your turn",
+  and settles a processing target untouched for an hour (failed with Retry, or `check_before_retry` once submitted).

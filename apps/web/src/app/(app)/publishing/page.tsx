@@ -1,27 +1,55 @@
+import { Plus } from 'lucide-react';
 import type { Metadata } from 'next';
-import { SectionOverview } from '@/components/app/section-overview';
+import Link from 'next/link';
+import { redirect } from 'next/navigation';
+import { buttonClasses } from '@/components/ui/button';
+import { Card, CardBody, CardHeader } from '@/components/ui/card';
+import { PageHeader } from '@/components/ui/page-header';
+import { ConnectionsPanel } from '@/components/publishing/connections-panel';
+import { PostList } from '@/components/publishing/post-list';
+import { PublishingSettingsCard } from '@/components/publishing/publishing-settings-card';
+import { getIntegrationStatuses } from '@/lib/integrations';
+import { listPublishPosts } from '@/lib/publishing';
+import { getCurrentUser } from '@/lib/session';
+import { getSettings } from '@/lib/settings';
 
 export const metadata: Metadata = { title: 'Publishing' };
+export const dynamic = 'force-dynamic';
 
-/** Publishing section: Instagram and TikTok status and what is needed to post from the app. */
-export default function PublishingPage() {
+/**
+ * Publishing: what needs the owner ("Your turn"), upcoming and in-progress posts, history, the honest connection
+ * summary (posting it yourself always works) and the caption-ending setting.
+ */
+export default async function PublishingPage() {
+  const user = await getCurrentUser();
+  if (!user) redirect('/login');
+  const [queue, history, integrations, settings] = await Promise.all([listPublishPosts('queue', user, null), listPublishPosts('history', user, null), getIntegrationStatuses(), getSettings()]);
   return (
-    <SectionOverview
-      eyebrow="Publishing"
-      title="Publishing"
-      description="Post finished edits to Instagram and TikTok with a caption and cover, now or on a schedule — once your accounts are connected."
-      area="publishing"
-      features={[
-        'Publish an exported edit as an Instagram Reel, with caption and cover frame.',
-        'Send an edit to your TikTok drafts so you can add sounds and post from the TikTok app.',
-        'Check the music licence before anything leaves the app, and block platforms it does not cover.',
-        'Until accounts are connected: download the 1080×1920 export and post it from your phone.',
-      ]}
-      requirements={[
-        'An Instagram professional (Business or Creator) account linked to a Facebook Page.',
-        'A Meta developer app (META_APP_ID and META_APP_SECRET on the server).',
-        'A TikTok developer app (TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET) if you want TikTok drafts.',
-      ]}
-    />
+    <>
+      <PageHeader
+        eyebrow="Publishing"
+        title="Publishing"
+        description="Post finished edits to Instagram and TikTok with a caption and cover, now or at a Melbourne time. A post only shows as posted once the platform or you confirm it."
+        actions={
+          <Link href="/library" className={buttonClasses('primary', 'md', 'min-h-11')}>
+            <Plus className="size-4" aria-hidden="true" /> Choose edits to publish
+          </Link>
+        }
+      />
+      <div className="grid gap-6 xl:grid-cols-[1fr_360px]">
+        <div className="min-w-0">
+          <PostList initialQueue={queue.posts} initialHistory={history.posts} isOwner={user.role === 'owner'} />
+        </div>
+        <div className="space-y-6">
+          <Card>
+            <CardHeader title="Connections" />
+            <CardBody>
+              <ConnectionsPanel integrations={integrations.filter((i) => i.areas.includes('publishing'))} />
+            </CardBody>
+          </Card>
+          <PublishingSettingsCard initialFooter={settings.publishing.captionFooter} canEdit={user.role === 'owner'} />
+        </div>
+      </div>
+    </>
   );
 }

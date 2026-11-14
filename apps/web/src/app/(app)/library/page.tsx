@@ -1,18 +1,18 @@
-import { and, desc, eq, isNotNull, isNull, or } from 'drizzle-orm';
-import { Download, Library } from 'lucide-react';
+import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
+import { Library } from 'lucide-react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { STYLES, type StyleId } from '@studio/core';
+import { META_ONLY_FILE_SUFFIX, META_ONLY_LABEL, STYLES, musicClearanceFor, type StyleId } from '@studio/core';
 import { schema } from '@studio/db';
-import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
-import { StatusPill } from '@/components/ui/status-pill';
 import { buttonClasses } from '@/components/ui/button';
+import { LibraryGrid, type LibraryItem } from '@/components/publishing/library-grid';
 import { getDb } from '@/lib/db';
 import { formatBytes, formatDateTime, formatSeconds } from '@/lib/format';
 import { downloadNameFor, maybeSignedUrl } from '@/lib/media-links';
+import { publishBadgesFor } from '@/lib/publishing';
 import { getCurrentUser } from '@/lib/session';
 import { projectVisibilityFilter } from '@/lib/studio-access';
 
@@ -22,15 +22,20 @@ function styleName(id: string): string {
   return (STYLES as Record<string, { name: string } | undefined>)[id as StyleId]?.name ?? id;
 }
 
-/** Content Library: every rendered preview and exported edit across the projects the user may open, newest first. */
+/**
+ * Content Library: every rendered preview and exported edit across the projects the user may open, newest first,
+ * with per-platform publishing badges, a Publish link per finished edit and a Select mode for publishing several.
+ */
 export default async function LibraryPage() {
   const user = await getCurrentUser();
   if (!user) redirect('/login');
-  const rows = await getDb()
+  const db = getDb();
+  const rows = await db
     .select({
       versionId: schema.editVersions.id,
       versionNo: schema.editVersions.versionNo,
       status: schema.editVersions.status,
+      plan: schema.editVersions.plan,
       previewKey: schema.editVersions.previewKey,
       previewDurationSec: schema.editVersions.previewDurationSec,
       exportStatus: schema.editVersions.exportStatus,
@@ -49,12 +54,33 @@ export default async function LibraryPage() {
     .orderBy(desc(schema.editVersions.updatedAt))
     .limit(60);
 
-  const items = await Promise.all(
-    rows.map(async (r) => ({
-      ...r,
-      previewUrl: await maybeSignedUrl(r.previewKey),
-      exportUrl: r.exportStatus === 'ready' ? await maybeSignedUrl(r.exportKey, { downloadName: downloadNameFor([r.projectTitle, styleName(r.styleId), `v${r.versionNo}`], 'mp4') }) : null,
-    })),
+  const trackIds = [...new Set(rows.map((r) => r.plan?.audio.music?.trackId).filter((x): x is string => Boolean(x)))];
+  const tracks = trackIds.length ? await db.query.musicTracks.findMany({ where: inArray(schema.musicTracks.id, trackIds) }) : [];
+  const badges = await publishBadgesFor(rows.map((r) => r.versionId), user);
+
+  const items: LibraryItem[] = await Promise.all(
+    rows.map(async (r) => {
+      const track = tracks.find((t) => t.id === r.plan?.audio.music?.trackId);
+      const metaOnly = Boolean(track && !track.deletedAt && musicClearanceFor(track.licence).destinationLock === 'meta_only');
+      const exported = r.exportStatus === 'ready';
+      return {
+        versionId: r.versionId,
+        versionNo: r.versionNo,
+        status: r.status,
+        previewUrl: await maybeSignedUrl(r.previewKey),
+        exportUrl: exported ? await maybeSignedUrl(r.exportKey, { downloadName: downloadNameFor([r.projectTitle, styleName(r.styleId), `v${r.versionNo}`, metaOnly ? META_ONLY_FILE_SUFFIX : null], 'mp4') }) : null,
+        exportSizeLabel: exported && r.exportByteSize ? formatBytes(r.exportByteSize) : null,
+        durationLabel: r.previewDurationSec ? formatSeconds(r.previewDurationSec) : '',
+        updatedLabel: formatDateTime(r.updatedAt),
+        styleName: styleName(r.styleId),
+        projectId: r.projectId,
+        projectTitle: r.projectTitle,
+        publishable: r.status === 'preview_ready' && Boolean(r.plan),
+        exported,
+        downloadLabel: exported && metaOnly ? META_ONLY_LABEL : null,
+        badges: badges.filter((b) => b.versionId === r.versionId),
+      };
+    }),
   );
 
   return (
@@ -72,39 +98,7 @@ export default async function LibraryPage() {
           }
         />
       ) : (
-        <ul className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {items.map((item) => (
-            <li key={item.versionId}>
-              <Card className="overflow-hidden">
-                <div className="aspect-[9/16] w-full bg-charcoal-950">
-                  {item.previewUrl ? (
-                    <video src={item.previewUrl} controls preload="metadata" playsInline className="size-full object-contain" aria-label={`Preview of ${styleName(item.styleId)} for ${item.projectTitle}`} />
-                  ) : (
-                    <div className="flex size-full items-center justify-center px-6 text-center text-sm text-charcoal-400">Preview not available</div>
-                  )}
-                </div>
-                <div className="space-y-2 p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="truncate text-sm font-semibold">{styleName(item.styleId)}</p>
-                    <StatusPill status={item.exportStatus === 'ready' ? 'ready' : item.status} label={item.exportStatus === 'ready' ? 'Exported' : undefined} />
-                  </div>
-                  <Link href={`/studio/${item.projectId}`} className="block truncate text-sm text-charcoal-600 hover:underline">
-                    {item.projectTitle}
-                  </Link>
-                  <p className="text-xs text-charcoal-500">
-                    Version {item.versionNo}
-                    {item.previewDurationSec ? ` · ${formatSeconds(item.previewDurationSec)}` : ''} · {formatDateTime(item.updatedAt)}
-                  </p>
-                  {item.exportUrl ? (
-                    <a href={item.exportUrl} className={buttonClasses('secondary', 'sm', 'w-full')}>
-                      <Download className="size-4" aria-hidden="true" /> Download MP4{item.exportByteSize ? ` (${formatBytes(item.exportByteSize)})` : ''}
-                    </a>
-                  ) : null}
-                </div>
-              </Card>
-            </li>
-          ))}
-        </ul>
+        <LibraryGrid items={items} />
       )}
     </>
   );

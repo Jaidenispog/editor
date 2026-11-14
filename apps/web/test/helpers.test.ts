@@ -88,7 +88,7 @@ describe('buildIntegrationStatuses', () => {
   });
 
   it('reports configured-but-not-connected separately from connected', () => {
-    const env = { ...baseEnv, SQUARE_APPLICATION_ID: 'sq-id', SQUARE_APPLICATION_SECRET: 'sq-secret', META_APP_ID: 'm', META_APP_SECRET: 's' };
+    const env = { ...baseEnv, SQUARE_APPLICATION_ID: 'sq-id', SQUARE_APPLICATION_SECRET: 'sq-secret', META_APP_ID: 'm', META_APP_SECRET: 's', META_LOGIN_CONFIG_ID: 'c' };
     const list = buildIntegrationStatuses(env, { connections: [{ provider: 'square', status: 'connected', displayName: 'Ivanhoe Studio' }], socialAccounts: [] });
     expect(list.find((i) => i.id === 'square')).toMatchObject({ configured: true, connected: true });
     expect(list.find((i) => i.id === 'instagram')).toMatchObject({ configured: true, connected: false });

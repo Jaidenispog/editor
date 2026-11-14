@@ -93,3 +93,14 @@ ledger, the music-free export of any version, the Sound panel (volume, fades, or
 options), "Suggested for you" from the owner's own library, and private Spotify references (link-only by default).
 No music library API is connected (none is built in Phase 1); tracks are downloaded from a business-eligible library
 and uploaded with their licence details.
+
+## Publishing (Stage B, WP4)
+
+- **Built**: composer (only the edits you chose, platforms off by default, caption with a 2,200-character counter and
+  locked credit line, cover picker, Melbourne scheduling with daylight saving), "Post it yourself" with download, share,
+  copy caption and "I've posted it", Instagram direct publishing through Meta's Unified Login with a first verification
+  post, Publishing page (Your turn, upcoming, history), Content Library badges and multi-select, Studio "Publish…".
+- **Verified on synthetic footage with fakes**: the whole Instagram flow against a local fake of Meta's API (no real
+  post was made), the music rule, duplicate protection and restart recovery.
+- **Waiting on account access**: a Meta business app, configuration and the first real verification post (see the
+  owner checklist in `docs/design/stage-bc-plan.md` §7). TikTok stays manual until the optional Zernio route (WP10).

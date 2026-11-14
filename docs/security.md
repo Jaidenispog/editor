@@ -128,3 +128,23 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   Content-Security-Policy is written it must allow `frame-src https://open.spotify.com` for the optional embed.
 - The usage ledger keeps a licence snapshot per export; ledger rows reference the track with `ON DELETE RESTRICT`
   (tracks are soft-deleted, so this never blocks a removal).
+
+## Publishing (Stage B, WP4)
+
+- **Credentials**: the Meta system-user token is stored only in `integration_connections.access_token_encrypted`
+  (AES-256-GCM), decrypted in the worker per call and in the callback for the single code exchange. It never goes to
+  the browser, job payloads, `provider_state`, `audit_log` or logs (the HTTP helper redacts `access_token`,
+  `appsecret_proof`, `input_token`, `client_secret`, `code` and `Authorization`). Every Graph call sends
+  `appsecret_proof`. `META_APP_SECRET` stays in the environment.
+- **OAuth**: Unified Login dialog with `config_id` and no `scope`; state bound to the owner's session in an encrypted,
+  HttpOnly, SameSite=Lax 10-minute cookie scoped to `/api/integrations/instagram`; redirect URI fixed from `APP_URL`;
+  the callback requires the owner session and clears the cookie on every outcome.
+- **Least privilege**: `instagram_basic` and `instagram_content_publish` only (`business_management` only if discovery
+  is empty). The read-only `social.check` never posts; the only live "test" is a first verification post the owner
+  chooses and approves.
+- **Duplicate protection**: unique `(post_id, platform)` and `idempotency_key`, conditional status updates, the
+  container id saved before the upload, `submitted_at` set before `media_publish`, `stately` queues as a second guard.
+- **Untrusted input**: captions and pasted links are rendered as text; a link is stored only if it matches an exact
+  Instagram or TikTok post pattern. Graph messages are shown as text.
+- **Media**: uploads stream from private storage to `rupload.facebook.com` (no public URL); owner downloads use
+  expiring links. Deleting a project cancels its unsent posts and removes its `publishing/{postId}/` covers.

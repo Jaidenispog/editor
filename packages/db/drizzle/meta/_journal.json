@@ -29,6 +29,13 @@
       "when": 1794644164760,
       "tag": "0003_trends",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794646374091,
+      "tag": "0004_publishing",
+      "breakpoints": true
     }
   ]
 }
