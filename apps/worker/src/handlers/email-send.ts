@@ -21,10 +21,12 @@ export const CHECK_BEFORE_RETRY_MESSAGE = "We couldn't confirm whether this emai
 /**
  * Shown when Postmark refuses a marketing email (406) to an address the app itself put on Postmark's Broadcast
  * suppression list when the client unsubscribed, and the client has since given permission again. The app never
- * removes addresses from Postmark's list (design §8.1.4), so the owner does it in Postmark.
+ * removes addresses from Postmark's list (design §8.1.4), so the owner does it in Postmark. The 406 itself doesn't say
+ * why, so the wording says "most likely" and names the other cause: a later bounce or spam report the app never heard
+ * about (a missed webhook), which the owner must not remove.
  */
 export const PROVIDER_STILL_SUPPRESSED_MESSAGE =
-  "Not sent: Postmark still blocks marketing emails to this address because the app added it to Postmark's unsubscribe list when the client unsubscribed. The client has since given permission again, so remove the address from your Broadcast stream's suppression list in Postmark, then write the email again.";
+  "Not sent: Postmark still blocks marketing emails to this address, most likely because the app added it to Postmark's unsubscribe list when the client unsubscribed (they have since given permission again). Check the address in your Broadcast stream's suppression list in Postmark: if it is listed as an unsubscribe, remove it there, then write the email again. If Postmark lists a bounce or a spam report instead, leave it blocked.";
 
 /** A transient provider failure: the queue retries the job. */
 export class TransientSendError extends Error {

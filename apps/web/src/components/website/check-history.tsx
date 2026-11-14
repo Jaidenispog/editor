@@ -5,21 +5,10 @@ import { formatDateTime } from '@studio/core';
 import { Dialog } from '@/components/ui/dialog';
 import { StatusPill } from '@/components/ui/status-pill';
 import { apiRequest } from '@/lib/client/api-client';
+import { countsLine } from './check-words';
 import { FindingsByCategory } from './findings-by-category';
 import type { AuditSummaryDto } from './types';
 import type { WebsiteAuditResult } from '@studio/core';
-
-/** Plain counts for one check ("2 urgent, 5 important, …"). */
-export function countsLine(s: AuditSummaryDto['summary']): string {
-  const parts = [
-    [s.counts.critical, 'urgent'],
-    [s.counts.high, 'important'],
-    [s.counts.medium, 'worth doing'],
-    [s.counts.low, 'minor'],
-  ] as const;
-  const text = parts.filter(([n]) => n > 0).map(([n, w]) => `${n} ${w}`);
-  return text.length ? text.join(', ') : 'Nothing to fix';
-}
 
 /** "Earlier checks": date, pages and counts; opening one shows its stored result read-only. */
 export function CheckHistory({ refreshKey }: { refreshKey: string }) {
@@ -28,6 +17,7 @@ export function CheckHistory({ refreshKey }: { refreshKey: string }) {
     audit: AuditSummaryDto;
     result: WebsiteAuditResult | null;
     fixedSinceLast: string[];
+    pagesNotRead?: { reasons: string[] } | null;
   } | null>(null);
   const load = useCallback(async () => {
     try {
@@ -73,7 +63,7 @@ export function CheckHistory({ refreshKey }: { refreshKey: string }) {
         {open?.result ? (
           <div className="space-y-3">
             {open.fixedSinceLast.length ? <p className="text-sm text-emerald-800">Fixed since the check before: {open.fixedSinceLast.join('; ')}</p> : null}
-            <FindingsByCategory findings={open.result.findings} changeKeys={new Set()} onShowChange={() => setOpen(null)} />
+            <FindingsByCategory findings={open.result.findings} notRead={open.pagesNotRead ?? null} changeKeys={new Set()} onShowChange={() => setOpen(null)} />
           </div>
         ) : (
           <p className="text-sm text-charcoal-600">{open?.audit.error ?? 'Only the summary of this older check is kept.'}</p>

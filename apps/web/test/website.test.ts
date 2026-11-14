@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AppSettingsSchema, buildQueryClassifier, type WebsiteChange } from '@studio/core';
 import { buildWebsiteIntegrations } from '../src/lib/integrations/website';
+import { PAGES_NOT_READ, countsLine, findingsNote } from '../src/components/website/check-words';
 import { mergeSettings } from '../src/lib/settings-merge';
 import { applyAvailability, groupSearchRows, missingBusinessDetails, openingHoursLines } from '../src/lib/website';
 
@@ -104,5 +105,26 @@ describe('settings for the website module', () => {
     expect(missing.map((m) => m.field)).toEqual(['businessName', 'addressLine', 'phone', 'bookingLink', 'openingHours']);
     expect(openingHoursLines([{ day: 'Tu', opens: '09:00', closes: '17:30' }])).toContain('Tuesday: 09:00–17:30');
     expect(openingHoursLines([])).toContain('Monday: Closed');
+  });
+});
+
+describe('website check wording when no page was read', () => {
+  const summary = (pagesChecked: number, partialReasons: string[] = []) => ({
+    pagesChecked,
+    pagesSkipped: 0,
+    counts: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+    partialReasons,
+  });
+  it('never says "nothing to fix" for a check that read no page, and gives the stored reason', () => {
+    const reason = "Your robots.txt asks automated tools not to read your site, so we didn't check it.";
+    expect(countsLine(summary(0, [reason]))).toBe('No pages could be read');
+    expect(countsLine(summary(3))).toBe('Nothing to fix');
+    const empty = findingsNote(0, { reasons: [reason] });
+    expect(empty).toContain(PAGES_NOT_READ);
+    expect(empty).toContain(reason);
+    expect(empty).not.toMatch(/nothing to fix/i);
+    expect(findingsNote(1, { reasons: [] })).toContain(PAGES_NOT_READ);
+    expect(findingsNote(0, null)).toBe('The check found nothing to fix. Nice work.');
+    expect(findingsNote(2, null)).toBeNull();
   });
 });

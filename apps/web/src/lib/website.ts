@@ -372,9 +372,14 @@ export async function getWebsiteOverview(): Promise<WebsiteOverviewDto> {
   const scope = siteScopeFrom(settings.business.website);
   const a = schema.websiteAudits;
   const [latest] = await db.select().from(a).orderBy(desc(a.createdAt)).limit(1);
-  const lastFinished = (await db.select().from(a).where(isNotNull(a.result)).orderBy(desc(a.createdAt)).limit(2)).filter((r) => r.status === 'complete' || r.status === 'partial');
-  const latestResult = lastFinished[0]?.result ? WebsiteAuditResultSchema.safeParse(lastFinished[0].result) : null;
-  const previousResult = lastFinished[1]?.result ? WebsiteAuditResultSchema.safeParse(lastFinished[1].result) : null;
+  const finished = await recentFinishedChecks();
+  const newest = finished[0];
+  // A check that read no page (robots.txt kept us out, or the home page couldn't be read) is no evidence that
+  // anything was fixed: it is never compared, and the check before a real one is the last check that read pages.
+  const newestNotRead = newest ? pagesNotRead(newest.summary) : null;
+  const before = newest && !newestNotRead ? finished.slice(1).find((r) => !pagesNotRead(r.summary)) : undefined;
+  const latestResult = newest ? await storedResult(newest.id) : null;
+  const previousResult = before ? await storedResult(before.id) : null;
   const activeJob =
     latest && (latest.status === 'queued' || latest.status === 'running')
       ? ((await db.query.jobs.findFirst({
@@ -408,6 +413,7 @@ export async function getWebsiteOverview(): Promise<WebsiteOverviewDto> {
     latestAudit: latest ? auditDto(latest) : null,
     latestResult: latestResult?.success ? latestResult.data : null,
     fixedSinceLast: latestResult?.success && previousResult?.success ? fixedSince(previousResult.data.findings, latestResult.data.findings) : [],
+    pagesNotRead: latestResult?.success ? newestNotRead : null,
     activeJob: activeJob ? toJobDto(activeJob) : null,
     checkBlockedReason: await auditBlockedReason(settings),
     openChanges: open[0]?.n ?? 0,
@@ -425,6 +431,32 @@ export async function getWebsiteOverview(): Promise<WebsiteOverviewDto> {
     },
     platformHint: latestResult?.success ? latestResult.data.platformHint : null,
   };
+}
+
+/**
+ * Null when a finished check read at least one page; otherwise why it couldn't (its stored partial reasons). Such a
+ * check (robots.txt kept us out, or the home page couldn't be read) says nothing about what is fixed or fine.
+ */
+export function pagesNotRead(summaryValue: unknown): { reasons: string[] } | null {
+  const parsed = AuditSummarySchema.safeParse(summaryValue ?? {});
+  const s = parsed.success ? parsed.data : AuditSummarySchema.parse({});
+  return s.pagesChecked > 0 ? null : { reasons: s.partialReasons };
+}
+
+/** Finished checks that still keep their full result, newest first (ids and summaries only), optionally before a time. */
+async function recentFinishedChecks(before?: Date): Promise<Array<{ id: string; summary: unknown }>> {
+  const a = schema.websiteAudits;
+  return getDb()
+    .select({ id: a.id, summary: a.summary })
+    .from(a)
+    .where(and(isNotNull(a.result), inArray(a.status, ['complete', 'partial']), before ? sql`${a.createdAt} < ${before}` : undefined))
+    .orderBy(desc(a.createdAt))
+    .limit(20);
+}
+
+async function storedResult(id: string) {
+  const row = await getDb().query.websiteAudits.findFirst({ where: eq(schema.websiteAudits.id, id), columns: { result: true } });
+  return row?.result ? WebsiteAuditResultSchema.safeParse(row.result) : null;
 }
 
 /** Why a new check can't start now, or null. */
@@ -463,6 +495,7 @@ export async function getAudit(id: string): Promise<{
   audit: AuditSummaryDto;
   result: WebsiteAuditResult | null;
   fixedSinceLast: string[];
+  pagesNotRead: { reasons: string[] } | null;
 }> {
   const a = schema.websiteAudits;
   const row = await getDb().query.websiteAudits.findFirst({
@@ -470,17 +503,15 @@ export async function getAudit(id: string): Promise<{
   });
   if (!row) throw new AppError('NOT_FOUND', 'That website check no longer exists.');
   const parsed = row.result ? WebsiteAuditResultSchema.safeParse(row.result) : null;
-  const [prev] = await getDb()
-    .select()
-    .from(a)
-    .where(and(isNotNull(a.result), sql`${a.createdAt} < ${row.createdAt}`))
-    .orderBy(desc(a.createdAt))
-    .limit(1);
-  const prevParsed = prev?.result ? WebsiteAuditResultSchema.safeParse(prev.result) : null;
+  const notRead = pagesNotRead(row.summary);
+  // Compared only when this check read pages, and only with the last earlier check that also read pages.
+  const prev = notRead ? undefined : (await recentFinishedChecks(row.createdAt)).find((r) => !pagesNotRead(r.summary));
+  const prevParsed = prev ? await storedResult(prev.id) : null;
   return {
     audit: auditDto(row),
     result: parsed?.success ? parsed.data : null,
     fixedSinceLast: parsed?.success && prevParsed?.success ? fixedSince(prevParsed.data.findings, parsed.data.findings) : [],
+    pagesNotRead: parsed?.success ? notRead : null,
   };
 }
 

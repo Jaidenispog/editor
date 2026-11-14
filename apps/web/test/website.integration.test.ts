@@ -462,4 +462,75 @@ suite('Website routes (database-backed)', () => {
     expect((await call(gsc.DELETE, 'DELETE', '/api/integrations/google-search-console?deleteData=true')).status).toBe(202);
     expect(await getDb().select().from(schema.searchMetrics).where(eq(schema.searchMetrics.source, 'search_console'))).toEqual([]);
   });
+
+  it('a check that read no page is never "fixed since last check" nor "nothing to fix"', async () => {
+    const { getDb } = await import('../src/lib/db');
+    const { schema } = await import('@studio/db');
+    const core = await import('@studio/core');
+    const { findingsNote, countsLine } = await import('../src/components/website/check-words');
+    const overview = await import('../src/app/api/website/route');
+    const one = await import('../src/app/api/website/audits/[id]/route');
+    const root = 'https://ivanhoebarber.example.com.au/';
+    const facts = (pages: unknown[]) => ({
+      version: 1,
+      siteRoot: root,
+      settingsSnapshot: { businessName: 'Ivanhoe Barber Co', addressLine: '', suburb: 'Ivanhoe', state: 'VIC', postcode: '3079', phone: '', website: root, bookingLink: '', openingHours: [] },
+      platformHint: 'unknown',
+      robots: { status: 'ok', sitemaps: [], googlebotBlocksHome: false, blockedForUs: [], crawlDelaySec: null, googlebotBlockedPages: [] },
+      sitemap: { found: false, sources: [], urlCount: 0, invalid: false, sample: [], homeListed: null, badUrls: [] },
+      hostVariants: [],
+      soft404: null,
+      pages,
+      links: { checked: 0, broken: [], unverifiable: 0 },
+      limits: { maxPages: 25, hitPageLimit: false, requests: 3, durationMs: 1000 },
+    });
+    const home = {
+      url: root, finalUrl: root, status: 200, error: null, skipped: null, redirectChain: [], ttfbMs: 100, totalMs: 200, htmlBytes: 1000, compressed: true,
+      title: 'Ivanhoe Barber Co', metaDescription: null, h1: ['Welcome'], headings: [], canonical: root, metaRobots: null, xRobotsTag: null, lang: 'en-AU',
+      viewport: 'width=device-width', jsonLd: [], microdataTypes: [],
+      nap: { phones: [], telLinks: [], nameFound: true, suburbFound: true, postcodeFound: false, streetFound: false, addressConflicts: [] },
+      bookingLinkFound: false, images: [], headScripts: { total: 0, blocking: 0 }, estimatedWeightBytes: 1000, wordCount: 100, textSample: null, internalLinks: [],
+    };
+    const finding = core.buildFinding('canonical_missing', root, { detail: 'No canonical address on the home page.', pages: [root] });
+    const earlier = core.WebsiteAuditResultSchema.parse({ ...facts([home]), findings: [finding] });
+    const notRead = core.WebsiteAuditResultSchema.parse({ ...facts([]), findings: [] });
+    const reason = "Your home page forwards to an address your robots.txt asks automated tools not to read, so we didn't check your pages.";
+    const t = Date.now() + 3_600_000; // newer than every check the earlier tests made
+    const earlierId = randomUUID();
+    const laterId = randomUUID();
+    await getDb()
+      .insert(schema.websiteAudits)
+      .values([
+        { id: earlierId, url: root, status: 'complete', result: earlier, summary: core.summariseAudit(earlier, []), createdAt: new Date(t), finishedAt: new Date(t) },
+        { id: laterId, url: root, status: 'partial', result: notRead, summary: core.summariseAudit(notRead, [reason]), createdAt: new Date(t + 60_000), finishedAt: new Date(t + 60_000) },
+      ]);
+    const res = await call(overview.GET, 'GET', '/api/website');
+    expect(res.status).toBe(200);
+    expect(res.json.latestAudit.id).toBe(laterId);
+    expect(res.json.latestAudit.summary.pagesChecked).toBe(0);
+    expect(res.json.fixedSinceLast).toEqual([]);
+    expect(res.json.pagesNotRead).toEqual({ reasons: [reason] });
+    const detail = await call(one.GET, 'GET', `/api/website/audits/${laterId}`, undefined, { id: laterId });
+    expect(detail.json.fixedSinceLast).toEqual([]);
+    expect(detail.json.pagesNotRead).toEqual({ reasons: [reason] });
+    // What the page says for it: never "nothing to fix", always that the pages couldn't be checked, with the reason.
+    const note = findingsNote(res.json.latestResult.findings.length, res.json.pagesNotRead) ?? '';
+    expect(note).not.toMatch(/nothing to fix/i);
+    expect(note).toContain("We couldn't check your pages this time.");
+    expect(note).toContain(reason);
+    expect(countsLine(res.json.latestAudit.summary)).not.toMatch(/nothing to fix/i);
+    // The earlier real check still reads as its own result.
+    const earlierDetail = await call(one.GET, 'GET', `/api/website/audits/${earlierId}`, undefined, { id: earlierId });
+    expect(earlierDetail.json.pagesNotRead).toBeNull();
+    expect(findingsNote(0, null)).toMatch(/nothing to fix/);
+    // A later check that reads pages again is compared with the last check that read pages, not the empty one.
+    const fixedId = randomUUID();
+    const fixed = core.WebsiteAuditResultSchema.parse({ ...facts([home]), findings: [] });
+    await getDb()
+      .insert(schema.websiteAudits)
+      .values({ id: fixedId, url: root, status: 'complete', result: fixed, summary: core.summariseAudit(fixed, []), createdAt: new Date(t + 120_000), finishedAt: new Date(t + 120_000) });
+    const after = await call(overview.GET, 'GET', '/api/website');
+    expect(after.json.pagesNotRead).toBeNull();
+    expect(after.json.fixedSinceLast).toEqual([finding.title]);
+  });
 });

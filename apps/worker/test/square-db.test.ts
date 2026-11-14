@@ -22,6 +22,7 @@ import { handleSquareAttendance } from '../src/handlers/square-attendance.js';
 import { handleSquareAvailability } from '../src/handlers/square-availability.js';
 import { handleSquareRevoke, handleSquareTokenRefresh } from '../src/handlers/square-token.js';
 import { squareModule } from '../src/modules/square/index.js';
+import { createSdkSquareApi } from '../src/square/api.js';
 import { openSquare } from '../src/square/client.js';
 import { runAttendance } from '../src/square/attendance.js';
 import { SquareConnectionChangedError } from '../src/square/map.js';
@@ -293,6 +294,46 @@ describe.skipIf(skip)('Square Tier 0 with a fake Square API', () => {
     expect(fake.callsTo('booking_get').some((c) => c.path.endsWith('/BK_MISSED'))).toBe(true);
   });
 
+  it('a booking Square still has but sends with a local start time is left as stored and never marked missing (refresh and sync)', async () => {
+    const original = fake.scenario.bookings.find((b) => b['id'] === 'BK_ACCEPTED')!;
+    const stored = (await booking('BK_ACCEPTED'))!;
+    expect(stored.missingFromSquareAt).toBeNull();
+    // The same booking, newer, with its start written as a local time without an offset (never parsed).
+    const localStart = String(original['start_at']).replace(/(\.\d+)?Z$/, '');
+    fake.scenario.bookings = fake.scenario.bookings.map((b) => (b['id'] === 'BK_ACCEPTED' ? { ...original, start_at: localStart, version: Number(original['version']) + 1, status: 'CANCELLED_BY_SELLER' } : b));
+    const unchanged = async () => {
+      const row = (await booking('BK_ACCEPTED'))!;
+      expect(row.missingFromSquareAt).toBeNull();
+      expect(row).toMatchObject({ squareVersion: stored.squareVersion, status: stored.status, startAt: stored.startAt, attendance: stored.attendance });
+    };
+    try {
+      // 1. A webhook refresh re-reads it: Square answers with the booking, so it is not "gone".
+      const run = fakeRun();
+      await handleSquareRefresh(ctx, run, { entity: 'booking', squareId: 'BK_ACCEPTED' });
+      expect(run.messages.at(-1)).toMatch(/couldn't read/);
+      await unchanged();
+
+      // 2. The reconcile sync lists it (unreadable): it counts as seen, so it is not re-read one by one or marked missing.
+      const gets = fake.callsTo('booking_get').length;
+      await handleSquareSync(ctx, fakeRun(), { reason: 'reconcile' });
+      expect(fake.callsTo('booking_get').slice(gets).some((c) => c.path.endsWith('/BK_ACCEPTED'))).toBe(false);
+      await unchanged();
+
+      // 3. When the list leaves it out, the one-by-one re-read gets the unreadable copy and still leaves it as stored.
+      const s = await openSquare(ctx, fakeRun());
+      if ('skip' in s) throw new Error(s.skip);
+      const api = Object.create(s.api) as typeof s.api;
+      api.listBookings = async () => ({ bookings: [], skippedIds: [] });
+      const before = fake.callsTo('booking_get').length;
+      const summary = await runSquareSync(ctx, fakeRun(), { ...s, api }, 'reconcile');
+      expect(fake.callsTo('booking_get').slice(before).some((c) => c.path.endsWith('/BK_ACCEPTED'))).toBe(true);
+      expect(summary.missing).toBe(0);
+      await unchanged();
+    } finally {
+      fake.scenario.bookings = fake.scenario.bookings.map((b) => (b['id'] === 'BK_ACCEPTED' ? original : b));
+    }
+  });
+
   it('attendance (sandbox): a matched test payment is labelled but never counts as a completed visit', async () => {
     const start = now - 3 * HOUR;
     fake.scenario.bookings.push(fakeBooking({ id: 'BK_SANDBOX_PAST', startAt: new Date(start).toISOString(), customerId: 'CUST_RILEY', durationMinutes: 45 }));
@@ -384,6 +425,25 @@ describe.skipIf(skip)('Square Tier 0 with a fake Square API', () => {
     const range = ((call.body?.['query'] as Record<string, unknown>)['filter'] as Record<string, unknown>)['start_at_range'] as { start_at: string; end_at: string };
     expect(Date.parse(range.end_at) - Date.parse(range.start_at)).toBe(24 * HOUR);
     expect(((call.body?.['query'] as Record<string, unknown>)['filter'] as Record<string, unknown>)['segment_filters']).toEqual([{ service_variation_id: 'VAR_FADE', team_member_id_filter: { any: ['TM_SAM'] } }]);
+  });
+
+  it('availability: a slot with a local start time is dropped and reported to onSkip without identifying anyone', async () => {
+    const segment = { duration_minutes: 45, service_variation_id: 'VAR_FADE', team_member_id: 'TM_SAM', service_variation_version: 1700000000001 };
+    fake.scenario.availabilities = [
+      { start_at: '2026-10-03T23:00:00Z', location_id: 'LOC_1', appointment_segments: [segment] },
+      { start_at: '2026-10-04T10:00:00', location_id: 'LOC_1', appointment_segments: [segment] },
+    ];
+    const skipped: Array<[string, string]> = [];
+    const api = createSdkSquareApi({
+      token: fake.scenario.accessToken,
+      environment: 'sandbox',
+      baseUrl: fake.url,
+      signal: new AbortController().signal,
+      onSkip: (id, reason) => skipped.push([id, reason]),
+    });
+    const slots = await api.searchAvailability({ startAt: '2026-10-03T13:00:00Z', endAt: '2026-10-04T13:00:00Z', locationId: 'LOC_1', serviceVariationId: 'VAR_FADE', teamMemberId: null });
+    expect(slots.map((s) => s.startAt)).toEqual(['2026-10-03T23:00:00Z']);
+    expect(skipped).toEqual([['slot:LOC_1', 'start_at is not an RFC 3339 instant']]);
   });
 
   it('a deleted Square customer is scrubbed, never deleted', async () => {

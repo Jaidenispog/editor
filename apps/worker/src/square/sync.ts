@@ -15,6 +15,7 @@ import type { WorkerContext } from '../context.js';
 import { writeWorkerAudit } from '../lib/audit.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
+import { isMalformedBooking } from './api.js';
 import { markSquareNeedsReauth, mergeSquareConfig, type SquareSession } from './client.js';
 import { applyAttendance, storedMatch, upsertBooking, upsertCustomer, type UpsertOutcome } from './map.js';
 
@@ -116,7 +117,10 @@ export async function runSquareSync(ctx: WorkerContext, run: TrackedRun, s: Squa
   for (const w of locationId ? bookingWindows(range.start, range.end) : []) {
     run.checkCancelled();
     const list = await s.api.listBookings({ locationId, startAtMin: w.start.toISOString(), startAtMax: w.end.toISOString() });
-    for (const b of list) {
+    // Bookings Square returned with a time we can't read: Square still has them, so they are never treated as gone
+    // below; their stored copies stay as they are (each is logged through the API's onSkip).
+    for (const id of list.skippedIds) seen.add(id);
+    for (const b of list.bookings) {
       seen.add(b.id);
       if (b.customerId) customerIds.add(b.customerId);
       summary.bookings[await upsertBooking(ctx.db, b, s, snapshot, now)]++;
@@ -142,7 +146,9 @@ export async function runSquareSync(ctx: WorkerContext, run: TrackedRun, s: Squa
     for (const h of held) {
       run.checkCancelled();
       const fresh = await s.api.getBooking(h.squareBookingId);
-      if (fresh) {
+      if (isMalformedBooking(fresh)) {
+        ctx.logger.warn({ squareBookingId: fresh.id, reason: fresh.reason }, 'left a Square booking as stored: its copy from Square could not be read');
+      } else if (fresh) {
         if (fresh.customerId) customerIds.add(fresh.customerId);
         summary.bookings[await upsertBooking(ctx.db, fresh, s, snapshot, now)]++;
       } else {

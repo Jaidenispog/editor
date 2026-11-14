@@ -13,6 +13,8 @@ import { WebsiteFetcher, type FetchPolicy } from '../src/website/fetcher.js';
 
 const HOST = 'crawl-site.test';
 const TWIN = `www.${HOST}`;
+/** A robots.txt value that makes the test site answer 503 for it. */
+const SERVER_ERROR = '<503>';
 const page = (body: string) => `<!doctype html><html lang="en-AU"><head><title>Ivanhoe Barber Co</title></head><body>${body}</body></html>`;
 
 describe('website crawl: budget and robots.txt per host and per hop', () => {
@@ -22,6 +24,8 @@ describe('website crawl: budget and robots.txt per host and per hop', () => {
   /** robots.txt per host (tests set it). */
   const robots: Record<string, string> = {};
   let homeBody = '';
+  /** The twin host does not resolve (a network error for anything on it). */
+  let twinDown = false;
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       const host = (req.headers.host ?? '').split(':')[0] ?? '';
@@ -31,7 +35,10 @@ describe('website crawl: budget and robots.txt per host and per hop', () => {
         res.writeHead(status, { 'content-type': type, ...headers });
         res.end(req.method === 'HEAD' ? undefined : body);
       };
-      if (path === '/robots.txt') return robots[host] !== undefined ? send(200, robots[host], 'text/plain') : send(404, 'not found', 'text/plain');
+      if (path === '/robots.txt') {
+        if (robots[host] === SERVER_ERROR) return send(503, 'down', 'text/plain');
+        return robots[host] !== undefined ? send(200, robots[host], 'text/plain') : send(404, 'not found', 'text/plain');
+      }
       if (host === HOST && path === '/') return homeBody.startsWith('REDIRECT ') ? send(301, '', 'text/html', { location: homeBody.slice(9) }) : send(200, page(homeBody));
       if (path === '/old-prices') return send(301, '', 'text/html', { location: '/private/prices' });
       if (path.startsWith('/private/') || path.startsWith('/members/')) return send(200, page('<p>secret</p>'));
@@ -46,6 +53,7 @@ describe('website crawl: budget and robots.txt per host and per hop', () => {
     seen.length = 0;
     for (const k of Object.keys(robots)) delete robots[k];
     homeBody = '<h1>Ivanhoe Barber Co</h1><p>Fades and beard trims.</p>';
+    twinDown = false;
   });
 
   const settings = AppSettingsSchema.parse({
@@ -62,7 +70,7 @@ describe('website crawl: budget and robots.txt per host and per hop', () => {
       testHttpPort: port,
       politeIntervalMs: 0,
       resolver: async (h) => {
-        if (h === HOST || h === TWIN) return [{ address: '127.0.0.1', family: 4 }];
+        if (h === HOST || (h === TWIN && !twinDown)) return [{ address: '127.0.0.1', family: 4 }];
         throw new Error('ENOTFOUND');
       },
     };
@@ -128,5 +136,52 @@ describe('website crawl: budget and robots.txt per host and per hop', () => {
     expect(out.partialReasons.join(' ')).toMatch(/forwards to an address your robots\.txt/);
     expect(out.facts.pages[0]).toMatchObject({ skipped: 'robots' });
     expect(seen.some((s) => s.includes('/private/'))).toBe(false);
+  });
+
+  describe('a home page that forwards to the twin host gives the reason that matches the twin robots.txt', () => {
+    const forwardsToTwin = () => {
+      homeBody = `REDIRECT http://${TWIN}/`;
+    };
+    it('the twin robots.txt was read and disallows everything', async () => {
+      robots[HOST] = 'User-agent: *\nDisallow:\n';
+      robots[TWIN] = 'User-agent: *\nDisallow: /\n';
+      forwardsToTwin();
+      const { out } = await crawl();
+      expect(out.homeNotRead).toBe(true);
+      expect(out.partialReasons).toContain("Your home page forwards to an address your robots.txt asks automated tools not to read, so we didn't check your pages.");
+      expect(seen).not.toContain(`GET ${TWIN}/`);
+    });
+    it('the twin robots.txt gave a server error', async () => {
+      robots[HOST] = 'User-agent: *\nDisallow:\n';
+      robots[TWIN] = SERVER_ERROR;
+      forwardsToTwin();
+      const { out } = await crawl();
+      expect(out.homeNotRead).toBe(true);
+      const reason = out.partialReasons.join(' ');
+      expect(reason).toContain(`forwards to ${TWIN}, whose robots.txt couldn't be read`);
+      expect(reason).not.toMatch(/asks automated tools not to read/);
+      expect(seen).not.toContain(`GET ${TWIN}/`);
+    });
+    it('the twin host gave no answer at all', async () => {
+      robots[HOST] = 'User-agent: *\nDisallow:\n';
+      twinDown = true;
+      forwardsToTwin();
+      const { out } = await crawl();
+      expect(out.homeNotRead).toBe(true);
+      const reason = out.partialReasons.join(' ');
+      expect(reason).toContain(`forwards to ${TWIN}, whose robots.txt couldn't be read`);
+      expect(reason).not.toMatch(/asks automated tools not to read/);
+    });
+    it('the twin robots.txt was skipped to keep the polite-wait budget for the home page', async () => {
+      robots[HOST] = 'User-agent: *\nCrawl-delay: 600\n';
+      robots[TWIN] = 'User-agent: *\nDisallow:\n';
+      forwardsToTwin();
+      const { out } = await crawl();
+      expect(seen).not.toContain(`GET ${TWIN}/robots.txt`);
+      expect(out.homeNotRead).toBe(true);
+      const reason = out.partialReasons.join(' ');
+      expect(reason).toContain(`forwards to ${TWIN}. Your robots.txt asks for a very slow crawl (Crawl-delay)`);
+      expect(reason).not.toMatch(/asks automated tools not to read/);
+    });
   });
 });

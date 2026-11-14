@@ -26,6 +26,7 @@ type Customer = typeof schema.customers.$inferSelect;
 type AutomationName = 'follow_up' | 'review_request';
 
 const DAY_MS = 86_400_000;
+const SQUARE_ASKS_FOR_FEEDBACK = 'Cancelled before sending: Square is already asking your clients for feedback, so they would have been asked twice.';
 /** Most bookings considered per automation per run (the next run continues with the ones still unprocessed). */
 export const SWEEP_BATCH = 200;
 
@@ -207,11 +208,11 @@ async function cancelStale(ctx: WorkerContext): Promise<number> {
 }
 
 /** Turning an automation off cancels the messages it approved by itself that have not gone out (drafts stay). */
-async function cancelSwitchedOff(ctx: WorkerContext, name: AutomationName): Promise<number> {
+async function cancelSwitchedOff(ctx: WorkerContext, name: AutomationName, statusMessage = 'The automation was switched off before this was sent.'): Promise<number> {
   const m = schema.emailMessages;
   const rows = await ctx.db
     .update(m)
-    .set({ status: 'cancelled', statusMessage: 'The automation was switched off before this was sent.', updatedAt: new Date() })
+    .set({ status: 'cancelled', statusMessage, updatedAt: new Date() })
     .where(and(eq(m.origin, 'automation'), isNull(m.approvedBy), inArray(m.status, ['approved', 'queued']), isNull(m.submittedAt), like(m.dedupeKey, name === 'review_request' ? 'review:%' : 'follow_up:%')))
     .returning({ id: m.id });
   if (rows.length) {
@@ -264,14 +265,20 @@ export async function handleEmailSweep(ctx: WorkerContext, run: TrackedRun, _pay
     ['review_request', settings.reviews.automation],
   ];
   let switchedOff = 0;
+  let squareAsks = 0;
   for (const [name, automation] of automations) {
     run.checkCancelled();
     if (!automation.enabled || !automation.enabledAt) {
       switchedOff += await cancelSwitchedOff(ctx, name);
       continue;
     }
-    // Square already asks for feedback: the review automation stays off (design §4.3).
-    if (name === 'review_request' && settings.email.squareSends.feedbackOrReviews === true) continue;
+    // Square already asks for feedback: the review automation stays off (design §4.3), and requests it approved by
+    // itself that have not gone out yet are cancelled (settings saved before that rule could have both on). Requests
+    // the owner approved one by one are left alone.
+    if (name === 'review_request' && settings.email.squareSends.feedbackOrReviews === true) {
+      squareAsks += await cancelSwitchedOff(ctx, name, SQUARE_ASKS_FOR_FEEDBACK);
+      continue;
+    }
     const enabledAt = new Date(automation.enabledAt);
     const since = new Date(Math.max(enabledAt.getTime(), now.getTime() - settings.reviews.maxAgeDays * DAY_MS));
     for (const item of await completedBookingsSince(ctx, since, name)) {
@@ -281,8 +288,12 @@ export async function handleEmailSweep(ctx: WorkerContext, run: TrackedRun, _pay
     }
   }
   const cancelled = await cancelStale(ctx);
-  if (counts.created || counts.skipped || cancelled || switchedOff || optOuts) {
-    await writeWorkerAudit(ctx.db, { userId: null, action: 'email.automation.sweep', entityType: 'email_automation', data: { ...counts, cancelled, switchedOff, squareOptOuts: optOuts } }, ctx.logger);
+  if (counts.created || counts.skipped || cancelled || switchedOff || squareAsks || optOuts) {
+    await writeWorkerAudit(
+      ctx.db,
+      { userId: null, action: 'email.automation.sweep', entityType: 'email_automation', data: { ...counts, cancelled, switchedOff, cancelledBecauseSquareAsksForFeedback: squareAsks, squareOptOuts: optOuts } },
+      ctx.logger,
+    );
   }
-  await run.progress(1, `Prepared ${counts.created}, skipped ${counts.skipped}, cancelled ${cancelled + switchedOff}`);
+  await run.progress(1, `Prepared ${counts.created}, skipped ${counts.skipped}, cancelled ${cancelled + switchedOff + squareAsks}`);
 }

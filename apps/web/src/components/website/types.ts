@@ -52,6 +52,8 @@ export interface WebsiteOverviewDto {
   latestAudit: AuditSummaryDto | null;
   latestResult: WebsiteAuditResult | null;
   fixedSinceLast: string[];
+  /** Set when the latest result read no page at all (with the stored reasons): it is not a clean bill of health. */
+  pagesNotRead: { reasons: string[] } | null;
   activeJob: JobDto | null;
   /** Why "Check my website" is disabled, or null. */
   checkBlockedReason: string | null;

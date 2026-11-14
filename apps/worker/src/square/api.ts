@@ -14,9 +14,16 @@ export interface SquareApi {
   listLocationProfiles(): Promise<Array<{ locationId: string; bookingSiteUrl: string | null }>>;
   listTeamMemberProfiles(locationId: string | null): Promise<Array<{ id: string; displayName: string; isBookable: boolean }>>;
   listServices(): Promise<SquareServiceSnapshot[]>;
-  listBookings(input: { locationId: string | null; startAtMin: string; startAtMax: string }): Promise<SquareBookingData[]>;
-  /** Null when Square answers NOT_FOUND. */
-  getBooking(bookingId: string): Promise<SquareBookingData | null>;
+  /**
+   * Bookings in the range, plus the ids of bookings Square returned that could not be read (a malformed start time):
+   * Square still has those, so a sync must never treat them as gone.
+   */
+  listBookings(input: { locationId: string | null; startAtMin: string; startAtMax: string }): Promise<{ bookings: SquareBookingData[]; skippedIds: string[] }>;
+  /**
+   * Null only when Square answers NOT_FOUND. A booking Square returned but that could not be read (a malformed start
+   * time) is a {@link MalformedSquareBooking}: Square still has it, so it is never marked missing.
+   */
+  getBooking(bookingId: string): Promise<SquareBookingData | MalformedSquareBooking | null>;
   searchAvailability(filter: { startAt: string; endAt: string; locationId: string; serviceVariationId: string; teamMemberId: string | null }): Promise<SquareSlotData[]>;
   listCustomers(): Promise<SquareCustomerData[]>;
   searchCustomersUpdatedSince(sinceIso: string): Promise<SquareCustomerData[]>;
@@ -50,6 +57,18 @@ export interface SquareBookingData {
   updatedAt: string | null;
   segments: SquareSegmentData[];
   raw: Record<string, unknown>;
+}
+
+/** A booking Square still has but sent in a shape we can't read (for example a local start time): left as stored. */
+export interface MalformedSquareBooking {
+  malformed: true;
+  id: string;
+  reason: string;
+}
+
+/** Whether `getBooking` returned a booking Square has but we couldn't read. */
+export function isMalformedBooking(b: SquareBookingData | MalformedSquareBooking | null): b is MalformedSquareBooking {
+  return b !== null && 'malformed' in b && b.malformed === true;
 }
 
 /** A Square customer, normalised. */
@@ -119,9 +138,12 @@ function segmentsOf(list: Square.AppointmentSegment[] | null | undefined): Squar
  * booking id of a skipped booking so the caller can log it.
  */
 export function bookingFromSdk(b: Square.Booking, onSkip?: (bookingId: string, reason: string) => void): SquareBookingData | null {
-  if (!b.id || !b.startAt || !b.status) return null;
+  if (!b.id || !b.startAt || !b.status) {
+    if (b.id) onSkip?.(b.id, MISSING_FIELDS);
+    return null;
+  }
   if (!isRfc3339Instant(b.startAt)) {
-    onSkip?.(b.id, 'start_at is not an RFC 3339 instant');
+    onSkip?.(b.id, NOT_AN_INSTANT);
     return null;
   }
   return {
@@ -136,6 +158,16 @@ export function bookingFromSdk(b: Square.Booking, onSkip?: (bookingId: string, r
     segments: segmentsOf(b.appointmentSegments),
     raw: toJsonSafe(b) as Record<string, unknown>,
   };
+}
+
+const MISSING_FIELDS = 'missing id, start_at or status';
+const NOT_AN_INSTANT = 'start_at is not an RFC 3339 instant';
+
+/** Why an SDK booking can't be read, or null when it can (the same tests as {@link bookingFromSdk}). */
+function bookingProblem(b: Square.Booking): string | null {
+  if (!b.id || !b.startAt || !b.status) return MISSING_FIELDS;
+  if (!isRfc3339Instant(b.startAt)) return NOT_AN_INSTANT;
+  return null;
 }
 
 /** Normalises an SDK customer. */
@@ -236,7 +268,10 @@ export interface SdkSquareApiOptions {
   baseUrl: string | null;
   signal: AbortSignal;
   fetch?: typeof fetch | undefined;
-  /** Hears each booking or slot skipped because Square sent a malformed time (for the log; ids only). */
+  /**
+   * Hears each booking or availability slot skipped because Square sent a malformed time or left out its basic fields
+   * (for the log; a booking id, or `slot:<location id>` for a slot, which has no id of its own).
+   */
   onSkip?: ((objectId: string, reason: string) => void) | undefined;
 }
 
@@ -312,15 +347,22 @@ export function createSdkSquareApi(options: SdkSquareApiOptions): SquareApi {
         return servicesFromSdk(items);
       }),
     listBookings: ({ locationId, startAtMin, startAtMax }) =>
-      call(async () =>
-        (await all(client.bookings.list({ startAtMin, startAtMax, limit: 100, ...(locationId ? { locationId } : {}) }, ro)))
-          .map((b) => bookingFromSdk(b, options.onSkip))
-          .filter((b): b is SquareBookingData => b !== null),
-      ),
+      call(async () => {
+        const bookings: SquareBookingData[] = [];
+        const skippedIds: string[] = [];
+        for (const raw of await all(client.bookings.list({ startAtMin, startAtMax, limit: 100, ...(locationId ? { locationId } : {}) }, ro))) {
+          const b = bookingFromSdk(raw, options.onSkip);
+          if (b) bookings.push(b);
+          else if (raw.id) skippedIds.push(raw.id);
+        }
+        return { bookings, skippedIds };
+      }),
     getBooking: (bookingId) =>
-      orNull(async () => {
+      orNull(async (): Promise<SquareBookingData | MalformedSquareBooking> => {
         const b = (await client.bookings.get({ bookingId }, ro)).booking;
-        return b ? bookingFromSdk(b, options.onSkip) : null;
+        // Only NOT_FOUND (orNull) means Square no longer has it; an answer we can't read is never "gone".
+        if (!b) return { malformed: true, id: bookingId, reason: 'Square answered without the booking' };
+        return bookingFromSdk(b, options.onSkip) ?? { malformed: true, id: b.id ?? bookingId, reason: bookingProblem(b) ?? 'unreadable booking' };
       }),
     searchAvailability: (f) =>
       call(async () => {
@@ -336,7 +378,15 @@ export function createSdkSquareApi(options: SdkSquareApiOptions): SquareApi {
           },
           ro,
         );
-        return (r.availabilities ?? []).filter((a) => isRfc3339Instant(a.startAt)).map((a) => ({ startAt: a.startAt as string, locationId: a.locationId ?? f.locationId, segments: segmentsOf(a.appointmentSegments) }));
+        const slots: SquareSlotData[] = [];
+        for (const a of r.availabilities ?? []) {
+          if (!isRfc3339Instant(a.startAt)) {
+            options.onSkip?.(`slot:${a.locationId ?? f.locationId}`, 'start_at is not an RFC 3339 instant');
+            continue;
+          }
+          slots.push({ startAt: a.startAt as string, locationId: a.locationId ?? f.locationId, segments: segmentsOf(a.appointmentSegments) });
+        }
+        return slots;
       }),
     listCustomers: () => call(async () => (await all(client.customers.list({ limit: 100 }, ro))).map(customerFromSdk).filter((c): c is SquareCustomerData => c !== null)),
     searchCustomersUpdatedSince: (sinceIso) =>

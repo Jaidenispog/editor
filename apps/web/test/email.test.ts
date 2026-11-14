@@ -3,6 +3,7 @@ import { isPublicPath } from '../src/lib/public-routes';
 import { buildEmailIntegrations, placesCard, postmarkCard } from '../src/lib/integrations/email';
 import { emailRefId } from '../src/lib/jobs/email';
 import { checkPostmarkBasicAuth, postmarkExternalEventId } from '../src/lib/email';
+import { reviewAutomationNotice } from '../src/lib/shared/review-automation';
 
 /** Email module units with no database: webhook ids and credentials, the integration cards, ref ids, public paths. */
 const env = (over: Record<string, unknown> = {}) => ({ EMAIL_PROVIDER: 'postmark', POSTMARK_SERVER_TOKEN: 't', EMAIL_FROM: 'Studio <hello@studio.example>', GOOGLE_MAPS_API_KEY: 'k', ...over }) as never;
@@ -76,5 +77,16 @@ describe('email jobs and public paths', () => {
   it('keep the webhook, unsubscribe and review-link paths public and the pages private', () => {
     for (const p of ['/api/webhooks/postmark', '/api/public/unsubscribe/abc', '/u/abc', '/r/abc']) expect(isPublicPath(p)).toBe(true);
     for (const p of ['/emails', '/reviews', '/api/email/messages', '/api/customers', '/api/reviews/requests']) expect(isPublicPath(p)).toBe(false);
+  });
+});
+
+describe('Reviews page: automatic requests while Square asks for feedback', () => {
+  it('warns plainly when both are on, and keeps the reasons the switch cannot be turned on', () => {
+    const both = reviewAutomationNotice({ squareAsksForFeedback: true, automationEnabled: true, reviewLinkValid: true });
+    expect(both).toMatch(/clients could be asked twice/);
+    expect(both).toMatch(/cancelled before they go/);
+    expect(reviewAutomationNotice({ squareAsksForFeedback: true, automationEnabled: false, reviewLinkValid: true })).toMatch(/turn that off in Square first/);
+    expect(reviewAutomationNotice({ squareAsksForFeedback: false, automationEnabled: false, reviewLinkValid: false })).toMatch(/Google review link/);
+    expect(reviewAutomationNotice({ squareAsksForFeedback: false, automationEnabled: true, reviewLinkValid: true })).toBeNull();
   });
 });

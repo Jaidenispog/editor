@@ -120,7 +120,7 @@ function ClientDialog({ client, isOwner, onClose, onChanged }: { client: ClientD
           {detail.postmarkReactivated ? <Alert tone="info">Postmark reactivated this address; the app still blocks it until you record new permission (or confirm the address was fixed).</Alert> : null}
           {detail.providerStillSuppressed ? (
             <Alert tone="warning">
-              Postmark still blocks marketing emails to this address: the app added it to Postmark&rsquo;s unsubscribe list when this client unsubscribed, and the app never removes addresses from that list itself. The client has given permission again, so remove the address from your Broadcast stream&rsquo;s suppression list in Postmark.
+              Postmark still blocks marketing emails to this address, most likely because the app added it to Postmark&rsquo;s unsubscribe list when this client unsubscribed (the app never removes addresses from that list itself). The client has given permission again, so check the address in your Broadcast stream&rsquo;s suppression list in Postmark: if it is listed as an unsubscribe, remove it there. If Postmark lists a bounce or a spam report instead, leave it blocked.
             </Alert>
           ) : null}
           <div className="flex flex-wrap gap-2">

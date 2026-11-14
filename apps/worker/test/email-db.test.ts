@@ -288,6 +288,9 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
       expect(row.status).toBe('suppressed');
       expect(row.statusMessage).toBe(PROVIDER_STILL_SUPPRESSED_MESSAGE);
       expect(row.statusMessage).not.toMatch(/bounced or was reported/);
+      // The 406 doesn't say why: the likely cause is named as likely, and the other one (a missed bounce or report) too.
+      expect(row.statusMessage).toMatch(/most likely because/);
+      expect(row.statusMessage).toMatch(/bounce or a spam report/);
       const active = await handle.db.select().from(schema.emailSuppressions).where(and(eq(schema.emailSuppressions.emailLower, lower), isNull(schema.emailSuppressions.liftedAt)));
       expect(active).toHaveLength(0);
       const audit = await handle.db.query.auditLog.findFirst({ where: and(eq(schema.auditLog.action, 'email.provider_still_suppressed'), eq(schema.auditLog.entityType, 'email_address')) });
@@ -429,6 +432,39 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
       await handleEmailSweep(ctx, fakeRun(), {}, deps);
       const events = await handle.db.select().from(schema.consentEvents).where(eq(schema.consentEvents.customerId, c.id));
       expect(events).toEqual([expect.objectContaining({ kind: 'withdrawn', method: 'square_preference' })]);
+    });
+
+    it('while Square asks for feedback, review requests the automation approved by itself are cancelled before sending (audited); owner-approved ones stay', async () => {
+      const followUp = { enabled: true, enabledAt: new Date(NOW.getTime() - 48 * HOUR).toISOString(), mode: 'send_automatically', dailyCap: 10 };
+      const reviews = { automation: { enabled: true, enabledAt: new Date(NOW.getTime() - 48 * HOUR).toISOString(), mode: 'send_automatically' } };
+      try {
+        // Settings saved before the "not both" rule: the automation sends by itself and has scheduled a request.
+        await saveSettings({ email: { followUp }, reviews });
+        const c = await customer();
+        await consent(c);
+        const b = await booking(c.id);
+        await handleEmailSweep(ctx, fakeRun(), {}, deps);
+        const [scheduled] = await handle.db.select().from(m()).where(eq(m().dedupeKey, `review:${b}`));
+        expect(scheduled).toMatchObject({ status: 'approved', approvedBy: null, origin: 'automation' });
+        // One the owner approved by hand is the owner's decision and stays.
+        const c2 = await customer();
+        const ownerApproved = await message({ toEmail: c2.email!, customerId: c2.id, origin: 'automation', purpose: 'review_request', messageClass: 'review_request', dedupeKey: `review:owner-${c2.id}` });
+
+        // Square's feedback emails are then ticked as on (saved before the rule existed).
+        await saveSettings({ email: { followUp, squareSends: { confirmations: true, reminders: true, feedbackOrReviews: true } }, reviews });
+        await handleEmailSweep(ctx, fakeRun(), {}, deps);
+        expect(await get(scheduled!.id)).toMatchObject({ status: 'cancelled', statusMessage: expect.stringMatching(/Square is already asking your clients for feedback/) });
+        const [request] = await handle.db.select().from(schema.reviewRequests).where(eq(schema.reviewRequests.bookingId, b));
+        expect(request?.status).toBe('cancelled');
+        expect((await get(ownerApproved)).status).toBe('approved');
+        const audits = await handle.db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'email.automation.sweep'));
+        expect(audits.some((a) => (a.data as Record<string, unknown>)['cancelledBecauseSquareAsksForFeedback'] === 1)).toBe(true);
+        // Nothing went out.
+        await send(scheduled!.id);
+        expect(fake.sends.filter((s) => s.to === c.email)).toHaveLength(0);
+      } finally {
+        await saveSettings();
+      }
     });
   });
 
