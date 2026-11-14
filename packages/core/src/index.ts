@@ -13,3 +13,4 @@ export * from './revision.js';
 export * from './music.js';
 export * from './settings.js';
 export * from './style-support.js';
+export * from './manual-labels.js';

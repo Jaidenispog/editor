@@ -11,7 +11,7 @@ import {
 import { schema, type MediaAsset, type MusicTrack, type Project } from '@studio/db';
 import type { AiUsage } from '@studio/ai';
 import type { WorkerContext } from '../context.js';
-import { applyManualLabels } from './analysis-merge.js';
+import { applyManualLabels } from '@studio/core';
 
 export interface LoadedFootage {
   project: Project;

@@ -27,7 +27,7 @@ import { HeuristicLabeler, type FrameForLabelling, type VisionLabeler } from '@s
 import type { WorkerContext } from '../context.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { createJobTempDir, removeTempDir } from '../lib/temp.js';
-import { applyManualLabels } from '../lib/analysis-merge.js';
+import { applyManualLabels } from '@studio/core';
 import { recordAiUsage } from '../lib/plan-context.js';
 
 const MAX_TRANSCRIPTION_SECONDS = 20 * 60;

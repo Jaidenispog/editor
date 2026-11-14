@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { AssetAnalysis } from '@studio/core';
-import { applyManualLabels } from '../src/lib/analysis-merge.js';
+import type { AssetAnalysis } from '../src/analysis.js';
+import { applyManualLabels } from '../src/manual-labels.js';
 
 const base: AssetAnalysis = {
   version: 1,
