@@ -123,6 +123,29 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   clipboard for the Studio's Instructions box.
 - Google Trends and TikTok Creative Center are plain links the owner opens with their own logins.
 
+## Instagram hashtag watch (Stage B, WP5)
+
+- **A second live source** for Settings → Trends (preferences design §4.12 and §8.1, memo §11). The owner adds
+  hashtags; `trends.refresh` reads each one through `modules/trends/instagram.ts`, registered as
+  `TREND_SOURCES.instagram_hashtag` in `handlers/trends.ts`. Each `trend_watches` row is one hashtag
+  (`query` lower case without `#`, `external_id` = Instagram's hashtag id after the first search, `social_account_id`
+  = the Instagram account it is searched as). No migration: the table came with WP3.
+- **Credential.** It reuses the publishing module's Instagram connection: the `meta` row in `integration_connections`
+  (system-user token, decrypted only in the worker) found through `social_accounts.connection_id`. It shares the
+  publishing Graph host, version, `appsecret_proof`, `GraphApiError` and `mapGraphError`; the two reads
+  (`ig_hashtag_search`, `top_media`) live in `HashtagGraphReader` beside the source because `lib/meta/graph.ts`
+  belongs to the publishing package.
+- **Weekly limit.** Instagram allows 30 distinct hashtags per account in any 7 days, and whether `top_media` counts is
+  unknown, so every hashtag touched counts for 7 days from `last_queried_at` (turned-off rows are kept that long).
+  `claimHashtagQuery` takes a transaction-level advisory lock, checks `mayQueryHashtag` (`packages/core/src/
+  hashtag-watch.ts`) and sets `last_queried_at` in one step, so two workers cannot both take the 30th place. The web
+  app refuses an 11th watched hashtag and a 31st weekly one before queueing anything.
+- **Capability check.** The first read of a hashtag is the check. Meta refusing the permission sets the watch to
+  `unavailable` and `social_accounts.capabilities.hashtagSearch = false`; the Integrations and Trends cards then say
+  "not available" (a valid end state). A successful read sets it back to `true`.
+- **Stored per post:** rank, media type, posted time, like and comment counts as reported, Instagram permalink
+  (`InstagramHashtagItemDataSchema`). Never captions, media URLs, images or account names.
+
 ## Stages
 
 - **A** (this milestone): upload, analysis, five previews, revise/regenerate with history, full-quality export.

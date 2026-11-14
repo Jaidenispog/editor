@@ -94,6 +94,21 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   source changes state.
 - No trend data reaches a model or an edit plan.
 
+## Instagram hashtag watch (Stage B, WP5)
+
+- No new credential: the worker decrypts the `meta` connection's system-user token only for the call and sends it in
+  an `Authorization: Bearer` header (never in a URL, a job payload, the audit log or a DTO; tests check the logs,
+  jobs and responses). `appsecret_proof` is redacted from logs by `lib/http.ts`.
+- Read-only: only `ig_hashtag_search` and `top_media` are called; nothing is posted or changed at Meta.
+- Least privilege: the hashtag permission is only needed when the owner turns hashtag watch on; they add it to the
+  same Facebook Login for Business configuration and reconnect (no second configuration, no `scope` parameter).
+- Third-party content kept to the minimum: rank, media type, posted time, counts as reported and the permalink
+  (only `https://instagram.com`/`www.instagram.com` links survive). No captions, images or account names. Items are
+  deleted 7 days after they were fetched; links open in a new tab with `rel="noopener noreferrer"`.
+- Owner only: adding and removing hashtags and manual refreshes. Hashtags with "trending" or "viral" are refused so
+  no label carries a popularity claim. Audit: `trends.watch_added`, `trends.watch_removed`, and
+  `trends.source_unavailable` / `trends.source_needs_reauth` / `trends.source_quota` from the worker.
+
 ## Not done yet (known gaps)
 
 - **Rate limiting** applies to sign-in only. Uploads and other API routes have none beyond requiring a session.

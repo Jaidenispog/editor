@@ -10,7 +10,7 @@ import { DEFAULT_SETTINGS, newId, type AssetAnalysis, type GenerationSettings } 
 import { schema, type DatabaseHandle } from '@studio/db';
 import type { WorkerContext } from '../src/context.js';
 import { buildPlannerInput } from '../src/handlers/generate.js';
-import { UNSUPPORTED_SOURCE_MESSAGE, cleanupTrends, handleTrendsRefresh } from '../src/handlers/trends.js';
+import { TREND_SOURCES, UNSUPPORTED_SOURCE_MESSAGE, cleanupTrends, handleTrendsRefresh } from '../src/handlers/trends.js';
 import { loadProjectFootage, loadSettings } from '../src/lib/plan-context.js';
 import { classifyYouTubeError, parseYouTubeChart, YOUTUBE_VIDEOS_URL } from '../src/lib/youtube-client.js';
 import { trendsModule } from '../src/modules/trends/index.js';
@@ -225,8 +225,9 @@ describe.skipIf(skip)('trends.refresh on a real database (YouTube fake, no netwo
     const f = fakeFetch(() => json(200, chart(['aaaaaaaaaa1'])));
     await handleTrendsRefresh({ ...ctx, fetch: f }, fakeRun(), { watchId: off });
     expect(f.calls).toHaveLength(0);
+    // A provider missing from the source list (the Instagram hashtag watch has its own tests in trends-instagram.test.ts).
     const ig = await addWatch({ provider: 'instagram_hashtag', query: 'skinfade' });
-    await handleTrendsRefresh({ ...ctx, fetch: f }, fakeRun(), { watchId: ig });
+    await handleTrendsRefresh({ ...ctx, fetch: f }, fakeRun(), { watchId: ig }, { youtube_chart: TREND_SOURCES.youtube_chart });
     expect(f.calls).toHaveLength(0);
     expect(await watchRow(ig)).toMatchObject({ status: 'error', statusMessage: UNSUPPORTED_SOURCE_MESSAGE });
   });

@@ -174,6 +174,28 @@ No real YouTube call is made by any test (an injected fake `fetch`):
 The first real fetch needs `YOUTUBE_API_KEY` (1 quota unit): Settings → Trends → **Show the chart** is that smoke test.
 Record its result and date in `docs/HANDOVER.md`.
 
+## Instagram hashtag watch (Stage B, WP5)
+
+No Meta endpoint is called by any test (an injected fake `fetch` on a test-only Graph base URL):
+
+- `packages/core/test/hashtag-watch.test.ts`: the 7-day count (turned-off hashtags included), the 31st hashtag waiting
+  until the oldest query is a week old while a counted one may be read again, hashtag rules, Instagram-only
+  permalinks, post titles and labels without popularity words.
+- `apps/worker/test/trends-instagram.test.ts`: parsing keeps only the allowed fields (at most 9, Instagram's order);
+  the Graph error mapping; with `TEST_DATABASE_URL`, `trends.refresh` for a first read (search, then `top_media`,
+  hashtag id stored, upsert and removal of posts no longer listed), codes 190, 10 and 4, an empty search, the
+  30-hashtag budget (nothing called when it is used up), two hashtags racing for the last place, a 5xx retried then
+  failed, no usable connection, and the token never in a URL, log line, job payload or audit row.
+- `apps/web/test/hashtag-watch.test.ts` (status card states, source card data and budget, item label) and
+  `apps/web/test/hashtag-routes.integration.test.ts` (owner only, Meta settings and a connected account needed,
+  hashtag rules, at most 10 watched, the weekly limit with `nextFreeAt`, turning a counted one back on, the overview
+  in Instagram's order, no token in any response).
+
+Only the owner's real account can show whether hashtag search is allowed for a Unified Login system-user
+configuration, the permission's exact name, and whether `top_media` counts towards the 30. The first real read is the
+owner adding one hashtag they genuinely want to watch (it uses 1 of the 30 weekly places); `ok` and `unavailable` are
+both valid outcomes. Record the result and date in `docs/HANDOVER.md`.
+
 ## Saved preferences, reference video and brand (Stage B, WP2)
 
 No AI service is called by any test (a fake Anthropic client and a fake text estimator):

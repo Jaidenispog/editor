@@ -156,7 +156,11 @@ suite('Trends routes (database-backed)', () => {
     expect(overview.json.curated.every((c: { kind: string }) => c.kind === 'curated')).toBe(true);
     expect(overview.json.live).toEqual([]);
     expect(overview.json.viewer).toEqual({ id: owner.id, isOwner: true });
-    expect(overview.json.sources).toEqual([expect.objectContaining({ provider: 'youtube_chart', watch: null, status: expect.objectContaining({ state: 'not_configured', missingEnv: ['YOUTUBE_API_KEY'] }) })]);
+    expect(overview.json.sources).toEqual([
+      expect.objectContaining({ provider: 'youtube_chart', watch: null, status: expect.objectContaining({ state: 'not_configured', missingEnv: ['YOUTUBE_API_KEY'] }) }),
+      // The Instagram hashtag watch (WP5) has its own route tests in hashtag-routes.integration.test.ts.
+      expect.objectContaining({ provider: 'instagram_hashtag', watch: null, watches: [] }),
+    ]);
     const labels = [...overview.json.noted, ...overview.json.curated].map((i: { label: string }) => i.label);
     expect(labels.every((l: string) => !/trending|viral/i.test(l))).toBe(true);
     expect((await call(note.DELETE, 'DELETE', `/api/trends/notes/${created.json.trend.id}`, { id: created.json.trend.id })).status).toBe(200);
