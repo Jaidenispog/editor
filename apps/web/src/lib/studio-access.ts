@@ -1,7 +1,7 @@
 import 'server-only';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, type SQL } from 'drizzle-orm';
 import { AppError } from '@studio/core';
-import { schema, type Edit, type EditVersion, type MediaAsset, type Project } from '@studio/db';
+import { schema, type Edit, type EditVersion, type JobRow, type MediaAsset, type Project } from '@studio/db';
 import type { SessionUser } from './auth.js';
 import { getDb } from './db.js';
 
@@ -12,6 +12,14 @@ import { getDb } from './db.js';
 export function canAccessProject(project: Pick<Project, 'ownerId' | 'deletedAt'>, user: Pick<SessionUser, 'id' | 'role'>): boolean {
   if (project.deletedAt) return false;
   return user.role === 'owner' || project.ownerId === user.id;
+}
+
+/**
+ * SQL condition limiting a projects query to the ones the user may see: none for the owner (every project),
+ * `projects.owner_id = user` for staff. Combine it with the query's other filters.
+ */
+export function projectVisibilityFilter(user: Pick<SessionUser, 'id' | 'role'>): SQL | undefined {
+  return user.role === 'owner' ? undefined : eq(schema.projects.ownerId, user.id);
 }
 
 /** Loads a non-deleted project the user may work on, or throws NOT_FOUND (never reveals other projects). */
@@ -49,4 +57,22 @@ export async function getAccessibleVersion(versionId: string, user: SessionUser)
     throw new AppError('NOT_FOUND', 'That version could not be found.');
   });
   return { version, edit, project };
+}
+
+/**
+ * Loads a background job the user may act on (cancel, retry), or throws NOT_FOUND. Jobs of a project follow
+ * the project's rule; jobs without a project (library music analysis, maintenance) are the owner's.
+ */
+export async function getAccessibleJob(jobId: string, user: SessionUser): Promise<JobRow> {
+  const job = await getDb().query.jobs.findFirst({ where: eq(schema.jobs.id, jobId) });
+  const notFound = () => new AppError('NOT_FOUND', 'That job no longer exists.');
+  if (!job) throw notFound();
+  if (job.projectId) {
+    await getAccessibleProject(job.projectId, user).catch(() => {
+      throw notFound();
+    });
+  } else if (user.role !== 'owner') {
+    throw notFound();
+  }
+  return job;
 }

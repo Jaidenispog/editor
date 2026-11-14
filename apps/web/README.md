@@ -74,7 +74,9 @@ scripts/create-owner.ts       CLI owner account creation
 ## JSON API
 
 All responses are JSON. Errors: `{ "error": { "code", "message", "details?", "requestId" } }` (see `docs/api.md`).
-Protected routes return 401 without a valid session; owner-only writes return 403 for staff.
+Protected routes return 401 without a valid session; owner-only writes return 403 for staff. The owner can open
+every project; staff only the projects they created (`lib/studio-access.ts`): other projects answer 404 on every
+project-scoped route, and the dashboard, project list and Content Library show only what the user may open.
 
 | Method | Route | Notes |
 | --- | --- | --- |
@@ -90,13 +92,14 @@ Protected routes return 401 without a valid session; owner-only writes return 40
 | POST / DELETE | `/api/settings/logo` | multipart `file` (PNG/JPEG/WebP ≤ 2 MB, sniffed) → `brand/logo.<ext>` |
 | GET | `/api/integrations/status` | `{ integrations: IntegrationStatus[] }` (never secret values) |
 | GET | `/api/media/[token]` | local driver only: HMAC token, Range (206/416), `Content-Disposition` for downloads; 404 on s3 |
-| GET / POST | `/api/projects` | list (`?search=`) with clip/edit counts + latest generation / create `{ title, clientName?, notes? }` → 201 |
-| GET / PATCH / DELETE | `/api/projects/[id]` | DELETE = permanent: cancels jobs, deletes the storage prefix, hard-deletes rows |
+| GET / POST | `/api/projects` | list the projects the user may open (`?search=`) with clip/edit counts + latest generation / create `{ title, clientName?, notes? }` → 201 |
+| GET / PATCH / DELETE | `/api/projects/[id]` | DELETE = permanent: cancels jobs, deletes the storage prefix, hard-deletes rows (staff: own projects only) |
 | GET | `/api/projects/[id]/jobs` | `{ jobs: JobDto[] }` newest first |
-| POST | `/api/jobs/[id]/cancel` | `{ job }`; queued → cancelled at once; running → `cancelRequested` + `boss.cancel` |
-| POST | `/api/jobs/[id]/retry` | `{ job }`; failed/cancelled jobs re-queued on the same tracking row |
+| POST | `/api/jobs/[id]/cancel` | `{ job }`; queued → cancelled at once; running → `cancelRequested` + `boss.cancel`; 404 for another person's project, project-less jobs are the owner's |
+| POST | `/api/jobs/[id]/retry` | `{ job }`; failed/cancelled jobs re-queued on the same tracking row (same access rule) |
 | GET / POST | `/api/music` | library tracks / register an already-stored file under `music/` + queue `music.analyse` |
-| GET / PATCH / DELETE | `/api/music/[id]` | PATCH `{ title?, artist?, moods?, licence?, confirmLicence? }`; DELETE removes the audio file |
+| POST | `/api/music/uploads` | `{ filename, size, mimeType }` → 201 chunked upload session for a library track (Settings); 409 when the user has no project to keep the session on |
+| GET / PATCH / DELETE | `/api/music/[id]` | PATCH `{ title?, artist?, moods?, licence?, confirmLicence? }` (`true` records the confirmation time server-side, `false` withdraws it); DELETE removes the audio file |
 | GET / POST / PUT / DELETE | `/api/trends` | list / create (curated) / update `{ id, …, enabled?, markVerified? }` / delete `?id=` |
 
 ## lib modules
@@ -118,11 +121,12 @@ Server-only modules start with `import 'server-only'`. Use them from server comp
 | `csrf.ts` | `isSameOriginRequest(input)` |
 | `settings.ts` / `settings-merge.ts` | `getSettings()`, `updateSettings(patch, userId)`, `saveSettings`, `getSettingsOrDefaults()`, `SettingsPatchSchema`, `mergeSettings` |
 | `seed-trends.ts` | `ensureCuratedTrends()`, `CURATED_TRENDS` (8 format descriptions, once ever) |
-| `jobs.ts` | `createTrackedJob({ type, payload, projectId?, refId?, singletonKey?, priority? })`, `cancelJob`, `retryJob`, `getJob`, `listProjectJobs`, `listActiveJobs`, `cancelProjectJobs`, `toJobDto`, `defaultRefId` |
+| `jobs.ts` | `createTrackedJob({ type, payload, projectId?, refId?, singletonKey?, priority? })`, `cancelJob`, `retryJob`, `getJob`, `listProjectJobs`, `listActiveJobs(user, limit?)`, `cancelProjectJobs`, `toJobDto`, `defaultRefId` |
 | `media-links.ts` | `signedUrlFor(key, { downloadName?, contentType? })`, `maybeSignedUrl`, `downloadNameFor(parts, ext)` |
 | `http-range.ts` | `parseRangeHeader(header, size)`, `contentDispositionAttachment(name)` |
 | `crypto.ts` | `encryptToken`, `decryptToken`, `getEncryptionKey` (AES-256-GCM via `@studio/db`) |
-| `projects.ts` | `listProjects`, `getProjectOrThrow`, `createProject`, `updateProject`, `deleteProjectPermanently`, schemas |
+| `projects.ts` | `listProjects(user, { limit?, search? })`, `createProject`, `updateProject(id, user, input)`, `deleteProjectPermanently(id, user)`, schemas |
+| `studio-access.ts` | `canAccessProject`, `projectVisibilityFilter(user)`, `getAccessibleProject`, `getAccessibleAsset`, `getAccessibleEdit`, `getAccessibleVersion`, `getAccessibleJob` |
 | `music.ts` | `listLibraryTracks`, `getTrackOrThrow`, `createLibraryTrack`, `updateTrack`, `deleteTrack`, `toMusicSummary`, schemas |
 | `trends.ts` | `listTrends`, `createTrend`, `updateTrend`, `deleteTrend`, schemas |
 | `integrations.ts` | `getIntegrationStatuses()`, `buildIntegrationStatuses(env, facts)` (pure) |
@@ -156,10 +160,14 @@ Design: charcoal and white, one accent (`--accent`, `--accent-foreground`, `--ac
 all while the tab is hidden (it refreshes as soon as the tab is visible again).
 
 Layout, top to bottom: project header (edit details, permanent delete with a typed confirmation) → drop zone
-(several files, per-file progress, pause/resume, cancel, retry) → clip cards (thumbnail, duration, HDR/rotation/
-speech/no-sound badges, analysis status, retry/remove, "What's in this clip?" tag) → style controls (five style
-toggles with plain reasons when unsupported, 8–90 s length slider, music from the library with BPM and licence
-status, "Upload licensed track" licence form, original sound, captions, instructions, "Generate N edits") →
+(several files, per-file progress, pause/resume, cancel, retry) → clip cards in story order (position number,
+"Move up"/"Move down" buttons and Alt + Up/Down arrow on the card, thumbnail, duration, HDR/rotation/speech/
+no-sound badges, analysis status, retry/remove, "What's in this clip?" tag, and an expandable "Shots" panel with
+each shot's time range, a frame, the label in use and where it came from, and a per-shot tag select) → style
+controls (five style toggles with plain reasons when unsupported, 8–90 s length slider, music from the library
+with BPM and licence status, "Music start" with the track's BPM, its loudness curve, "Automatic" by default or a
+slider showing mm:ss that never leaves less music than the edit needs, "Upload licensed track" licence form,
+original sound, captions, instructions, "Generate N edits") →
 background jobs with progress and cancel → preview grid (9:16 players on signed links, favourite, warnings,
 built-in-editor note, Revise dialog with suggestion chips and Regenerate, version switcher, Export full quality →
 Download) → earlier generations.
@@ -167,7 +175,11 @@ Download) → earlier generations.
 | Piece | Where |
 | --- | --- |
 | Status payload (shape + loader) | `lib/studio-status-shape.ts` (pure, tested), `lib/studio-status.ts` |
-| Access checks | `lib/studio-access.ts`: owner sees every project, staff only their own; deleted projects are 404 |
+| Access checks | `lib/studio-access.ts`: owner sees every project, staff only their own; deleted projects are 404 (applied to every project, clip, upload, edit, version and job route and to the dashboard, project list and Content Library) |
+| Clip order | `reorderAssets` in `lib/assets.ts` (one transaction, row locks); `lib/shared/clip-order.ts` (`moveInOrder`) for the optimistic order in the browser |
+| Shots panel | `getAssetShots` (`lib/assets.ts`) → `shapeAssetShots` (`lib/studio-status-shape.ts`); `components/studio/shots-panel.tsx` |
+| Music start | `lib/shared/music-curve.ts` (`downsampleEnergy` to ≤ 120 points for the status payload, `latestMusicStart`); `assertMusicStartFits` in `lib/studio-edits.ts`; `components/studio/music-start-picker.tsx` |
+| Licence form | `components/studio/licence-form.tsx` (shared by the Studio upload dialog and Settings → Music library "Licence details") |
 | Uploads | `lib/uploads.ts`; maths and type rules shared with the browser in `lib/shared/upload-math.ts` |
 | Clips | `lib/assets.ts` (tags → `styleSupportWithManualLabels`, retry, delete with storage prefix) |
 | Generate / edits / export | `lib/studio-edits.ts` |
@@ -197,8 +209,10 @@ Signed links change on every poll, so cards keep the first link for a clip/versi
 | GET / DELETE | `/api/uploads/[id]` | resume info / abort (204) |
 | POST | `/api/uploads/[id]/complete` | `{}` for video; `{ title?, artist?, licence, confirmLicence: true }` for music → `{ assetId, kind }` |
 | PATCH / DELETE | `/api/assets/[id]` | `{ clipLabel?, manualLabels?, sortOrder? }` → `{ asset, styles? }` / removes rows and files |
+| GET | `/api/assets/[id]/shots` | `AssetShotsDto`: each shot with range, label in use, `source` (`shot_tag`/`clip_tag`/`vision_model`/`heuristic`), detected label, manual tag, description and a signed frame link |
+| POST | `/api/projects/[id]/assets/order` | `{ assetIds }` → `{ assets: [{ id, sortOrder }] }`; ids must be clips of this project, each once |
 | POST | `/api/assets/[id]/retry` | 202 `{ jobId }` |
-| POST | `/api/projects/[id]/generate` | `GenerationSettings` (unique, supported styles; no clips still processing; music ready with a confirmed licence) → 201 `{ generationId, jobId, edits }`; 409 while a generation is still being planned |
+| POST | `/api/projects/[id]/generate` | `GenerationSettings` (unique, supported styles; no clips still processing; music ready with a confirmed licence; `musicStartSec` only with music, inside the track and leaving `durationSec` of music) → 201 `{ generationId, jobId, edits }`; 409 while a generation is still being planned |
 | POST | `/api/edits/[id]/favourite` | `{ value }` → `{ isFavourite }` (+ feedback event, style affinity ±1, floor 0) |
 | POST | `/api/edits/[id]/revise` · `/regenerate` | `{ instruction }` / `{ instruction? }` → 201 `{ versionId, versionNo, jobId }`; 409 while the current version is still being made |
 | POST | `/api/edits/[id]/current-version` | `{ versionId }` (must belong to the edit) |
@@ -213,7 +227,21 @@ Signed links change on every poll, so cards keep the first link for a clip/versi
 parts → asset + `ingest.asset` job; music upload requires confirmation; tagging recomputes style support;
 generate → generation, five edits in slot order, v1 rows, `edits.generate` job; revise keeps v1 and makes v2;
 version switching; favourite; export idempotency; download names; cross-site requests refused; clip removal
-deletes its files.
+deletes its files. `test/studio-access.integration.test.ts` covers staff vs owner on the project, jobs and
+delete routes and the dashboard job list, clip reordering (one transaction, foreign/duplicate ids refused),
+the shots route and per-shot tags, licence confirmation from Settings gating Generate, the music start-point
+checks, and library uploads from Settings. `test/music-curve.test.ts` covers the energy curve, the latest start
+and `moveInOrder`.
+
+### Settings → Music library
+
+Each track shows its analysis status and licence status (confirmed, not confirmed or expired), where the
+licence allows use, the end date, any credit line and when the rights were confirmed. "Licence details" opens
+the shared licence form (where the track came from, licence name, proof link, promotional use, Instagram,
+TikTok, YouTube, website, credit line, end date) with the explicit "I confirm I have the rights to use this
+recording as described" checkbox; saving sends `PATCH /api/music/[id]` with `confirmLicence` (the server sets
+`confirmedByOwnerAt`). "Upload licensed track" reuses the Studio upload dialog, `ChunkedUploader` (with
+`createPath: '/api/music/uploads'`) and `UploadList`; the list refreshes every 5 s while a track is analysed.
 
 ### End-to-end browser test (Stage A)
 
@@ -266,3 +294,6 @@ two minutes on the synthetic clips.
   streaming first.
 - Connecting Square, Instagram, TikTok and Google accounts (OAuth flows) is not built yet; their cards show the
   setup steps and missing server settings only.
+- Library music uploads from Settings are stored against the user's most recently active project because
+  `upload_sessions.project_id` is required; a user with no project is asked to create one first. Deleting that
+  project while the upload is still running cancels the upload (finished tracks are not affected).

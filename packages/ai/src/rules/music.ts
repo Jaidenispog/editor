@@ -32,10 +32,25 @@ function cleanBeats(music: PlannerMusic): number[] {
 }
 
 /**
+ * The owner's chosen music start snapped to the first beat at or after it (the last beat when the choice is
+ * past every beat). Without usable beats the choice is kept as given, clamped to the track.
+ */
+export function snapMusicStart(music: PlannerMusic, startSec: number): number {
+  const beats = cleanBeats(music);
+  const wanted = Math.max(0, Math.min(startSec, music.durationSec));
+  if (beats.length === 0) return round(wanted, 3);
+  const after = beats.find((t) => t >= wanted - 0.001);
+  return round(after ?? beats[beats.length - 1]!, 3);
+}
+
+/**
  * Builds the beat grid for an edit of `lengthSec`. With music, playback starts on a beat chosen per take
  * (bar-sized steps) so that the whole edit fits inside the track; without music a 120 BPM grid is used.
+ * `fixedStartSec` (the owner's choice) overrides both the per-take choice and `preferStartSec`: playback starts
+ * on the first beat at or after it, or on the latest beat that still fits when that one would run past the
+ * end of the track.
  */
-export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt: number, preferStartSec?: number): BeatGrid {
+export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt: number, preferStartSec?: number, fixedStartSec?: number | null): BeatGrid {
   const horizon = lengthSec + 8;
   if (!music) return { startOffsetSec: 0, beats: synthetic(0, FALLBACK_INTERVAL, horizon), interval: FALLBACK_INTERVAL, bpm: null, fromMusic: false };
 
@@ -45,9 +60,10 @@ export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt:
   if (!(interval > 0.15 && interval < 2.5)) interval = music.bpm && music.bpm > 30 ? 60 / music.bpm : FALLBACK_INTERVAL;
   const bpm = music.bpm ?? (interval > 0 ? round(60 / interval, 1) : null);
 
+  const fixed = typeof fixedStartSec === 'number' && Number.isFinite(fixedStartSec) ? Math.max(0, fixedStartSec) : null;
   if (beats.length < 4) {
     const maxStart = Math.max(0, music.durationSec - lengthSec - 0.1);
-    const start = Math.min(maxStart, attempt * 4 * interval);
+    const start = Math.min(maxStart, fixed ?? attempt * 4 * interval);
     return { startOffsetSec: round(Math.max(0, start), 3), beats: synthetic(0, interval, horizon), interval, bpm, fromMusic: true };
   }
 
@@ -55,7 +71,11 @@ export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt:
   const barStarts = fits.filter(({ i }) => i % 4 === 0);
   const pool = barStarts.length > 0 ? barStarts : fits;
   let chosen = pool.length > 0 ? pool[Math.min(pool.length - 1, attempt % Math.max(1, Math.min(pool.length, 4)))]! : { t: beats[0]!, i: 0 };
-  if (preferStartSec !== undefined && fits.length > 0) {
+  if (fixed !== null && fits.length > 0) {
+    // The owner picked the start: the first beat at or after it, unless the edit would then outrun the track.
+    const snapped = snapMusicStart(music, fixed);
+    chosen = fits.find((f) => f.t >= snapped - 0.001) ?? fits[fits.length - 1]!;
+  } else if (preferStartSec !== undefined && fits.length > 0) {
     // A revision keeps the music where it was, snapped to the nearest beat that still fits.
     chosen = fits.reduce((best, f) => (Math.abs(f.t - preferStartSec) < Math.abs(best.t - preferStartSec) ? f : best), fits[0]!);
   }

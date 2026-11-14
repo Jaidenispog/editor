@@ -2,6 +2,7 @@ import { and, desc, eq, isNotNull, isNull, or } from 'drizzle-orm';
 import { Download, Library } from 'lucide-react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import { STYLES, type StyleId } from '@studio/core';
 import { schema } from '@studio/db';
 import { Card } from '@/components/ui/card';
@@ -12,6 +13,8 @@ import { buttonClasses } from '@/components/ui/button';
 import { getDb } from '@/lib/db';
 import { formatBytes, formatDateTime, formatSeconds } from '@/lib/format';
 import { downloadNameFor, maybeSignedUrl } from '@/lib/media-links';
+import { getCurrentUser } from '@/lib/session';
+import { projectVisibilityFilter } from '@/lib/studio-access';
 
 export const metadata: Metadata = { title: 'Content Library' };
 
@@ -19,8 +22,10 @@ function styleName(id: string): string {
   return (STYLES as Record<string, { name: string } | undefined>)[id as StyleId]?.name ?? id;
 }
 
-/** Content Library: every rendered preview and exported edit across projects, newest first. */
+/** Content Library: every rendered preview and exported edit across the projects the user may open, newest first. */
 export default async function LibraryPage() {
+  const user = await getCurrentUser();
+  if (!user) redirect('/login');
   const rows = await getDb()
     .select({
       versionId: schema.editVersions.id,
@@ -40,7 +45,7 @@ export default async function LibraryPage() {
     .from(schema.editVersions)
     .innerJoin(schema.edits, eq(schema.editVersions.editId, schema.edits.id))
     .innerJoin(schema.projects, eq(schema.edits.projectId, schema.projects.id))
-    .where(and(isNull(schema.projects.deletedAt), isNull(schema.edits.deletedAt), or(isNotNull(schema.editVersions.previewKey), isNotNull(schema.editVersions.exportKey))))
+    .where(and(isNull(schema.projects.deletedAt), projectVisibilityFilter(user), isNull(schema.edits.deletedAt), or(isNotNull(schema.editVersions.previewKey), isNotNull(schema.editVersions.exportKey))))
     .orderBy(desc(schema.editVersions.updatedAt))
     .limit(60);
 
@@ -54,7 +59,7 @@ export default async function LibraryPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Content Library" title="Content Library" description="Every preview and full-quality export you have made, across all projects. Links to the files expire, so refresh the page if one stops working." />
+      <PageHeader eyebrow="Content Library" title="Content Library" description="Every preview and full-quality export across the projects you can open. Links to the files expire, so refresh the page if one stops working." />
       {items.length === 0 ? (
         <EmptyState
           icon={<Library />}

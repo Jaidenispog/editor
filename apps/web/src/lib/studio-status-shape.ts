@@ -1,6 +1,7 @@
-import { STYLES, STYLE_IDS, type AppSettings, type MusicLicence, type StyleId, type StyleSupport } from '@studio/core';
+import { STYLES, STYLE_IDS, applyManualLabels, type AppSettings, type MusicLicence, type StyleId, type StyleSupport } from '@studio/core';
 import type { Edit, EditVersion, Generation, JobRow, MediaAsset, MusicTrack, Project } from '@studio/db';
-import type { AssetDto, EditDto, GenerationDto, MusicOptionDto, StudioStatusDto, StyleOptionDto, VersionDto } from './shared/studio-dto.js';
+import { downsampleEnergy } from './shared/music-curve.js';
+import type { AssetDto, AssetShotsDto, EditDto, GenerationDto, MusicOptionDto, ShotDto, StudioStatusDto, StyleOptionDto, VersionDto } from './shared/studio-dto.js';
 import { ACTIVE_VERSION_STATUSES, PROCESSING_ASSET_STATUSES } from './shared/studio-dto.js';
 import type { JobDto } from './shared/dto.js';
 
@@ -44,7 +45,8 @@ export function shapeStyleOptions(styleSupport: StyleSupport[] | null): StyleOpt
 /** Browser-safe summary of one clip; the thumbnail is a signed link, the storage keys stay on the server. */
 export async function shapeAsset(asset: MediaAsset, sign: LinkSigner): Promise<AssetDto> {
   const video = asset.probe?.video ?? asset.analysis?.probe.video ?? null;
-  const analysis = asset.analysis;
+  // Counts reflect the owner's tags, the same labels the editor plans with.
+  const analysis = asset.analysis ? applyManualLabels(asset.analysis, { clipLabel: asset.clipLabel, manualLabels: asset.manualLabels }) : null;
   let shots: AssetDto['shots'] = null;
   if (analysis) {
     const labels: Record<string, number> = {};
@@ -108,7 +110,41 @@ export function shapeMusicOption(track: MusicTrack): MusicOptionDto {
     licence: track.licence,
     licenceConfirmed: Boolean(track.licence.confirmedByOwnerAt),
     licenceSummary: licenceSummary(track.licence),
+    energy: track.status === 'ready' && track.beats ? downsampleEnergy(track.beats.energy, track.beats.energyStepSec) : null,
   };
+}
+
+/**
+ * The shots of one clip for the "Shots" panel: time range, the label the editor will use and where it came
+ * from, and a signed link to the analysis still closest to the middle of the shot.
+ */
+export async function shapeAssetShots(asset: MediaAsset, sign: LinkSigner): Promise<AssetShotsDto> {
+  const raw = asset.analysis;
+  const shots: ShotDto[] = [];
+  if (raw) {
+    const effective = applyManualLabels(raw, { clipLabel: asset.clipLabel, manualLabels: asset.manualLabels });
+    for (const [i, shot] of raw.shots.entries()) {
+      const applied = effective.shots[i] ?? shot;
+      const manual = asset.manualLabels[shot.id] ?? null;
+      const usedManual = applied.labelSource === 'manual' && shot.labelSource !== 'manual';
+      const source: ShotDto['source'] = usedManual ? (manual ? 'shot_tag' : 'clip_tag') : shot.labelSource === 'vision_model' ? 'vision_model' : shot.labelSource === 'manual' ? 'shot_tag' : 'heuristic';
+      const mid = (shot.startSec + shot.endSec) / 2;
+      const candidates = raw.sampledFrames.filter((f) => f.shotId === shot.id || (f.shotId === null && f.timeSec >= shot.startSec && f.timeSec <= shot.endSec));
+      const frame = candidates.reduce<(typeof candidates)[number] | null>((best, f) => (!best || Math.abs(f.timeSec - mid) < Math.abs(best.timeSec - mid) ? f : best), null);
+      shots.push({
+        id: shot.id,
+        startSec: shot.startSec,
+        endSec: shot.endSec,
+        label: applied.label,
+        source,
+        detectedLabel: shot.label,
+        manualLabel: manual,
+        description: shot.description,
+        frameUrl: frame ? await sign(frame.storageKey) : null,
+      });
+    }
+  }
+  return { assetId: asset.id, clipLabel: asset.clipLabel, manualLabels: asset.manualLabels, shots };
 }
 
 /** One version of an edit; preview links only for finished previews, poster from the first clip used. */

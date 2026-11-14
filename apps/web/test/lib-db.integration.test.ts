@@ -100,11 +100,11 @@ suite('database-backed helpers', () => {
     const { getBlobStore } = await import('../src/lib/storage');
     const owner = await auth.authenticate('owner@example.com', 'a brand new password', meta);
     const project = await projects.createProject(owner.id, { title: 'Skin fade', clientName: 'Jordan', notes: '' });
-    const list = await projects.listProjects();
+    const list = await projects.listProjects(owner);
     expect(list.map((p) => p.id)).toContain(project.id);
     expect(list.find((p) => p.id === project.id)).toMatchObject({ assetCount: 0, latestGeneration: null });
-    expect((await projects.listProjects({ search: 'jord' })).length).toBe(1);
-    expect((await projects.listProjects({ search: 'zzz' })).length).toBe(0);
+    expect((await projects.listProjects(owner, { search: 'jord' })).length).toBe(1);
+    expect((await projects.listProjects(owner, { search: 'zzz' })).length).toBe(0);
 
     const job = await jobs.createTrackedJob({ type: 'ingest.asset', payload: { assetId: 'asset-1', projectId: project.id } });
     expect(job.status).toBe('queued');
@@ -117,10 +117,11 @@ suite('database-backed helpers', () => {
 
     const store = getBlobStore();
     await store.put(`projects/${project.id}/assets/a/original.mp4`, Buffer.from('video bytes'));
-    const result = await projects.deleteProjectPermanently(project.id, owner.id);
+    const result = await projects.deleteProjectPermanently(project.id, owner);
     expect(result.filesRemoved).toBe(1);
     expect(await store.exists(`projects/${project.id}/assets/a/original.mp4`)).toBe(false);
-    await expect(projects.getProjectOrThrow(project.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    const { getAccessibleProject } = await import('../src/lib/studio-access');
+    await expect(getAccessibleProject(project.id, owner)).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await expect(jobs.getJob(job.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   }, 60_000);
 });

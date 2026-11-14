@@ -94,67 +94,88 @@ export function UploadZone({
         />
       </div>
 
-      {items.length ? (
-        <ul className="divide-y divide-charcoal-100 rounded-[var(--radius-card)] border border-charcoal-200/70 bg-white" aria-label="Uploads">
-          {items.map((item) => {
-            const fraction = item.size > 0 ? item.uploadedBytes / item.size : 0;
-            const active = item.state === 'uploading' || item.state === 'queued' || item.state === 'finishing';
-            return (
-              <li key={item.key} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-4">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    {item.state === 'done' ? <CheckCircle2 className="size-4 shrink-0 text-emerald-600" aria-hidden="true" /> : null}
-                    <span className="truncate text-sm font-medium text-charcoal-900">{item.name}</span>
-                    {item.kind === 'audio' ? <span className="shrink-0 text-xs text-charcoal-500">Music</span> : null}
-                  </div>
-                  <p className={cn('mt-0.5 text-xs', item.state === 'failed' ? 'text-red-600' : 'text-charcoal-500')}>
-                    {STATE_TEXT[item.state]} · {formatBytes(item.uploadedBytes)} of {formatBytes(item.size)}
-                    {item.message && item.state !== 'paused' && item.state !== 'cancelled' ? ` · ${item.message}` : ''}
-                  </p>
-                  {item.state !== 'done' && item.state !== 'cancelled' ? (
-                    <div
-                      className="mt-2 h-1.5 overflow-hidden rounded-full bg-charcoal-100"
-                      role="progressbar"
-                      aria-label={`Upload progress for ${item.name}`}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={Math.round(fraction * 100)}
-                    >
-                      <div className={cn('h-full rounded-full transition-[width]', item.state === 'failed' ? 'bg-red-400' : 'bg-accent')} style={{ width: `${Math.round(fraction * 100)}%` }} />
-                    </div>
-                  ) : null}
-                </div>
-                <div className="flex shrink-0 gap-1.5">
-                  {item.state === 'uploading' || item.state === 'queued' ? (
-                    <Button size="sm" variant="ghost" onClick={() => onPause(item.key)} aria-label={`Pause ${item.name}`}>
-                      <Pause className="size-4" aria-hidden="true" /> Pause
-                    </Button>
-                  ) : null}
-                  {item.state === 'paused' ? (
-                    <Button size="sm" variant="secondary" onClick={() => onResume(item.key)} aria-label={`Resume ${item.name}`}>
-                      <Play className="size-4" aria-hidden="true" /> Resume
-                    </Button>
-                  ) : null}
-                  {item.state === 'failed' && item.canRetry ? (
-                    <Button size="sm" variant="secondary" onClick={() => onResume(item.key)} aria-label={`Retry ${item.name}`}>
-                      <RotateCcw className="size-4" aria-hidden="true" /> Retry
-                    </Button>
-                  ) : null}
-                  {active || item.state === 'paused' ? (
-                    <Button size="sm" variant="ghost" onClick={() => onCancel(item.key)} aria-label={`Cancel ${item.name}`}>
-                      <X className="size-4" aria-hidden="true" /> Cancel
-                    </Button>
-                  ) : (
-                    <Button size="sm" variant="ghost" onClick={() => onDismiss(item.key)} aria-label={`Hide ${item.name} from this list`}>
-                      <X className="size-4" aria-hidden="true" />
-                    </Button>
-                  )}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      ) : null}
+      <UploadList items={items} onPause={onPause} onResume={onResume} onCancel={onCancel} onDismiss={onDismiss} />
     </section>
+  );
+}
+
+/**
+ * The list of uploads with per-file progress, pause/resume, cancel, retry and dismiss. Used under the Video
+ * Studio drop zone and in Settings → Music library.
+ */
+export function UploadList({
+  items,
+  onPause,
+  onResume,
+  onCancel,
+  onDismiss,
+}: {
+  items: UploadItem[];
+  onPause: (key: string) => void;
+  onResume: (key: string) => void;
+  onCancel: (key: string) => void;
+  onDismiss: (key: string) => void;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <ul className="divide-y divide-charcoal-100 rounded-[var(--radius-card)] border border-charcoal-200/70 bg-white" aria-label="Uploads">
+      {items.map((item) => {
+        const fraction = item.size > 0 ? item.uploadedBytes / item.size : 0;
+        const active = item.state === 'uploading' || item.state === 'queued' || item.state === 'finishing';
+        return (
+          <li key={item.key} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-4">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                {item.state === 'done' ? <CheckCircle2 className="size-4 shrink-0 text-emerald-600" aria-hidden="true" /> : null}
+                <span className="truncate text-sm font-medium text-charcoal-900">{item.name}</span>
+                {item.kind === 'audio' ? <span className="shrink-0 text-xs text-charcoal-500">Music</span> : null}
+              </div>
+              <p className={cn('mt-0.5 text-xs', item.state === 'failed' ? 'text-red-600' : 'text-charcoal-500')}>
+                {STATE_TEXT[item.state]} · {formatBytes(item.uploadedBytes)} of {formatBytes(item.size)}
+                {item.message && item.state !== 'paused' && item.state !== 'cancelled' ? ` · ${item.message}` : ''}
+              </p>
+              {item.state !== 'done' && item.state !== 'cancelled' ? (
+                <div
+                  className="mt-2 h-1.5 overflow-hidden rounded-full bg-charcoal-100"
+                  role="progressbar"
+                  aria-label={`Upload progress for ${item.name}`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(fraction * 100)}
+                >
+                  <div className={cn('h-full rounded-full transition-[width]', item.state === 'failed' ? 'bg-red-400' : 'bg-accent')} style={{ width: `${Math.round(fraction * 100)}%` }} />
+                </div>
+              ) : null}
+            </div>
+            <div className="flex shrink-0 gap-1.5">
+              {item.state === 'uploading' || item.state === 'queued' ? (
+                <Button size="sm" variant="ghost" onClick={() => onPause(item.key)} aria-label={`Pause ${item.name}`}>
+                  <Pause className="size-4" aria-hidden="true" /> Pause
+                </Button>
+              ) : null}
+              {item.state === 'paused' ? (
+                <Button size="sm" variant="secondary" onClick={() => onResume(item.key)} aria-label={`Resume ${item.name}`}>
+                  <Play className="size-4" aria-hidden="true" /> Resume
+                </Button>
+              ) : null}
+              {item.state === 'failed' && item.canRetry ? (
+                <Button size="sm" variant="secondary" onClick={() => onResume(item.key)} aria-label={`Retry ${item.name}`}>
+                  <RotateCcw className="size-4" aria-hidden="true" /> Retry
+                </Button>
+              ) : null}
+              {active || item.state === 'paused' ? (
+                <Button size="sm" variant="ghost" onClick={() => onCancel(item.key)} aria-label={`Cancel ${item.name}`}>
+                  <X className="size-4" aria-hidden="true" /> Cancel
+                </Button>
+              ) : (
+                <Button size="sm" variant="ghost" onClick={() => onDismiss(item.key)} aria-label={`Hide ${item.name} from this list`}>
+                  <X className="size-4" aria-hidden="true" />
+                </Button>
+              )}
+            </div>
+          </li>
+        );
+      })}
+    </ul>
   );
 }

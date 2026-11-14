@@ -3,6 +3,7 @@ import { and, desc, eq, inArray } from 'drizzle-orm';
 import { AppError, JOB_PAYLOAD_SCHEMAS, newId, type JobPayload, type JobType } from '@studio/core';
 import { schema, type JobRow } from '@studio/db';
 import { QUEUE_SETTINGS } from '@studio/queue';
+import type { SessionUser } from './auth.js';
 import { getDb } from './db.js';
 import { getLogger } from './logger.js';
 import { getQueue } from './queue.js';
@@ -253,9 +254,18 @@ export async function listProjectJobs(projectId: string, limit = 50): Promise<Jo
   return getDb().query.jobs.findMany({ where: eq(schema.jobs.projectId, projectId), orderBy: desc(schema.jobs.createdAt), limit });
 }
 
-/** Jobs still queued or running across the app (dashboard), newest first. */
-export async function listActiveJobs(limit = 20): Promise<JobRow[]> {
-  return getDb().query.jobs.findMany({ where: inArray(schema.jobs.status, [...ACTIVE_JOB_STATUSES]), orderBy: desc(schema.jobs.createdAt), limit });
+/**
+ * Jobs still queued or running that the user may see (dashboard), newest first: every job for the owner,
+ * only jobs of their own projects for staff.
+ */
+export async function listActiveJobs(user: Pick<SessionUser, 'id' | 'role'>, limit = 20): Promise<JobRow[]> {
+  const db = getDb();
+  const active = inArray(schema.jobs.status, [...ACTIVE_JOB_STATUSES]);
+  const where =
+    user.role === 'owner'
+      ? active
+      : and(active, inArray(schema.jobs.projectId, db.select({ id: schema.projects.id }).from(schema.projects).where(eq(schema.projects.ownerId, user.id))));
+  return db.query.jobs.findMany({ where, orderBy: desc(schema.jobs.createdAt), limit });
 }
 
 /** Requests cancellation of every active job for a project (used before deleting it). */

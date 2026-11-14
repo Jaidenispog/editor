@@ -1,5 +1,6 @@
 import type { GenerationSettings, MusicLicence, StyleId } from '@studio/core';
 import type { JobDto } from './dto.js';
+import type { EnergyCurve } from './music-curve.js';
 
 /**
  * Browser-facing shape of GET /api/projects/[id]/status (plain JSON). Media links are short-lived signed
@@ -70,6 +71,36 @@ export interface MusicOptionDto {
   licenceConfirmed: boolean;
   /** Short plain summary such as "Licence confirmed · Instagram, TikTok". */
   licenceSummary: string;
+  /** Loudness over the track for the start-point picker (shrunk to a few hundred points), once analysed. */
+  energy: EnergyCurve | null;
+}
+
+/**
+ * One shot of a clip for the "Shots" panel (GET /api/assets/[id]/shots). The frame is a short-lived signed
+ * link to a still taken during analysis.
+ */
+export interface ShotDto {
+  id: string;
+  startSec: number;
+  endSec: number;
+  /** The label the editor will use (owner tags applied). */
+  label: string;
+  /** Where that label came from. */
+  source: 'shot_tag' | 'clip_tag' | 'vision_model' | 'heuristic';
+  /** What the analysis said before any owner tag. */
+  detectedLabel: string;
+  /** The owner's tag for this shot only, or null. */
+  manualLabel: string | null;
+  description: string;
+  frameUrl: string | null;
+}
+
+/** Response of GET /api/assets/[id]/shots. */
+export interface AssetShotsDto {
+  assetId: string;
+  clipLabel: string | null;
+  manualLabels: Record<string, string>;
+  shots: ShotDto[];
 }
 
 export interface GenerationDto {

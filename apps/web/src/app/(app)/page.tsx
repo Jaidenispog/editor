@@ -2,6 +2,7 @@ import { inArray } from 'drizzle-orm';
 import { Activity, ArrowRight, FolderOpen, PlugZap } from 'lucide-react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import { schema } from '@studio/db';
 import { integrationState } from '@/components/app/integration-status-list';
 import { JobList } from '@/components/app/job-list';
@@ -15,12 +16,13 @@ import { getDb } from '@/lib/db';
 import { getIntegrationStatuses } from '@/lib/integrations';
 import { listActiveJobs, toJobDto } from '@/lib/jobs';
 import { listProjects } from '@/lib/projects';
+import type { SessionUser } from '@/lib/auth';
 import { getCurrentUser } from '@/lib/session';
 
 export const metadata: Metadata = { title: 'Dashboard' };
 
-async function activeJobsWithTitles() {
-  const jobs = await listActiveJobs(10);
+async function activeJobsWithTitles(user: SessionUser) {
+  const jobs = await listActiveJobs(user, 10);
   const ids = [...new Set(jobs.map((j) => j.projectId).filter((x): x is string => Boolean(x)))];
   const titles = ids.length
     ? new Map((await getDb().select({ id: schema.projects.id, title: schema.projects.title }).from(schema.projects).where(inArray(schema.projects.id, ids))).map((p) => [p.id, p.title]))
@@ -30,8 +32,11 @@ async function activeJobsWithTitles() {
 
 /** Dashboard: recent projects, jobs in progress and integration status at a glance. */
 export default async function DashboardPage() {
-  const [user, projects, jobs, integrations] = await Promise.all([getCurrentUser(), listProjects({ limit: 6 }), activeJobsWithTitles(), getIntegrationStatuses()]);
-  const firstName = user?.displayName.split(/\s+/)[0] ?? '';
+  const user = await getCurrentUser();
+  if (!user) redirect('/login');
+  // Staff see only their own projects and jobs; the owner sees everything.
+  const [projects, jobs, integrations] = await Promise.all([listProjects(user, { limit: 6 }), activeJobsWithTitles(user), getIntegrationStatuses()]);
+  const firstName = user.displayName.split(/\s+/)[0] ?? '';
   const active = integrations.filter((i) => i.connected).length;
   const needsSetup = integrations.filter((i) => !i.configured).length;
 

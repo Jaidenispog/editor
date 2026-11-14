@@ -36,6 +36,20 @@ export const UpdateAssetSchema = z
   .refine((v) => Object.keys(v).length > 0, 'Nothing to update');
 export type UpdateAssetInput = z.infer<typeof UpdateAssetSchema>;
 
+/** POST /api/projects/[id]/assets/order — the clips in their new order (each id once). */
+export const ReorderAssetsSchema = z.object({
+  assetIds: z
+    .array(z.string().min(1).max(100))
+    .min(1, 'Send at least one clip')
+    .max(500, 'Too many clips')
+    .refine((ids) => new Set(ids).size === ids.length, 'Each clip can only appear once'),
+});
+export type ReorderAssetsInput = z.infer<typeof ReorderAssetsSchema>;
+
+/** POST /api/music/uploads — a library music upload started from Settings (always audio). */
+export const CreateLibraryUploadSchema = CreateUploadSchema.omit({ kind: true });
+export type CreateLibraryUploadInput = z.infer<typeof CreateLibraryUploadSchema>;
+
 /** POST /api/edits/[id]/favourite */
 export const FavouriteSchema = z.object({ value: z.boolean() });
 

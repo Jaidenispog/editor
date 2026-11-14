@@ -4,11 +4,13 @@ import { AppError, newId } from '@studio/core';
 import { schema, type Project } from '@studio/db';
 import { storageKeys } from '@studio/storage';
 import { z } from 'zod';
+import type { SessionUser } from './auth.js';
 import { writeAudit } from './audit.js';
 import { getDb } from './db.js';
 import { cancelProjectJobs } from './jobs.js';
 import { getLogger } from './logger.js';
 import { getBlobStore } from './storage.js';
+import { getAccessibleProject, projectVisibilityFilter } from './studio-access.js';
 
 /** Body for POST /api/projects. */
 export const CreateProjectSchema = z.object({
@@ -46,10 +48,15 @@ function toIso(d: Date): string {
   return d.toISOString();
 }
 
-/** Lists projects that have not been deleted, newest activity first, with asset counts and latest generation. */
-export async function listProjects(options: { limit?: number; search?: string } = {}): Promise<ProjectSummary[]> {
+/**
+ * Lists the projects the user may see (the owner sees all, staff only their own) that have not been deleted,
+ * newest activity first, with asset counts and the latest generation.
+ */
+export async function listProjects(user: Pick<SessionUser, 'id' | 'role'>, options: { limit?: number; search?: string } = {}): Promise<ProjectSummary[]> {
   const db = getDb();
   const filters = [isNull(schema.projects.deletedAt)];
+  const visible = projectVisibilityFilter(user);
+  if (visible) filters.push(visible);
   if (options.search?.trim()) {
     const term = `%${options.search.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%`;
     filters.push(sql`(${schema.projects.title} ilike ${term} or ${schema.projects.clientName} ilike ${term})`);
@@ -111,13 +118,6 @@ export async function listProjects(options: { limit?: number; search?: string } 
   });
 }
 
-/** Loads a non-deleted project or throws NOT_FOUND. */
-export async function getProjectOrThrow(id: string): Promise<Project> {
-  const project = await getDb().query.projects.findFirst({ where: and(eq(schema.projects.id, id), isNull(schema.projects.deletedAt)) });
-  if (!project) throw new AppError('NOT_FOUND', 'That project could not be found. It may have been deleted.');
-  return project;
-}
-
 /** Creates an empty project owned by the user. */
 export async function createProject(userId: string, input: z.infer<typeof CreateProjectSchema>): Promise<Project> {
   const inserted = await getDb()
@@ -130,9 +130,9 @@ export async function createProject(userId: string, input: z.infer<typeof Create
   return project;
 }
 
-/** Updates title, client name or notes. */
-export async function updateProject(id: string, input: z.infer<typeof UpdateProjectSchema>): Promise<Project> {
-  await getProjectOrThrow(id);
+/** Updates title, client name or notes of a project the user may work on. */
+export async function updateProject(id: string, user: SessionUser, input: z.infer<typeof UpdateProjectSchema>): Promise<Project> {
+  await getAccessibleProject(id, user);
   const updated = await getDb()
     .update(schema.projects)
     .set({ ...input, updatedAt: new Date() })
@@ -146,13 +146,17 @@ export async function updateProject(id: string, input: z.infer<typeof UpdateProj
 /**
  * Permanently deletes a project: hides it immediately (soft delete), cancels its running jobs, removes every
  * stored file under its storage prefix (and its project-scoped music), then hard-deletes the rows (cascades
- * remove clips, generations, edits, versions and job rows). This cannot be undone.
+ * remove clips, generations, edits, versions and job rows). This cannot be undone. Staff can only delete
+ * projects they created; the owner can delete any project.
  */
-export async function deleteProjectPermanently(id: string, userId: string): Promise<{ filesRemoved: number }> {
+export async function deleteProjectPermanently(id: string, user: Pick<SessionUser, 'id' | 'role'>): Promise<{ filesRemoved: number }> {
   const db = getDb();
+  const userId = user.id;
   // Soft-deleted projects are included so a deletion interrupted half-way can be finished.
-  const existing = await db.query.projects.findFirst({ columns: { id: true }, where: eq(schema.projects.id, id) });
-  if (!existing) throw new AppError('NOT_FOUND', 'That project could not be found. It may already have been deleted.');
+  const existing = await db.query.projects.findFirst({ columns: { id: true, ownerId: true }, where: eq(schema.projects.id, id) });
+  if (!existing || (user.role !== 'owner' && existing.ownerId !== user.id)) {
+    throw new AppError('NOT_FOUND', 'That project could not be found. It may already have been deleted.');
+  }
   await db.update(schema.projects).set({ deletedAt: new Date(), updatedAt: new Date() }).where(eq(schema.projects.id, id));
   await cancelProjectJobs(id);
   const store = getBlobStore();

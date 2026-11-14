@@ -1,5 +1,6 @@
 import { STYLES, STYLE_IDS, computeTimeline, type StyleId } from '@studio/core';
 import type { LabelShotsContext, PlannerInput } from '../types.js';
+import { beatGrid } from '../rules/music.js';
 import { CALM_TRANSITIONS, effectiveSettings, revisionHintsFor } from '../rules/settings.js';
 
 /** Most shots described to the planner per project (the best-labelled and best-quality ones). */
@@ -38,6 +39,7 @@ Timing rules
 - The first segment has no transition. Transitions last 0.15–1.5 s.
 - Text overlays and captions end before the edit ends; two overlays in the same placement never overlap in time; captions never overlap each other.
 - With music: cut on the provided beat times (output time t plays music time startOffsetSec + t), start the music on a beat, and keep startOffsetSec + total length within the track. List the cut times that land on beats in audio.beatAlignment.
+- When music.fixedStartOffsetSec is given, the owner chose where the music starts: audio.music.startOffsetSec must be exactly that value, and the beat times to cut on are the ones at or after it.
 - Without music: audio.music is null, and the original sound stays on (audio.originalSound.enabled = true) unless the owner turned it off, so the video is not silent.
 
 Editorial quality
@@ -115,6 +117,17 @@ function selectShots(input: PlannerInput) {
 }
 
 /**
+ * The owner's chosen music start as the planner must use it: snapped to the first beat at or after the
+ * choice (or the latest beat that still fits the edit), exactly as the rules planner does. Null when the
+ * owner left it on automatic or no music plays.
+ */
+export function fixedMusicStartFor(input: PlannerInput): number | null {
+  const s = effectiveSettings(input);
+  if (!input.music || !s.musicOn || typeof input.musicStartSec !== 'number') return null;
+  return beatGrid(input.music, s.target, 0, undefined, input.musicStartSec).startOffsetSec;
+}
+
+/**
  * The job description sent as the user turn: compact JSON with the style brief, target, clips, up to 60 shots,
  * transcripts, music beats, preferences, brand, the owner's instructions and, for revisions, the previous plan,
  * the request and the validator errors to fix.
@@ -130,6 +143,7 @@ export function buildPlannerUserContent(input: PlannerInput): Array<{ type: 'tex
     .map((a) => ({ assetId: a.assetId, segments: a.transcript!.segments.map((t) => ({ start: r2(t.startSec), end: r2(t.endSec), text: t.text })) }));
   const captionsAllowed = input.captions !== 'never' && input.preferences.captions !== 'never' && transcripts.length > 0;
   const revising = Boolean(input.previousPlan && (input.revisionInstruction || input.revisionHints));
+  const fixedStart = fixedMusicStartFor(input);
 
   const job = {
     task: revising
@@ -155,6 +169,7 @@ export function buildPlannerUserContent(input: PlannerInput): Array<{ type: 'tex
           bpm: input.music.bpm,
           beatTimesSec: input.music.beatTimesSec.slice(0, MAX_PLANNER_BEATS).map(r2),
           volume: r2(s.musicVolume),
+          ...(fixedStart !== null ? { fixedStartOffsetSec: fixedStart } : {}),
         }
       : null,
     preferences: {

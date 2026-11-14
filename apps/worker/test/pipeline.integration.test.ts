@@ -175,7 +175,7 @@ describe.skipIf(skip)('worker pipeline on synthetic footage', () => {
       id: generationId,
       projectId,
       requestedBy: userId,
-      settings: { durationSec: 12, styles: [...STYLE_IDS], musicTrackId: null, keepOriginalSound: 'auto', captions: 'auto', instructions: '' },
+      settings: { durationSec: 12, styles: [...STYLE_IDS], musicTrackId: null, keepOriginalSound: 'auto', captions: 'auto', instructions: '', musicStartSec: null },
     });
     for (const [slot, styleId] of STYLE_IDS.entries()) {
       const editId = newId();
@@ -323,7 +323,7 @@ describe.skipIf(skip)('worker pipeline on synthetic footage', () => {
       id: musicGenerationId,
       projectId,
       requestedBy: userId,
-      settings: { durationSec: 12, styles, musicTrackId, keepOriginalSound: 'auto', captions: 'auto', instructions: '' },
+      settings: { durationSec: 12, styles, musicTrackId, keepOriginalSound: 'auto', captions: 'auto', instructions: '', musicStartSec: 10 },
     });
     for (const [slot, styleId] of styles.entries()) {
       const editId = newId();
@@ -341,6 +341,9 @@ describe.skipIf(skip)('worker pipeline on synthetic footage', () => {
     const plan = montage!.plan!;
     expect(plan.audio.music?.trackId).toBe(musicTrackId);
     const offset = plan.audio.music!.startOffsetSec;
+    // The owner asked for the music to start at 0:10: playback starts on the first beat at or after it.
+    const firstBeatFromTen = beats.find((b) => b >= 10 - 0.001)!;
+    expect(Math.abs(offset - firstBeatFromTen)).toBeLessThan(0.002);
     const timeline = computeTimeline(plan);
     // Music beat k plays at output time beats[k] - startOffsetSec.
     const distanceToBeat = (t: number) => Math.min(...beats.map((b) => Math.abs(b - offset - t)));

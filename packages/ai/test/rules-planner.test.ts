@@ -285,6 +285,44 @@ describe('music and beats', () => {
   });
 });
 
+describe("the owner's music start point", () => {
+  const music = clickTrack(); // beats at 0.05, 0.55, 1.05, … (every 0.5 s)
+
+  it('snaps the chosen start to the first beat at or after it and uses it for every style and take', () => {
+    for (const styleId of STYLE_IDS) {
+      for (const attempt of [0, 1]) {
+        const input = plannerInput(labelledProject(), { styleId, targetDurationSec: 20, music, musicStartSec: 7.2, attempt });
+        const plan = planFor(input);
+        expect(validateEditPlan(plan, contextFor(input)).errors).toEqual([]);
+        expect(plan.audio.music?.startOffsetSec).toBe(7.55);
+      }
+    }
+  });
+
+  it('keeps a start that is already on a beat', () => {
+    const plan = planFor(plannerInput(labelledProject(), { styleId: 'beat_montage', targetDurationSec: 20, music, musicStartSec: 10.05 }));
+    expect(plan.audio.music?.startOffsetSec).toBe(10.05);
+    // The montage still cuts on the track's beats from that point.
+    expect(plan.audio.beatAlignment?.alignedCutTimesSec.length).toBe(computeTimeline(plan).segments.length - 1);
+  });
+
+  it('falls back to the latest beat that still fits when the edit would outrun the track', () => {
+    const input = plannerInput(labelledProject(), { styleId: 'beat_montage', targetDurationSec: 20, music, musicStartSec: 30 });
+    const plan = planFor(input);
+    const m = plan.audio.music!;
+    expect(validateEditPlan(plan, contextFor(input)).errors).toEqual([]);
+    expect(m.startOffsetSec + total(plan)).toBeLessThanOrEqual(music.durationSec);
+    expect(m.startOffsetSec).toBeGreaterThan(15);
+    expect(music.beatTimesSec.some((b) => Math.abs(b - m.startOffsetSec) < 0.001)).toBe(true);
+  });
+
+  it('leaves the choice to the editor when the start is automatic', () => {
+    const auto = planFor(plannerInput(labelledProject(), { styleId: 'beat_montage', targetDurationSec: 20, music, musicStartSec: null }));
+    const omitted = planFor(plannerInput(labelledProject(), { styleId: 'beat_montage', targetDurationSec: 20, music }));
+    expect(auto.audio.music?.startOffsetSec).toBe(omitted.audio.music?.startOffsetSec);
+  });
+});
+
 describe('the worker acceptance footage (clip-level tags)', () => {
   const analyses = clipTaggedProject();
   const plans = STYLE_IDS.map((styleId) => planFor(plannerInput(analyses, { styleId, targetDurationSec: 12 })));

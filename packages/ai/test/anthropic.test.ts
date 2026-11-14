@@ -11,7 +11,7 @@ import type { AnthropicMessagesClient, StructuredResponse } from '../src/anthrop
 import { LabelWireSchema, PlannerWireSchema } from '../src/anthropic/schemas.js';
 import { RulesPlanner } from '../src/rules/planner.js';
 import type { FrameForLabelling } from '../src/types.js';
-import { ASSET_A, ASSET_B, labelledProject, plannerInput } from './fixtures.js';
+import { ASSET_A, ASSET_B, clickTrack, labelledProject, plannerInput } from './fixtures.js';
 
 type Params = Anthropic.MessageCreateParamsNonStreaming | Anthropic.MessageStreamParams;
 
@@ -98,6 +98,27 @@ describe('AnthropicPlanner', () => {
     expect(job.constraints.allowedTransitions).toEqual(['dissolve', 'fadeblack']);
     expect(req.messages).toHaveLength(1);
     expect(req.messages[0]!.role).toBe('user');
+  });
+
+  it("passes the owner's music start as a fixed, beat-snapped constraint and keeps it in the plan", async () => {
+    const music = clickTrack();
+    const withStart = plannerInput(labelledProject(), { styleId: 'cinematic_reveal', targetDurationSec: 20, music, musicStartSec: 7.2 });
+    const { client } = fakeClient([]);
+    const req = new AnthropicPlanner({ client, model: 'claude-opus-5-5', effort: 'medium' }).buildRequest(withStart);
+    const content = req.messages[0]!.content as Anthropic.TextBlockParam[];
+    const job = JSON.parse(content[0]!.text.replace(/^Job description \(JSON\):\n/, ''));
+    expect(job.music.fixedStartOffsetSec).toBe(7.55);
+    expect((req.system as Anthropic.TextBlockParam[])[0]!.text).toMatch(/fixedStartOffsetSec/);
+
+    const wire = wirePlanFor(withStart);
+    wire.audio = { ...wire.audio, music: { ...wire.audio.music!, startOffsetSec: 2 } };
+    const { client: replying } = fakeClient([reply(wire)]);
+    const res = await new AnthropicPlanner({ client: replying, model: 'claude-opus-5-5', effort: 'medium' }).planEdit(withStart);
+    expect((res.plan as { audio: { music: { startOffsetSec: number } } }).audio.music.startOffsetSec).toBe(7.55);
+
+    const auto = new AnthropicPlanner({ client, model: 'claude-opus-5-5', effort: 'medium' }).buildRequest({ ...withStart, musicStartSec: null });
+    const autoJob = JSON.parse((auto.messages[0]!.content as Anthropic.TextBlockParam[])[0]!.text.replace(/^Job description \(JSON\):\n/, ''));
+    expect(autoJob.music).not.toHaveProperty('fixedStartOffsetSec');
   });
 
   it('returns the parsed plan with usage and cost', async () => {

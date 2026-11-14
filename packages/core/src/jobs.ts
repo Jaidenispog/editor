@@ -50,5 +50,11 @@ export const GenerationSettingsSchema = z.object({
   keepOriginalSound: z.enum(['auto', 'always', 'never']).default('auto'),
   captions: z.enum(['auto', 'never']).default('auto'),
   instructions: z.string().max(1000).default(''),
+  /**
+   * Where in the chosen track the music starts, in seconds. Null lets the editor choose (automatic). Only
+   * meaningful with a music track; the web app checks it against the track's real length before generating,
+   * and planners snap it to the first beat at or after this point.
+   */
+  musicStartSec: z.number().finite().min(0).max(3600).nullable().default(null),
 });
 export type GenerationSettings = z.infer<typeof GenerationSettingsSchema>;

@@ -11,6 +11,8 @@ import { apiRequest } from '@/lib/client/api-client';
 import { formatSeconds } from '@/lib/format';
 import { cn } from '@/lib/shared/cn';
 import type { StudioStatusDto } from '@/lib/shared/studio-dto';
+import { latestMusicStart } from '@/lib/shared/music-curve';
+import { MusicStartPicker } from './music-start-picker';
 import { MusicUploadDialog, type MusicUploadRequest } from './music-upload-dialog';
 
 const SOUND_OPTIONS = [
@@ -51,6 +53,8 @@ export function StyleControls({
   });
   const [durationSec, setDurationSec] = useState(last?.durationSec ?? status.defaults.durationSec);
   const [musicTrackId, setMusicTrackId] = useState<string>(last?.musicTrackId ?? '');
+  // Older saved settings have no start point: treat them as automatic.
+  const [musicStartSec, setMusicStartSec] = useState<number | null>(last?.musicTrackId ? (last.musicStartSec ?? null) : null);
   const [keepOriginalSound, setKeepOriginalSound] = useState(last?.keepOriginalSound ?? status.defaults.keepOriginalSound);
   const [captions, setCaptions] = useState(last?.captions ?? status.defaults.captions);
   const [instructions, setInstructions] = useState(last?.instructions ?? '');
@@ -65,6 +69,8 @@ export function StyleControls({
   const planningNow = status.generations.some((g) => g.status === 'queued' || g.status === 'planning');
   const musicChoice = status.music.find((m) => m.id === musicTrackId) ?? null;
   const musicValid = !musicTrackId || (musicChoice?.status === 'ready' && musicChoice.licenceConfirmed);
+  // The chosen start always leaves room for the whole edit, even after the length slider moves.
+  const effectiveMusicStart = musicChoice && musicStartSec !== null && latestMusicStart(musicChoice.durationSec, durationSec) > 0 ? Math.min(musicStartSec, latestMusicStart(musicChoice.durationSec, durationSec)) : null;
 
   const musicOptions = useMemo(
     () => [
@@ -103,7 +109,15 @@ export function StyleControls({
     try {
       await apiRequest(`/api/projects/${status.project.id}/generate`, {
         method: 'POST',
-        body: { durationSec, styles: chosen.map((s) => s.id), musicTrackId: musicTrackId || null, keepOriginalSound, captions, instructions: instructions.trim() },
+        body: {
+          durationSec,
+          styles: chosen.map((s) => s.id),
+          musicTrackId: musicTrackId || null,
+          musicStartSec: musicTrackId ? effectiveMusicStart : null,
+          keepOriginalSound,
+          captions,
+          instructions: instructions.trim(),
+        },
       });
       toast.success(`Making ${chosen.length} edit${chosen.length === 1 ? '' : 's'}`, 'Previews appear below as each one finishes.');
       onGenerated();
@@ -172,10 +186,18 @@ export function StyleControls({
 
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
-            <Select label="Music" value={musicTrackId} onChange={(e) => setMusicTrackId(e.target.value)} options={musicOptions} hint={status.music.length === 0 ? 'No licensed tracks yet. Upload one you have the rights to.' : 'Only tracks with a confirmed licence can be used.'} />
+            <Select
+              label="Music"
+              value={musicTrackId}
+              onChange={(e) => {
+                setMusicTrackId(e.target.value);
+                setMusicStartSec(null);
+              }}
+              options={musicOptions} hint={status.music.length === 0 ? 'No licensed tracks yet. Upload one you have the rights to.' : 'Only tracks with a confirmed licence can be used.'} />
             <Button variant="secondary" size="sm" onClick={() => setMusicOpen(true)}>
               <Music className="size-4" aria-hidden="true" /> Upload licensed track
             </Button>
+            {musicChoice && musicChoice.status === 'ready' ? <MusicStartPicker track={musicChoice} editSec={durationSec} value={effectiveMusicStart} onChange={setMusicStartSec} /> : null}
           </div>
           <div className="space-y-4">
             <Select label="Original sound" value={keepOriginalSound} onChange={(e) => setKeepOriginalSound(e.target.value as typeof keepOriginalSound)} options={SOUND_OPTIONS} />

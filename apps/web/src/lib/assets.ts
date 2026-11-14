@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { AppError, styleSupportWithManualLabels, type StyleSupport } from '@studio/core';
 import { schema, type MediaAsset } from '@studio/db';
 import { storageKeys } from '@studio/storage';
@@ -8,8 +8,11 @@ import { writeAudit } from './audit.js';
 import { getDb } from './db.js';
 import { ACTIVE_JOB_STATUSES, cancelJob, createTrackedJob } from './jobs.js';
 import { getLogger } from './logger.js';
+import { maybeSignedUrl } from './media-links.js';
 import { getBlobStore } from './storage.js';
-import { getAccessibleAsset } from './studio-access.js';
+import { getAccessibleAsset, getAccessibleProject } from './studio-access.js';
+import type { AssetShotsDto } from './shared/studio-dto.js';
+import { shapeAssetShots } from './studio-status-shape.js';
 import type { UpdateAssetInput } from './shared/studio-schemas.js';
 
 /**
@@ -107,4 +110,41 @@ export async function deleteAsset(assetId: string, user: SessionUser): Promise<{
   await recomputeStyleSupport(asset.projectId);
   await writeAudit({ userId: user.id, action: 'asset.deleted', entityType: 'media_asset', entityId: assetId, data: { filesRemoved } });
   return { filesRemoved };
+}
+
+/**
+ * Puts a project's clips in the order given: the listed clips first (0, 1, 2, …), then any clip not listed
+ * (for example one that finished uploading a moment ago) in its current order. Every id must be a clip of
+ * this project. All positions are rewritten in one transaction, so the order is never half-applied.
+ */
+export async function reorderAssets(projectId: string, user: SessionUser, assetIds: string[]): Promise<Array<{ id: string; sortOrder: number }>> {
+  const project = await getAccessibleProject(projectId, user);
+  const result = await getDb().transaction(async (tx) => {
+    const clips = await tx
+      .select({ id: schema.mediaAssets.id })
+      .from(schema.mediaAssets)
+      .where(and(eq(schema.mediaAssets.projectId, project.id), isNull(schema.mediaAssets.deletedAt), eq(schema.mediaAssets.kind, 'video')))
+      .orderBy(asc(schema.mediaAssets.sortOrder), asc(schema.mediaAssets.createdAt))
+      .for('update');
+    const known = new Set(clips.map((c) => c.id));
+    const foreign = assetIds.filter((id) => !known.has(id));
+    if (foreign.length) {
+      throw new AppError('VALIDATION', 'Some of those clips are not part of this project. Refresh the page and try again.', { details: [{ path: 'assetIds', message: 'Unknown clip' }] });
+    }
+    const listed = new Set(assetIds);
+    const order = [...assetIds, ...clips.map((c) => c.id).filter((id) => !listed.has(id))];
+    const now = new Date();
+    for (const [sortOrder, id] of order.entries()) {
+      await tx.update(schema.mediaAssets).set({ sortOrder, updatedAt: now }).where(eq(schema.mediaAssets.id, id));
+    }
+    return order.map((id, sortOrder) => ({ id, sortOrder }));
+  });
+  await writeAudit({ userId: user.id, action: 'asset.reordered', entityType: 'project', entityId: project.id, data: { count: result.length } });
+  return result;
+}
+
+/** The shots of a clip with their labels and a signed frame link each, for the per-shot tagging panel. */
+export async function getAssetShots(assetId: string, user: SessionUser): Promise<AssetShotsDto> {
+  const { asset } = await getAccessibleAsset(assetId, user);
+  return shapeAssetShots(asset, (key) => maybeSignedUrl(key));
 }

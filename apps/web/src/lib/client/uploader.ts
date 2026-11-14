@@ -25,6 +25,8 @@ export interface UploadItem {
 interface InternalItem extends UploadItem {
   file: File;
   projectId: string;
+  /** Route that opens a new upload session. */
+  createPath: string;
   uploadId: string | null;
   partSize: number;
   received: Set<number>;
@@ -126,8 +128,10 @@ export class ChunkedUploader {
   /**
    * Adds files to the queue. Files of the wrong type or over the size limit are listed as failed with a plain
    * reason instead of being sent. `completeBody` is sent when finishing (music licence details).
+   * `projectId` scopes the resume memory; `createPath` overrides where new sessions are opened (Settings uses
+   * `/api/music/uploads` with the project id "library").
    */
-  add(files: File[], options: { projectId: string; kind: UploadKind; maxBytes: number; completeBody?: Record<string, unknown> }): void {
+  add(files: File[], options: { projectId: string; kind: UploadKind; maxBytes: number; completeBody?: Record<string, unknown>; createPath?: string }): void {
     for (const file of files) {
       const key = resumeStorageKey(options.projectId, file);
       const existing = this.items.find((i) => i.key === key && (i.state === 'uploading' || i.state === 'queued' || i.state === 'finishing'));
@@ -150,6 +154,7 @@ export class ChunkedUploader {
         canRetry: !message,
         file,
         projectId: options.projectId,
+        createPath: options.createPath ?? `/api/projects/${options.projectId}/uploads`,
         uploadId: null,
         partSize: 0,
         received: new Set(),
@@ -230,7 +235,7 @@ export class ChunkedUploader {
       }
       writeResume(item.key, null);
     }
-    const created = await apiRequest<SessionResponse>(`/api/projects/${item.projectId}/uploads`, {
+    const created = await apiRequest<SessionResponse>(item.createPath, {
       method: 'POST',
       body: { filename: item.name, size: item.size, mimeType: item.file.type, kind: item.kind },
       signal,

@@ -124,7 +124,7 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   };
   const needsGrid = input.styleId === 'beat_montage' || Boolean(input.music && s.musicOn);
   const preferStart = previous?.audio.music?.startOffsetSec;
-  const grid = needsGrid ? beatGrid(s.musicOn ? input.music : null, s.target, s.attempt, preferStart) : null;
+  const grid = needsGrid ? beatGrid(s.musicOn ? input.music : null, s.target, s.attempt, preferStart, input.musicStartSec ?? null) : null;
   const ctx: BuildContext = {
     input,
     s,

@@ -11,8 +11,8 @@ import { createTrackedJob } from './jobs.js';
 import { getLogger } from './logger.js';
 import { createLibraryTrack } from './music.js';
 import { getBlobStore } from './storage.js';
-import { getAccessibleProject } from './studio-access.js';
-import type { CompleteUploadInput, CreateUploadInput } from './shared/studio-schemas.js';
+import { getAccessibleProject, projectVisibilityFilter } from './studio-access.js';
+import type { CompleteUploadInput, CreateLibraryUploadInput, CreateUploadInput } from './shared/studio-schemas.js';
 import { UPLOAD_PART_SIZE, UPLOAD_SESSION_TTL_HOURS, checkUploadFile, expectedPartSize, missingParts, partCountFor } from './shared/upload-math.js';
 
 /** What the storage driver needs to resume a multipart upload, kept in upload_sessions.driverState. */
@@ -137,6 +137,27 @@ export async function createUpload(projectId: string, user: SessionUser, input: 
   const row = inserted[0];
   if (!row) throw new AppError('INTERNAL', 'The upload could not be recorded.');
   return toDto(row);
+}
+
+/**
+ * Starts a music upload for the library from Settings. Upload sessions are stored against a project, so the
+ * session is attached to the most recently active project the user can open; the finished track is still a
+ * library track (no project) and stays when that project is deleted. Without any project there is nowhere
+ * to keep the upload yet, so the user is asked to create one first.
+ */
+export async function createLibraryMusicUpload(user: SessionUser, input: CreateLibraryUploadInput): Promise<UploadSessionDto> {
+  const visible = projectVisibilityFilter(user);
+  const carrier = await getDb()
+    .select({ id: schema.projects.id })
+    .from(schema.projects)
+    .where(visible ? and(isNull(schema.projects.deletedAt), visible) : isNull(schema.projects.deletedAt))
+    .orderBy(desc(schema.projects.updatedAt))
+    .limit(1);
+  const projectId = carrier[0]?.id;
+  if (!projectId) {
+    throw new AppError('CONFLICT', 'Create a project in the Video Studio first, then you can upload music here or from the project page.');
+  }
+  return createUpload(projectId, user, { ...input, kind: 'audio' });
 }
 
 /** Upload progress for resuming after a page reload. */
