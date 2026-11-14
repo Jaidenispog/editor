@@ -394,8 +394,8 @@ Built once so every Stage B/C module integrates the same way and parallel work p
 - **AI wording** (`packages/ai/src/website-copy.ts`): only on the owner's click, Haiku, page text as delimited data,
   structured output, options filtered by `checkCopyClaims` and `unsupportedFactClaims` (no number the AI was not
   given); `null` (button hidden) unless `AI_PROVIDER=anthropic`.
-- **Not built here (WP9):** Business Profile Performance (`search.sync` source `business_profile`, its connection
-  check branch and card) — they extend the payload enums in a backwards-compatible way.
+- **Business Profile Performance** (`search.sync` source `business_profile`, its connection check branch and card)
+  is built by WP9 (next section), which extends the payload enums in a backwards-compatible way.
 
 ## Google Business Profile (Stage C, WP9)
 

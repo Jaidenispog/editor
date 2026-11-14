@@ -27,7 +27,7 @@ import { writeWorkerAudit } from '../lib/audit.js';
 import { loadConnection, type ConnectionRow } from '../lib/connections.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
-import { SquareApiError, type SquareApi, type SquareBookingData, type SquareSlotData, type SquareWriteSegment } from './api.js';
+import { SquareApiError, isMalformedBooking, type SquareApi, type SquareBookingData, type SquareSlotData, type SquareWriteSegment } from './api.js';
 import { markSquareNeedsReauth, openSquare, type SquareSession } from './client.js';
 import { SquareConnectionChangedError, upsertBooking } from './map.js';
 
@@ -239,7 +239,10 @@ export async function runBookingChange(ctx: WorkerContext, run: TrackedRun, chan
     let current: SquareBookingData | null = null;
     if (row.kind === 'reschedule' || row.kind === 'cancel') {
       await run.progress(0.5, 'Checking the booking in Square…');
-      current = await s.api.getBooking(row.squareBookingId ?? '');
+      const fresh = await s.api.getBooking(row.squareBookingId ?? '');
+      // Square still has a booking it sent in a shape we can't read, but its version can't be checked: never write.
+      if (isMalformedBooking(fresh)) return finish(ctx, row, 'failed', 'Square’s copy of this booking couldn’t be read, so it can’t be checked. Change it in Square. Nothing was sent.', {}, clock());
+      current = fresh;
       if (!current) return finish(ctx, row, 'changed_in_square', 'Square no longer has this booking. Nothing was sent.', {}, clock());
       await upsertBooking(ctx.db, current, s, s.config.snapshot, clock());
       if (current.version !== req.expectedVersion || current.status !== 'ACCEPTED' || Date.parse(current.startAt) <= clock().getTime()) {
@@ -352,7 +355,7 @@ async function confirmChange(ctx: WorkerContext, s: SquareSession, row: BookingC
  */
 async function doubleBookingCheck(ctx: WorkerContext, s: SquareSession, b: SquareBookingData, now: Date): Promise<string | null> {
   const day = melbourneDayRange(melbourneDateOf(new Date(b.startAt)));
-  for (const other of await s.api.listBookings({ locationId: b.locationId || null, startAtMin: day.start.toISOString(), startAtMax: day.end.toISOString() })) {
+  for (const other of (await s.api.listBookings({ locationId: b.locationId || null, startAtMin: day.start.toISOString(), startAtMax: day.end.toISOString() })).bookings) {
     await upsertBooking(ctx.db, other, s, s.config.snapshot, now);
   }
   const teamMemberId = b.segments[0]?.teamMemberId;
@@ -425,17 +428,26 @@ export async function settleUnknownChanges(ctx: WorkerContext, s: SquareSession,
   for (const row of rows) {
     const req = row.request;
     let found: SquareBookingData | null = null;
+    let unreadable = false;
     if (row.kind === 'create') {
       if (!req.startAt) continue;
       const day = melbourneDayRange(melbourneDateOf(new Date(req.startAt)));
       const list = await s.api.listBookings({ locationId: req.locationId, startAtMin: day.start.toISOString(), startAtMax: day.end.toISOString() });
       const after = (row.submittedAt?.getTime() ?? row.createdAt.getTime()) - CREATED_SLACK_MS;
       found =
-        list.find(
+        list.bookings.find(
           (b) => b.customerId === req.squareCustomerId && b.segments[0]?.teamMemberId === req.teamMemberId && Date.parse(b.startAt) === Date.parse(req.startAt ?? '') && (!b.createdAt || Date.parse(b.createdAt) >= after),
         ) ?? null;
+      // A booking that day Square sent in a shape we can't read could be this one: never call it "not made".
+      if (!found && list.skippedIds.length > 0) unreadable = true;
     } else if (row.squareBookingId) {
-      const b = await s.api.getBooking(row.squareBookingId);
+      const fresh = await s.api.getBooking(row.squareBookingId);
+      // Square still has the booking but its copy can't be read: leave the change as it is until it can.
+      if (isMalformedBooking(fresh)) {
+        ctx.logger.warn({ changeId: row.id, reason: fresh.reason }, 'left a booking change unsettled: its booking from Square could not be read');
+        continue;
+      }
+      const b = fresh;
       const moved = b && row.kind === 'reschedule' && Date.parse(b.startAt) === Date.parse(req.startAt ?? '') && b.version > (req.expectedVersion ?? 0);
       const cancelled = b && row.kind === 'cancel' && b.status.startsWith('CANCELLED') && b.version > (req.expectedVersion ?? 0);
       found = moved || cancelled ? b : null;
@@ -459,7 +471,7 @@ export async function settleUnknownChanges(ctx: WorkerContext, s: SquareSession,
       continue;
     }
     const since = row.submittedAt?.getTime() ?? row.createdAt.getTime();
-    const message = now.getTime() - since > SQUARE_UNKNOWN_GIVE_UP_MS ? NOT_FOUND_LATER : UNKNOWN_MESSAGE;
+    const message = now.getTime() - since > SQUARE_UNKNOWN_GIVE_UP_MS && !unreadable ? NOT_FOUND_LATER : UNKNOWN_MESSAGE;
     await ctx.db
       .update(table)
       .set({ status: 'unknown', statusMessage: message, finishedAt: row.finishedAt ?? now, updatedAt: now })

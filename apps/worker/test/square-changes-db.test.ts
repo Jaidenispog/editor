@@ -287,6 +287,18 @@ describe.skipIf(skip)('Square booking changes (Tier 1) with a fake Square API', 
     expect((await handle.db.query.bookings.findFirst({ where: eq(schema.bookings.squareBookingId, 'BK_MOVE') }))?.squareVersion).toBe(4);
   });
 
+  it('a booking Square sends with a local start time at the re-check: failed, nothing sent, never treated as gone', async () => {
+    // Square still has it but its copy can't be read (G4 review round 3), so its version can't be checked.
+    fake.scenario.bookings = [{ ...fakeBooking({ id: 'BK_MOVE', startAt: at(0), customerId: 'CUST_JORDAN', version: 2 }), start_at: at(0).replace(/(\.\d+)?Z$/, '') }];
+    fake.scenario.availabilities = [fakeSlot({ startAt: at(HOUR) })];
+    const id = await makeChange('reschedule', { ...createRequest(at(HOUR)), squareCustomerId: undefined, expectedVersion: 2 }, { squareBookingId: 'BK_MOVE' });
+    await runBookingChange(ctx, fakeRun(), id, ON);
+    const row = await change(id);
+    expect(row).toMatchObject({ status: 'failed', submittedAt: null });
+    expect(row.statusMessage).toMatch(/couldn’t be read.*Nothing was sent\.$/);
+    expect(writes()).toHaveLength(0);
+  });
+
   it('reschedule and cancel at the version the owner saw', async () => {
     fake.scenario.bookings = [fakeBooking({ id: 'BK_MOVE', startAt: at(0), customerId: 'CUST_JORDAN', version: 2 })];
     fake.scenario.availabilities = [fakeSlot({ startAt: at(HOUR) })];

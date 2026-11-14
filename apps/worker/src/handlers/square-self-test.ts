@@ -14,7 +14,7 @@ import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import { writeWorkerAudit } from '../lib/audit.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
-import { SquareApiError } from '../square/api.js';
+import { SquareApiError, isMalformedBooking } from '../square/api.js';
 import { runBookingChange, type BookingChangeOptions, type BookingChangeRow } from '../square/change.js';
 import { openSquare } from '../square/client.js';
 
@@ -92,6 +92,11 @@ async function prepareStep(ctx: WorkerContext, run: TrackedRun, selfTestId: stri
   const s = await openSquare(ctx, run);
   if ('skip' in s) throw new NonRetryableError('CONFLICT', s.skip);
   const current = await s.api.getBooking(squareBookingId);
+  if (isMalformedBooking(current)) {
+    // Square still has the test booking but its copy can't be read, so neither its version nor its time is known.
+    await withdraw(ctx, selfTestId, [kind], 'Not run: Square’s copy of the test booking couldn’t be read.', 'failed');
+    return;
+  }
   if (!current) {
     await withdraw(ctx, selfTestId, [kind], 'Not run: Square no longer has the test booking.', 'changed_in_square');
     return;
