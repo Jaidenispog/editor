@@ -36,6 +36,7 @@ import {
   type WebsiteEditSource,
   type WebsiteEditStatus,
 } from '@studio/core';
+import { privateHostReason } from '@studio/core/address-ranges';
 import { schema } from '@studio/db';
 import type { AuditSummaryDto, GroupTotals, QueryRowDto, SearchPanelState, SearchPerformanceDto, WebsiteEditDto, WebsiteOverviewDto } from '@/components/website/types';
 import type { SessionUser } from './auth.js';
@@ -518,7 +519,8 @@ function editDto(
     outcome: result.outcome ?? null,
     appliedAt: row.appliedAt?.toISOString() ?? null,
     appliedVia: row.appliedVia,
-    canUndo: row.status === 'applied' && row.appliedVia === 'wordpress' && (change.kind === 'text_replace' || change.kind === 'image_alt_text'),
+    // A deletion cannot be undone from here: its reverse change has no text to find (put it back in WordPress).
+    canUndo: row.status === 'applied' && row.appliedVia === 'wordpress' && ((change.kind === 'text_replace' && change.after !== '') || change.kind === 'image_alt_text'),
     findingKey: row.findingKey,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -790,6 +792,11 @@ export async function createOwnerEdit(
   return oneEditDto(id);
 }
 
+/** Statuses in which a prepared change's wording, source or status may still change. */
+const EDITABLE_EDIT_STATUSES = ['proposed', 'apply_failed'] as const;
+/** Answer (409) when a change was claimed for applying between reading and writing it. */
+const EDIT_BEING_APPLIED = 'This change is being applied, so it can no longer be edited.';
+
 /** Owner edits the wording (kind limits apply; claim checks are soft warnings for the owner's own text). */
 export async function patchEdit(user: SessionUser, id: string, after: string): Promise<{ edit: WebsiteEditDto; warnings: string[] }> {
   const row = await loadEdit(id);
@@ -810,7 +817,8 @@ export async function patchEdit(user: SessionUser, id: string, after: string): P
           phone: settings.business.phone,
         })
       : [];
-  await getDb()
+  // Only while still editable: an apply that claimed the row meanwhile keeps the wording the owner confirmed.
+  const updated = await getDb()
     .update(schema.websiteEdits)
     .set({
       proposedChange: next.data,
@@ -820,7 +828,9 @@ export async function patchEdit(user: SessionUser, id: string, after: string): P
       statusReason: null,
       updatedAt: new Date(),
     })
-    .where(eq(schema.websiteEdits.id, id));
+    .where(and(eq(schema.websiteEdits.id, id), inArray(schema.websiteEdits.status, [...EDITABLE_EDIT_STATUSES])))
+    .returning({ id: schema.websiteEdits.id });
+  if (!updated.length) throw new AppError('CONFLICT', EDIT_BEING_APPLIED);
   await writeAudit({
     userId: user.id,
     action: 'website.edit.edited',
@@ -865,7 +875,12 @@ export async function chooseDraft(user: SessionUser, id: string, index: number):
     ...WebsiteChangeSchema.parse(row.proposedChange),
     after: option,
   });
-  await getDb().update(schema.websiteEdits).set({ proposedChange: next, source: 'ai_draft', updatedAt: new Date() }).where(eq(schema.websiteEdits.id, id));
+  const updated = await getDb()
+    .update(schema.websiteEdits)
+    .set({ proposedChange: next, source: 'ai_draft', updatedAt: new Date() })
+    .where(and(eq(schema.websiteEdits.id, id), inArray(schema.websiteEdits.status, [...EDITABLE_EDIT_STATUSES])))
+    .returning({ id: schema.websiteEdits.id });
+  if (!updated.length) throw new AppError('CONFLICT', EDIT_BEING_APPLIED);
   await writeAudit({
     userId: user.id,
     action: 'website.edit.ai_draft_chosen',
@@ -899,9 +914,23 @@ export async function applyEdit(user: SessionUser, id: string, expectedAfter: st
       statusReason: null,
       updatedAt: now,
     })
-    .where(and(eq(schema.websiteEdits.id, id), inArray(schema.websiteEdits.status, ['proposed', 'apply_failed'])))
+    // The approval holds only for the wording the dialog showed: an edit that landed after it was read wins the race
+    // and this approval is refused (the owner sees the new wording and confirms again).
+    .where(
+      and(
+        eq(schema.websiteEdits.id, id),
+        inArray(schema.websiteEdits.status, [...EDITABLE_EDIT_STATUSES]),
+        sql`${schema.websiteEdits.proposedChange} ->> 'after' = ${expectedAfter}`,
+      ),
+    )
     .returning({ id: schema.websiteEdits.id });
-  if (!updated.length) throw new AppError('CONFLICT', 'This change is already being applied.');
+  if (!updated.length) {
+    const now2 = await loadEdit(id);
+    throw new AppError(
+      'CONFLICT',
+      now2.status === 'proposed' || now2.status === 'apply_failed' ? 'This change was edited since you opened it. Check the new wording and apply again.' : 'This change is already being applied.',
+    );
+  }
   await writeAudit({
     userId: user.id,
     action: 'website.edit.apply_requested',
@@ -981,6 +1010,8 @@ export async function undoEdit(user: SessionUser, id: string): Promise<WebsiteEd
   const change = WebsiteChangeSchema.parse(row.proposedChange);
   if (row.status !== 'applied' || row.appliedVia !== 'wordpress' || (change.kind !== 'text_replace' && change.kind !== 'image_alt_text'))
     throw new AppError('UNSUPPORTED', 'Only changes applied through WordPress can be undone from here.');
+  if (change.kind === 'text_replace' && change.after === '')
+    throw new AppError('UNSUPPORTED', 'Removed text cannot be put back from here, because there is nothing left to find on the page. Restore it from the page’s revisions in WordPress.');
   const reverse: WebsiteChange =
     change.kind === 'text_replace'
       ? {
@@ -1223,6 +1254,9 @@ export async function saveWordPress(
   const base = new URL(input.baseUrl);
   if (base.protocol !== 'https:') throw new AppError('VALIDATION', 'Use your site’s https:// address.');
   if (base.username || base.password || (base.port && base.port !== '443')) throw new AppError('VALIDATION', 'Use your site’s plain https:// address.');
+  // The worker refuses private addresses when it connects; refuse the obvious ones here so the owner hears at once.
+  const privateHost = privateHostReason(base.hostname);
+  if (privateHost) throw new AppError('VALIDATION', `That address points to ${privateHost}, not a public website. Use your site’s public https:// address.`);
   const baseUrl = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
   const values = {
     status: 'not_configured' as const,

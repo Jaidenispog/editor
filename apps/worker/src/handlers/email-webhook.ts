@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { autoPauseReason, normaliseEmail } from '@studio/core';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
@@ -44,6 +44,11 @@ async function bumpCampaign(tx: Db, campaignId: string | null, counter: Campaign
     .where(and(eq(schema.emailCampaigns.id, c.id), eq(schema.emailCampaigns.status, 'sending')))
     .returning({ id: schema.emailCampaigns.id });
   if (!paused.length) return null;
+  // Messages already handed to email.send but not submitted go back to approved, so none goes out while paused.
+  await tx
+    .update(schema.emailMessages)
+    .set({ status: 'approved', statusMessage: 'Campaign paused automatically.', updatedAt: new Date() })
+    .where(and(eq(schema.emailMessages.campaignId, c.id), eq(schema.emailMessages.status, 'queued'), isNull(schema.emailMessages.submittedAt)));
   await writeWorkerAudit(tx, { userId: null, action: 'email.campaign.auto_paused', entityType: 'email_campaign', entityId: c.id, data: { reason, sent: c.sentCount, bounces: c.bounceCount, complaints: c.complaintCount } });
   return reason;
 }

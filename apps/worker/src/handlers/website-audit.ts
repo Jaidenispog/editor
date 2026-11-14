@@ -86,7 +86,15 @@ export async function handleWebsiteAudit(ctx: WorkerContext, run: TrackedRun, pa
               pages: [scope.rootUrl],
             }),
           ]
-        : []
+        : out.facts.robots.status === 'unreachable'
+          ? [
+              // The site answers but robots.txt gives a server error: nothing more is read (RFC 9309), and the owner
+              // is told why, since Google also stops reading the site while this lasts.
+              buildFinding('robots_unreachable', 'robots', {
+                detail: `${new URL('/robots.txt', scope.rootUrl).toString()} gave a server error.`,
+              }),
+            ]
+          : []
       : prioritiseFindings(runWebsiteChecks(out.facts, settings, deps.now()));
     const result: WebsiteAuditResult = WebsiteAuditResultSchema.parse({
       ...out.facts,

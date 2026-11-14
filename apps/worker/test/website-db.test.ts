@@ -5,6 +5,8 @@
  * TEST_DATABASE_URL is set.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
@@ -12,7 +14,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AnthropicWebsiteCopywriter } from '@studio/ai';
 import { loadEnv } from '@studio/config';
-import { AppSettingsSchema, CancelledError, NonRetryableError, WebsiteAuditResultSchema, newId, type JobType, type WebsiteChange } from '@studio/core';
+import { AppSettingsSchema, CancelledError, NonRetryableError, WebsiteAuditResultSchema, newId, settingsSnapshot, siteScopeFrom, type JobType, type WebsiteChange } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
 import type { WorkerContext } from '../src/context.js';
 import { handleSearchSync } from '../src/handlers/search-sync.js';
@@ -23,7 +25,9 @@ import { handleWebsiteEditApply } from '../src/handlers/website-edit-apply.js';
 import { encryptCredential } from '../src/lib/credentials.js';
 import { GOOGLE_TOKEN_URL } from '../src/lib/google/oauth.js';
 import type { TrackedRun } from '../src/lib/job-tracker.js';
+import { MAX_POLITE_WAIT_SECONDS, crawlSite } from '../src/website/crawl.js';
 import type { WebsiteDeps } from '../src/website/deps.js';
+import { WebsiteFetcher } from '../src/website/fetcher.js';
 import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 import { fakeFetch, fakeRun, json } from './helpers/fakes.js';
 import { FIXTURE_HOST, FIXTURE_ROOT, startFixtureSite, type FixtureSite } from './helpers/fixture-site.js';
@@ -297,6 +301,95 @@ describe.skipIf(skip)('website module on a real database with local fakes', () =
       expect((await auditRow(id)).status).toBe('failed');
       expect(site.requests).toEqual([]);
       await handle.db.update(schema.settings).set({ data }).where(eq(schema.settings.id, 'default'));
+    });
+
+    it('a site that cannot be reached at all is a complete check with one critical "site unreachable" finding', async () => {
+      // A port nothing listens on (connection refused) and a host name that does not resolve.
+      const probe = http.createServer();
+      await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+      const closedPort = (probe.address() as AddressInfo).port;
+      await new Promise<void>((resolve) => probe.close(() => resolve()));
+      const cases = [
+        { policy: { ...deps.fetchPolicy, testHttpPort: closedPort }, error: /refused the connection/ },
+        {
+          policy: {
+            ...deps.fetchPolicy,
+            resolver: async () => {
+              throw new Error('ENOTFOUND');
+            },
+          },
+          error: /could not be found/,
+        },
+      ];
+      for (const c of cases) {
+        const id = await newAudit();
+        await handleWebsiteAudit(ctx, fakeRun(), { auditId: id }, { ...deps, fetchPolicy: c.policy });
+        const row = await auditRow(id);
+        expect(row.status).toBe('complete');
+        const result = WebsiteAuditResultSchema.parse(row.result);
+        expect(result.findings.map((f) => f.checkId)).toEqual(['site_unreachable']);
+        expect(result.findings[0]?.severity).toBe('critical');
+        expect(result.findings[0]?.detail).toMatch(c.error);
+        expect(result.findings.some((f) => f.checkId.startsWith('robots'))).toBe(false);
+        expect((row.summary as { partialReasons: string[] }).partialReasons).toEqual([]);
+        // Later tests read the newest check's pages: keep this one out of their way.
+        await handle.db.delete(schema.websiteAudits).where(eq(schema.websiteAudits.id, id));
+      }
+    });
+
+    it('robots.txt answering 503 stops the crawl (RFC 9309) and says so with the robots finding', async () => {
+      const seen: string[] = [];
+      const down = http.createServer((req, res) => {
+        seen.push(req.url ?? '');
+        if (req.url === '/robots.txt') {
+          res.writeHead(503, { 'content-type': 'text/plain' }).end('Service unavailable');
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/html' }).end('<html><title>Home</title></html>');
+      });
+      await new Promise<void>((resolve) => down.listen(0, '127.0.0.1', resolve));
+      try {
+        const id = await newAudit();
+        await handleWebsiteAudit(ctx, fakeRun(), { auditId: id }, { ...deps, fetchPolicy: { ...deps.fetchPolicy, testHttpPort: (down.address() as AddressInfo).port } });
+        const row = await auditRow(id);
+        expect(row.status).toBe('partial');
+        const result = WebsiteAuditResultSchema.parse(row.result);
+        expect(result.findings.map((f) => f.checkId)).toEqual(['robots_unreachable']);
+        expect((row.summary as { partialReasons: string[] }).partialReasons.join(' ')).toMatch(/robots.txt answered with a server error/);
+        expect(seen).toEqual(['/robots.txt']);
+        await handle.db.delete(schema.websiteAudits).where(eq(schema.websiteAudits.id, id));
+      } finally {
+        await new Promise<void>((resolve) => down.close(() => resolve()));
+      }
+    });
+
+    it('a long Crawl-delay keeps the total polite waiting under 12 minutes (later requests are cut, not the cap)', async () => {
+      const settings = AppSettingsSchema.parse((await handle.db.query.settings.findFirst({ where: eq(schema.settings.id, 'default') }))!.data);
+      const scope = siteScopeFrom(settings.business.website)!;
+      let clock = 0;
+      const slept: number[] = [];
+      const fetcher = new WebsiteFetcher(deps.fetchPolicy, [scope.host, scope.twinHost], () => clock, async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      });
+      // As if robots.txt said `Crawl-delay: 20` (the fixture says 1; the gap only ever grows). This site needs over 50
+      // requests to the owner's host, which would be more than 17 minutes of waiting without the budget.
+      fetcher.setCrawlDelay(20);
+      const out = await crawlSite({
+        scope,
+        snapshot: settingsSnapshot(settings),
+        checkExternalLinks: true,
+        watchTexts: new Map(),
+        fetcher,
+        signal: new AbortController().signal,
+        progress: async () => {},
+        checkCancelled: () => {},
+      });
+      const total = slept.reduce((a, b) => a + b, 0);
+      expect(total).toBeLessThanOrEqual(MAX_POLITE_WAIT_SECONDS * 1000);
+      expect(total).toBeGreaterThan(10 * 60_000);
+      expect(out.partialReasons.join(' ')).toMatch(/slow crawl \(Crawl-delay\)/);
+      expect(out.facts.pages.filter((p) => p.skipped === null && p.status !== null).length).toBeGreaterThan(0);
     });
 
     it('cleanup keeps full results only for the newest checks', async () => {

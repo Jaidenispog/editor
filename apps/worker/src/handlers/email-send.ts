@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { AppError, evaluateSendPolicy, isCommercial, lintEmail, streamFor, type JobPayload, type MessageClass, type SendDecision } from '@studio/core';
+import { AppError, evaluateSendPolicy, isCommercial, lintEmail, senderDomain, streamFor, type JobPayload, type MessageClass, type SendDecision } from '@studio/core';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import { writeWorkerAudit } from '../lib/audit.js';
@@ -65,8 +65,31 @@ async function setMessage(ctx: WorkerContext, id: string, from: readonly Message
   return rows.length > 0;
 }
 
+/** Campaign statuses whose messages may be sent. */
+const SENDABLE_CAMPAIGN_STATUSES: readonly string[] = ['approved', 'sending'];
+
+/**
+ * Stops a campaign message whose campaign the owner paused or cancelled (or that paused itself on complaints or
+ * bounces): paused → back to `approved` (it goes out after a resume); cancelled or gone → `cancelled`. Returns the
+ * progress message, or null when the message may be sent. Nothing is ever sent to the provider here.
+ */
+async function campaignBlock(ctx: WorkerContext, msg: MessageRow): Promise<string | null> {
+  if (!msg.campaignId) return null;
+  const camp = await ctx.db.query.emailCampaigns.findFirst({ columns: { status: true }, where: eq(schema.emailCampaigns.id, msg.campaignId) });
+  if (camp && SENDABLE_CAMPAIGN_STATUSES.includes(camp.status)) return null;
+  if (!camp || camp.status === 'cancelled') {
+    await setMessage(ctx, msg.id, ['approved', 'queued'], { status: 'cancelled', statusMessage: 'Campaign cancelled.' });
+    return 'Not sent: the campaign was cancelled';
+  }
+  await setMessage(ctx, msg.id, ['approved', 'queued'], { status: 'approved', statusMessage: camp.status === 'paused' ? 'Campaign paused.' : 'The campaign is not approved.' });
+  return `Not sent: the campaign is ${camp.status}`;
+}
+
+/** A held message (provider not ready, webhooks missing) is looked at again after this long, not every minute. */
+export const HOLD_RECHECK_MS = 30 * 60_000;
+
 /** Applies a blocking or deferring gate decision to the message (and its review request). */
-async function applyDecision(ctx: WorkerContext, msg: MessageRow, decision: SendDecision): Promise<string> {
+async function applyDecision(ctx: WorkerContext, msg: MessageRow, decision: SendDecision, now: Date): Promise<string> {
   const text = decision.reasons.map((r) => r.message).join(' ');
   if (decision.decision === 'defer' && decision.deferUntil) {
     await setMessage(ctx, msg.id, ['approved', 'queued'], { status: 'approved', scheduledFor: decision.deferUntil, statusMessage: text });
@@ -75,7 +98,10 @@ async function applyDecision(ctx: WorkerContext, msg: MessageRow, decision: Send
   }
   const outcome = decision.outcome ?? 'failed';
   if (outcome === 'hold') {
-    await setMessage(ctx, msg.id, ['approved', 'queued'], { status: 'approved', statusMessage: text });
+    // Pushed forward, so dispatch does not hand it on (and create a job) every minute until the problem is fixed.
+    const recheck = new Date(Math.max(now.getTime(), msg.scheduledFor?.getTime() ?? 0) + HOLD_RECHECK_MS);
+    await setMessage(ctx, msg.id, ['approved', 'queued'], { status: 'approved', scheduledFor: recheck, statusMessage: text });
+    await updateLinkedReviewRequest(ctx.db, msg.id, { scheduledFor: recheck }, ['scheduled']);
     return `On hold: ${decision.reasons.map((r) => r.code).join(', ')}`;
   }
   await setMessage(ctx, msg.id, ['approved', 'queued'], { status: outcome, statusMessage: text });
@@ -131,6 +157,12 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
     await run.progress(1, `Nothing to send (${msg.status})`);
     return;
   }
+  // 1b. A campaign message goes out only while its campaign is still sending (checked again under lock at the claim).
+  const campaignHold = await campaignBlock(ctx, msg);
+  if (campaignHold) {
+    await run.progress(1, campaignHold);
+    return;
+  }
 
   // 3. The gate, on fresh facts.
   const settings = await loadAppSettings(ctx.db);
@@ -157,7 +189,7 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
     suppressions,
     identity: identityFrom(settings),
     provider: ready,
-    booking: subjectOf.booking ? { status: subjectOf.booking.status, completionSource: subjectOf.booking.completionSource, completedAt: subjectOf.booking.completedAt } : null,
+    booking: subjectOf.booking ? { status: subjectOf.booking.status, completionSource: subjectOf.booking.completionSource, completedAt: subjectOf.booking.completedAt, squareEnvironment: subjectOf.booking.squareEnvironment } : null,
     reviewLink: messageClass === 'review_request' ? settings.business.googleReviewLink : null,
     recentlyAsked,
     minDaysBetweenRequests: settings.reviews.minDaysBetweenRequests,
@@ -169,7 +201,7 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
     now,
   });
   if (decision.decision !== 'send' || !provider) {
-    const summary = await applyDecision(ctx, msg, decision);
+    const summary = await applyDecision(ctx, msg, decision, now);
     await run.progress(1, summary);
     return;
   }
@@ -190,6 +222,12 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
   });
   const stream = streamFor(messageClass);
   const claimed = await ctx.db.transaction(async (tx) => {
+    // The owner's pause or cancel (and the automatic pause) lock the campaign row FOR UPDATE: holding it FOR SHARE
+    // here means a message is either claimed before the pause commits or not claimed at all.
+    if (msg.campaignId) {
+      const [camp] = await tx.select({ status: schema.emailCampaigns.status }).from(schema.emailCampaigns).where(eq(schema.emailCampaigns.id, msg.campaignId)).for('share');
+      if (!camp || !SENDABLE_CAMPAIGN_STATUSES.includes(camp.status)) return false;
+    }
     const rows = await tx
       .update(schema.emailMessages)
       .set({
@@ -214,7 +252,8 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
     return true;
   });
   if (!claimed) {
-    await run.progress(1, 'Another attempt is sending this email');
+    const hold = await campaignBlock(ctx, msg);
+    await run.progress(1, hold ?? 'Another attempt is sending this email');
     return;
   }
 
@@ -239,6 +278,9 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
   // 6. The result.
   if (result.ok) {
     await markSent(ctx, msg, result.providerMessageId, now, decision.sandbox ? 'Test — not delivered' : '');
+    // Postmark accepted a live send to an address outside the sender's domain: the account is approved, so an
+    // earlier "pending approval" (412) answer no longer applies (until approval, only own-domain sends work).
+    if (!decision.sandbox) await recordApprovalSeen(ctx, msg.toEmail, pm.from);
     await run.progress(1, decision.sandbox ? 'Sent to the Postmark test server (not delivered)' : 'Sent');
     return;
   }
@@ -283,6 +325,19 @@ export async function handleEmailSend(ctx: WorkerContext, run: TrackedRun, paylo
       await updateLinkedReviewRequest(ctx.db, msg.id, { status: 'failed' });
   }
   await run.progress(1, `Not sent: ${result.kind}`);
+}
+
+/** Clears a stored "pending approval" once a live send outside the sender's own domain was accepted (design §3.1). */
+export async function recordApprovalSeen(ctx: WorkerContext, toEmail: string, from: string): Promise<void> {
+  const own = senderDomain(from);
+  const at = toEmail.lastIndexOf('@');
+  const recipientDomain = at > 0 ? toEmail.slice(at + 1).toLowerCase() : null;
+  if (!own || !recipientDomain || recipientDomain === own) return;
+  const t = schema.integrationConnections;
+  await ctx.db
+    .update(t)
+    .set({ capabilities: sql`${t.capabilities} || '{"approved": true}'::jsonb`, updatedAt: new Date() })
+    .where(and(eq(t.provider, 'postmark'), sql`(${t.capabilities} ->> 'approved') is distinct from 'true'`));
 }
 
 /** Records an accepted send: the message, its review request, its campaign counter and the audit entry. */

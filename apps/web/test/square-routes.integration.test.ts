@@ -163,7 +163,13 @@ suite('Square routes (database-backed)', () => {
     const d = await db();
     const s = await schema();
     const { eq } = await import('drizzle-orm');
-    const body = JSON.stringify({ merchant_id: 'MERCHANT_FAKE_1', type: 'booking.created', event_id: 'evt-1', created_at: new Date().toISOString(), data: { type: 'booking', id: 'BK_1', object: {} } });
+    const body = JSON.stringify({
+      merchant_id: 'MERCHANT_FAKE_1',
+      type: 'booking.created',
+      event_id: 'evt-1',
+      created_at: new Date().toISOString(),
+      data: { type: 'booking', id: 'BK_1', object: { booking: { id: 'BK_1', customer_note: 'Allergic to lavender', seller_note: 'Call 0400 000 000' } } },
+    });
     const sig = squareSignature(HOOK_KEY, `${ORIGIN}/api/webhooks/square`, body);
     const send = (b: string, signature: string) => call(hook.POST, 'POST', '/api/webhooks/square', {}, b, { 'x-square-hmacsha256-signature': signature });
     expect((await send(body, 'nope')).status).toBe(401);
@@ -174,7 +180,11 @@ suite('Square routes (database-backed)', () => {
     expect(first.status).toBe(200);
     expect(first.json).toEqual({ ok: true, duplicate: false });
     expect((await send(body, sig)).json).toEqual({ ok: true, duplicate: true });
-    expect(await d.select().from(s.webhookEvents)).toHaveLength(1);
+    const events = await d.select().from(s.webhookEvents);
+    expect(events).toHaveLength(1);
+    // Only the minimal envelope is kept: never Square's copy of the object (notes, contact details, amounts).
+    expect(events[0]?.payload).toEqual({ event_id: 'evt-1', type: 'booking.created', merchant_id: 'MERCHANT_FAKE_1', created_at: expect.any(String), data: { type: 'booking', id: 'BK_1' } });
+    expect(JSON.stringify(events[0]?.payload)).not.toMatch(/lavender|0400/);
     expect(await d.select().from(s.jobs).where(eq(s.jobs.type, 'webhook.process'))).toHaveLength(1);
     const conn = (await d.select().from(s.integrationConnections).where(eq(s.integrationConnections.provider, 'square')))[0]!;
     expect((conn.config as { lastWebhookAt?: string }).lastWebhookAt).toBeTruthy();
@@ -203,14 +213,44 @@ suite('Square routes (database-backed)', () => {
       raw: { customerNote: 'Short on the sides', sellerNote: 'Regular', source: 'FIRST_PARTY_BUYER' },
     });
     await d.insert(s.bookings).values([row(ids.past, 'BK_PAST', -3 * 3600_000, 'ACCEPTED', 'awaiting_payment'), row(ids.noShow, 'BK_NS', -26 * 3600_000, 'NO_SHOW', 'no_show'), row(ids.future, 'BK_FUT', 26 * 3600_000, 'ACCEPTED', 'upcoming')]);
+    // A booking at another Square location of the same account (copied before a location was chosen).
+    const otherLocation = randomUUID();
+    await d.insert(s.bookings).values({ ...row(otherLocation, 'BK_OTHER_LOC', 26 * 3600_000 + 60_000, 'ACCEPTED', 'upcoming'), locationId: 'LOC_2' });
+    const { sql } = await import('drizzle-orm');
+    const ic = s.integrationConnections;
+    const twoLocations = {
+      fetchedAt: new Date().toISOString(),
+      merchantName: 'Ivanhoe Test Barbers',
+      locations: [
+        { id: 'LOC_1', name: 'Ivanhoe', timezone: 'Australia/Melbourne', status: 'ACTIVE', bookingSiteUrl: null },
+        { id: 'LOC_2', name: 'Heidelberg', timezone: 'Australia/Melbourne', status: 'ACTIVE', bookingSiteUrl: null },
+      ],
+      businessProfile: null,
+      teamMembers: [],
+      services: [],
+    };
+    await d.update(ic).set({ config: sql`${ic.config} || ${JSON.stringify({ snapshot: twoLocations })}::jsonb` }).where(eq(ic.provider, 'square'));
 
     const list = await import('../src/app/api/appointments/route');
     const detail = await import('../src/app/api/appointments/[id]/route');
     const mark = await import('../src/app/api/appointments/[id]/attendance/route');
+    const settingsRoute = await import('../src/app/api/integrations/square/route');
+    signIn(staff);
+    // Two active locations and none chosen: nothing is shown until the owner chooses.
+    expect((await call(list.GET, 'GET', '/api/appointments?view=upcoming')).json.bookings).toEqual([]);
+    signIn(owner);
+    expect((await call(settingsRoute.PATCH, 'PATCH', '/api/integrations/square', {}, { locationId: 'LOC_1' })).status).toBe(200);
+    // Choosing removes the other location's copied bookings.
+    expect(await d.select().from(s.bookings).where(eq(s.bookings.id, otherLocation))).toHaveLength(0);
+    expect((await d.select().from(s.auditLog).where(eq(s.auditLog.action, 'integration.square.location_selected'))).at(-1)?.data).toMatchObject({ locationId: 'LOC_1', otherLocationBookingsRemoved: 1 });
     signIn(staff);
     const upcoming = await call(list.GET, 'GET', '/api/appointments?view=upcoming');
-    expect(upcoming.json.bookings.map((b: { id: string }) => b.id)).toEqual([ids.future]);
-    expect(upcoming.json.bookings[0]).toMatchObject({ clientName: 'Jordan Lee', status: 'ACCEPTED', statusLabel: 'Accepted', attendanceMark: { allowed: false } });
+    // "Upcoming" starts at the beginning of today in Melbourne, so the booking from 3 hours ago is listed too when the
+    // test runs shortly after midnight there; yesterday's no-show never is.
+    const upcomingIds = upcoming.json.bookings.map((b: { id: string }) => b.id);
+    expect(upcomingIds).toContain(ids.future);
+    expect(upcomingIds).not.toContain(ids.noShow);
+    expect(upcoming.json.bookings.find((b: { id: string }) => b.id === ids.future)).toMatchObject({ clientName: 'Jordan Lee', status: 'ACCEPTED', statusLabel: 'Accepted', attendanceMark: { allowed: false } });
     const confirm = await call(list.GET, 'GET', '/api/appointments?view=confirm');
     expect(confirm.json.bookings.map((b: { id: string }) => b.id)).toEqual([ids.past]);
     expect(confirm.json.bookings[0]).toMatchObject({ attendance: 'awaiting_payment', attendanceIsEstimate: true });
@@ -227,8 +267,9 @@ suite('Square routes (database-backed)', () => {
     expect(marked.json).toMatchObject({ attendance: 'owner_attended', attendanceIsEstimate: false, attendanceMark: { current: 'attended' } });
     expect(marked.json.attendanceLabel).toMatch(/^Attended — marked by Sam/);
     const stored = (await d.select().from(s.bookings).where(eq(s.bookings.id, ids.past)))[0]!;
-    expect(stored).toMatchObject({ completionSource: 'owner_marked', ownerAttendance: 'attended', ownerAttendanceBy: staff.id });
-    expect(stored.completedAt).not.toBeNull();
+    // Sandbox (test) data: the mark is kept and labelled, but a test booking never counts as a completed visit, so
+    // it can never start a real follow-up or review request.
+    expect(stored).toMatchObject({ completionSource: 'none', completedAt: null, ownerAttendance: 'attended', ownerAttendanceBy: staff.id });
     const notAttended = await call(mark.POST, 'POST', `/api/appointments/${ids.past}/attendance`, { id: ids.past }, { value: 'not_attended' });
     expect(notAttended.json.attendance).toBe('owner_not_attended');
     expect((await d.select().from(s.bookings).where(eq(s.bookings.id, ids.past)))[0]).toMatchObject({ completionSource: 'none', completedAt: null });
@@ -236,6 +277,14 @@ suite('Square routes (database-backed)', () => {
       { value: 'attended', previous: null },
       { value: 'not_attended', previous: 'attended' },
     ]);
+
+    // Past rows carry the review-request badge (design §9.1), with the same words as the Reviews page.
+    await d.insert(s.reviewRequests).values({ id: randomUUID(), bookingId: ids.past, customerId: ids.customer, channel: 'email', status: 'skipped', skipReason: 'no_consent', origin: 'automation', dedupeKey: `review:${ids.past}` });
+    const past = await call(list.GET, 'GET', '/api/appointments?view=past');
+    const pastRow = past.json.bookings.find((b: { id: string }) => b.id === ids.past);
+    expect(pastRow.reviewRequest).toEqual({ status: 'skipped', label: 'Review request: Skipped — no email permission recorded' });
+    expect(past.json.bookings.find((b: { id: string }) => b.id === ids.noShow).reviewRequest).toBeNull();
+    expect((await call(list.GET, 'GET', '/api/appointments?view=upcoming')).json.bookings.find((b: { id: string }) => b.id === ids.future).reviewRequest).toBeNull();
 
     signIn(owner);
     const ownerView = await call(detail.GET, 'GET', `/api/appointments/${ids.past}`, { id: ids.past });
@@ -317,6 +366,8 @@ suite('Square routes (database-backed)', () => {
     const conn = (await d.select().from(s.integrationConnections).where(eq(s.integrationConnections.provider, 'square')))[0]!;
     expect(conn).toMatchObject({ status: 'disconnected', accessTokenEncrypted: null, refreshTokenEncrypted: null });
     expect(await d.select().from(s.bookings)).toHaveLength(0);
+    // Stored Square webhook deliveries go too.
+    expect(await d.select().from(s.webhookEvents).where(eq(s.webhookEvents.provider, 'square'))).toHaveLength(0);
     const customer = (await d.select().from(s.customers).where(eq(s.customers.id, ids.customer)))[0]!;
     expect(customer).toMatchObject({ squareCustomerId: null, givenName: '', email: null });
     expect(customer.deletedAt).not.toBeNull();

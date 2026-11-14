@@ -105,7 +105,8 @@ export async function refreshChanges(
           pageUrl: next.pageUrl,
           updatedAt: input.now,
         })
-        .where(eq(t.id, row.id));
+        // Only while still open: an apply the owner approved meanwhile keeps the text the owner confirmed.
+        .where(and(eq(t.id, row.id), inArray(t.status, ['proposed', 'apply_failed'])));
       summary.refreshed++;
       continue;
     }
@@ -156,7 +157,7 @@ export async function refreshChanges(
         statusMessage: SUPERSEDE_MESSAGES[reason],
         updatedAt: input.now,
       })
-      .where(eq(t.id, row.id));
+      .where(and(eq(t.id, row.id), inArray(t.status, ['proposed', 'apply_failed'])));
     summary.superseded++;
   }
 
@@ -179,7 +180,7 @@ export async function refreshChanges(
         statusMessage: message,
         updatedAt: input.now,
       })
-      .where(eq(t.id, row.id));
+      .where(and(eq(t.id, row.id), eq(t.status, 'applied')));
     summary.verified++;
   }
   return summary;

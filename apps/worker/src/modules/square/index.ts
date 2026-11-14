@@ -1,4 +1,4 @@
-import { lt } from 'drizzle-orm';
+import { and, eq, isNotNull, lt } from 'drizzle-orm';
 import { schema } from '@studio/db';
 import { handleSquareAttendance } from '../../handlers/square-attendance.js';
 import { handleSquareAvailability } from '../../handlers/square-availability.js';
@@ -10,6 +10,11 @@ import { defineHandler, type WorkerModule } from '../types.js';
 
 /** Availability searches are kept for a day (design §5.3). */
 export const AVAILABILITY_SEARCH_TTL_MS = 24 * 3600_000;
+/**
+ * Processed Square webhook deliveries are kept this long (Square retries a delivery for up to three days, and the
+ * stored event id is what makes a retry a duplicate), then deleted. They only hold the minimal envelope.
+ */
+export const SQUARE_WEBHOOK_RETENTION_DAYS = 7;
 
 /**
  * Worker registrations of the Square appointments module (WP6 Tier 0: reads, webhooks, attendance; WP6b adds booking
@@ -46,6 +51,18 @@ export const squareModule: WorkerModule = {
           .where(lt(schema.squareAvailabilitySearches.createdAt, new Date(Date.now() - AVAILABILITY_SEARCH_TTL_MS)))
           .returning({ id: schema.squareAvailabilitySearches.id });
         return removed.length ? `${removed.length} old Square availability search${removed.length === 1 ? '' : 'es'} removed` : undefined;
+      },
+    },
+    {
+      name: 'square webhook deliveries',
+      run: async (ctx) => {
+        const t = schema.webhookEvents;
+        const cutoff = new Date(Date.now() - SQUARE_WEBHOOK_RETENTION_DAYS * 86_400_000);
+        const removed = await ctx.db
+          .delete(t)
+          .where(and(eq(t.provider, 'square'), isNotNull(t.processedAt), lt(t.receivedAt, cutoff)))
+          .returning({ id: t.id });
+        return removed.length ? `${removed.length} old Square webhook deliver${removed.length === 1 ? 'y' : 'ies'} removed` : undefined;
       },
     },
   ],

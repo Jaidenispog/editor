@@ -42,7 +42,7 @@ export const buildSquareIntegrations: IntegrationBuilder = (env, facts) => {
       const synced = sq?.lastSyncAt ? 'Bookings sync from Square every 10 minutes' : 'Fetching your bookings from Square';
       const hooks = r.webhooks === 'off' ? ' (webhooks aren’t set up, so changes arrive at the next sync)' : r.webhooks === 'quiet' ? ' (no webhook received for 3 days — check the subscription in Square)' : '';
       message = r.needsLocation
-        ? `Connected${name ? ` to ${name}` : ''}. Choose which Square location to show in Settings → Integrations.`
+        ? `Connected${name ? ` to ${name}` : ''}. Your Square account has more than one location: choose your studio’s location in Settings → Integrations. Bookings are copied once you do.`
         : `Connected${name ? ` to ${name}` : ''}. ${synced}${hooks}.${r.stale && sq?.lastSyncAt ? ' Bookings may be out of date: the last successful sync was over 30 minutes ago.' : ''}`;
     }
   }

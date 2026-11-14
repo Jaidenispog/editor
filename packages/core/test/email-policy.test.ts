@@ -4,7 +4,7 @@ import { autoPauseReason, classifyAudience, evaluateSendPolicy, foldConsent, spr
 /** Monday 16 November 2026, 11:00 am Melbourne (AEDT). */
 const NOW = new Date('2026-11-16T00:00:00Z');
 const DAY = 86_400_000;
-const completed = { status: 'ACCEPTED', completionSource: 'payment', completedAt: new Date(NOW.getTime() - 4 * 3600_000) };
+const completed = { status: 'ACCEPTED', completionSource: 'payment', completedAt: new Date(NOW.getTime() - 4 * 3600_000), squareEnvironment: 'production' };
 
 const input = (over: Partial<SendPolicyInput> = {}): SendPolicyInput => ({
   messageClass: 'campaign',
@@ -48,7 +48,7 @@ describe('evaluateSendPolicy: one case per reason code', () => {
     ['review_opt_out', { messageClass: 'review_request', customer: { deleted: false, reviewOptOut: true, squareEmailUnsubscribed: null } }, 'review_opt_out', 'cancelled'],
     ['review_link_missing', { messageClass: 'review_request', reviewLink: '' }, 'review_link_missing', 'failed'],
     ['review_link_invalid', { messageClass: 'review_request', reviewLink: 'https://g.page.evil.example/r/x' }, 'review_link_invalid', 'failed'],
-    ['booking_not_completed', { booking: { status: 'ACCEPTED', completionSource: 'none', completedAt: null } }, 'booking_not_completed', 'cancelled'],
+    ['booking_not_completed', { booking: { status: 'ACCEPTED', completionSource: 'none', completedAt: null, squareEnvironment: 'production' } }, 'booking_not_completed', 'cancelled'],
     ['booking_cancelled', { booking: { ...completed, status: 'CANCELLED_BY_SELLER' } }, 'booking_cancelled', 'cancelled'],
     ['booking_no_show', { booking: { ...completed, status: 'NO_SHOW' } }, 'booking_no_show', 'cancelled'],
     ['recently_asked', { messageClass: 'review_request', recentlyAsked: true }, 'recently_asked', 'cancelled'],
@@ -62,7 +62,7 @@ describe('evaluateSendPolicy: one case per reason code', () => {
   });
 
   it('the start time passing is never evidence (square_status rejected)', () => {
-    expect(codes(evaluateSendPolicy(input({ booking: { status: 'ACCEPTED', completionSource: 'square_status', completedAt: NOW } })))).toContain('booking_not_completed');
+    expect(codes(evaluateSendPolicy(input({ booking: { status: 'ACCEPTED', completionSource: 'square_status', completedAt: NOW, squareEnvironment: 'production' } })))).toContain('booking_not_completed');
   });
 
   it('accepts the owner’s attestation that the webhook exists only when Postmark could not tell', () => {

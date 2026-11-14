@@ -13,7 +13,7 @@ import {
   type ProviderReadiness,
   type SuppressionFact,
 } from '@studio/core';
-import { schema, type Database } from '@studio/db';
+import { genuinelyCompletedBookingWhere, schema, type Database } from '@studio/db';
 import type { Env } from '@studio/config';
 import type { DbTransaction } from '../connections.js';
 import { postmarkSettings } from './provider.js';
@@ -76,14 +76,7 @@ export async function completedVisitsFor(db: Db, emailLower: string): Promise<Da
     .select({ completedAt: schema.bookings.completedAt })
     .from(schema.bookings)
     .innerJoin(schema.customers, eq(schema.bookings.customerId, schema.customers.id))
-    .where(
-      and(
-        sql`lower(${schema.customers.email}) = ${emailLower}`,
-        eq(schema.bookings.status, 'ACCEPTED'),
-        inArray(schema.bookings.completionSource, ['payment', 'owner_marked']),
-        isNotNull(schema.bookings.completedAt),
-      ),
-    );
+    .where(and(sql`lower(${schema.customers.email}) = ${emailLower}`, genuinelyCompletedBookingWhere()));
   return rows.map((r) => r.completedAt).filter((d): d is Date => d instanceof Date);
 }
 

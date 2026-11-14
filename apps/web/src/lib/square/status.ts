@@ -1,5 +1,5 @@
 import 'server-only';
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import {
   AppError,
   BUSINESS_TIMEZONE,
@@ -181,8 +181,15 @@ export async function updateSquareSettings(
   if (body.locationId !== undefined) {
     const loc = config.snapshot?.locations.find((l) => l.id === body.locationId && l.status === 'ACTIVE');
     if (!loc) throw new AppError('VALIDATION', 'That location is not in your Square account.');
-    await db.update(t).set({ config: sql`${t.config} || ${JSON.stringify({ locationId: loc.id })}::jsonb`, updatedAt: new Date() }).where(eq(t.id, conn.id));
-    await writeAudit({ userId: user.id, action: 'integration.square.location_selected', entityType: 'integration_connection', entityId: conn.id, data: { locationId: loc.id } });
+    // Bookings of every other location are removed in the same transaction, under the connection row's lock (the lock
+    // the worker's writes take FOR SHARE), so a sync still running for the old choice cannot copy them back.
+    const removed = await db.transaction(async (tx) => {
+      await tx.select({ id: t.id }).from(t).where(eq(t.id, conn.id)).for('update');
+      await tx.update(t).set({ config: sql`${t.config} || ${JSON.stringify({ locationId: loc.id })}::jsonb`, updatedAt: new Date() }).where(eq(t.id, conn.id));
+      const b = schema.bookings;
+      return tx.delete(b).where(and(eq(b.squareEnvironment, config.environment), ne(b.locationId, loc.id))).returning({ id: b.id });
+    });
+    await writeAudit({ userId: user.id, action: 'integration.square.location_selected', entityType: 'integration_connection', entityId: conn.id, data: { locationId: loc.id, otherLocationBookingsRemoved: removed.length } });
     await queueSquareSync('manual');
   }
   if (body.serviceConfirmation) {
@@ -207,7 +214,8 @@ export async function updateSquareSettings(
 
 /**
  * Disconnect (design §4.1): the tokens are wiped and the row kept as `disconnected`; optionally every copied
- * booking and client is removed in the same transaction (customers are scrubbed, never deleted). Square is then
+ * booking and client (and every stored Square webhook delivery) is removed in the same transaction (customers are
+ * scrubbed, never deleted), under the connection row's lock so a running sync cannot write them back. Square is then
  * asked to revoke the app's access by `square.revoke`, which needs only the application secret.
  */
 export async function disconnectSquare(user: SessionUser, purgeData: boolean, db: Database = getDb()): Promise<{ status: 'disconnected'; revokeJobId: string | null; purged: boolean }> {
@@ -216,6 +224,9 @@ export async function disconnectSquare(user: SessionUser, purgeData: boolean, db
   if (!conn || conn.status === 'disconnected') throw new AppError('CONFLICT', 'Square is not connected.');
   const environment = parseSquareConfig(conn.config).environment;
   await db.transaction(async (tx) => {
+    // The same row lock the worker's mirror writes take FOR SHARE (withMirrorGuard): a sync still running waits for
+    // the purge and then sees "disconnected", so it can never write the purged bookings and clients back.
+    await tx.select({ id: t.id }).from(t).where(eq(t.id, conn.id)).for('update');
     await tx
       .update(t)
       .set({

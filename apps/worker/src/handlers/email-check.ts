@@ -4,6 +4,7 @@ import { newId, senderDomain, type JobPayload } from '@studio/core';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import { recordConnectionCheck } from '../lib/connections.js';
+import { enqueueTracked } from '../lib/jobs.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { defaultEmailDeps, postmarkSettings, type EmailDeps } from '../lib/email/provider.js';
 
@@ -73,4 +74,23 @@ export async function handleEmailProviderCheck(ctx: WorkerContext, run: TrackedR
     },
   });
   await run.progress(1, result.state === 'connected' ? `Postmark is ready (${result.deliveryType === 'sandbox' ? 'test server' : 'live'})` : result.message);
+}
+
+/** A start-up check is skipped when the last check is more recent than this (dev.sh restarts the worker often). */
+export const STARTUP_CHECK_MIN_GAP_MS = 10 * 60_000;
+/** One queued start-up check at a time (pg-boss refuses a second job with the same key while one waits). */
+export const STARTUP_CHECK_SINGLETON_KEY = 'email-provider-check:startup';
+
+/**
+ * At worker start-up: queues one read-only `email.provider.check` (a GET of Postmark's server, streams and webhooks;
+ * it never sends an email) when email sending is configured on the server, so the card is right straight after a
+ * deploy. Nothing is queued when email is not configured, when a check ran in the last 10 minutes, or while another
+ * start-up check is still waiting (singleton key). Returns the tracking job id, or null when nothing was queued.
+ */
+export async function queueStartupProviderCheck(ctx: WorkerContext, now: Date = new Date()): Promise<string | null> {
+  if (!postmarkSettings(ctx.env)) return null;
+  const row = await ctx.db.query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'postmark') });
+  const checkedAt = row?.capabilities['checkedAt'];
+  if (typeof checkedAt === 'string' && now.getTime() - Date.parse(checkedAt) < STARTUP_CHECK_MIN_GAP_MS) return null;
+  return enqueueTracked(ctx, 'email.provider.check', { reason: 'startup' }, { singletonKey: STARTUP_CHECK_SINGLETON_KEY });
 }

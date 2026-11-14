@@ -162,12 +162,17 @@ describe('deriveAttendance and completion', () => {
   const strong = { kind: 'strong' as const, paymentId: 'P1', score: 11, signals: ['customer', 'team_member'], confidence: 'high' as const };
   const weak = { kind: 'weak' as const, paymentId: 'P2', score: 1, signals: ['team_member'], confidence: 'low' as const };
   const b = (over: Partial<Parameters<typeof deriveAttendance>[0]> = {}) => ({ status: 'ACCEPTED', endAt: ended, ownerAttendance: null, missingFromSquareAt: null, match: null, ...over });
-  const complete = (over: Partial<Parameters<typeof deriveAttendance>[0]> = {}) => {
+  const complete = (over: Partial<Parameters<typeof deriveAttendance>[0]> = {}, environment = 'production') => {
     const input = b(over);
     const attendance = deriveAttendance(input, now);
-    const c = deriveCompletion({ ...input, attendance }, now);
-    return { attendance, ...c, genuine: isGenuinelyCompleted({ status: input.status, completionSource: c.source, completedAt: c.completedAt }) };
+    const c = deriveCompletion({ ...input, attendance, environment }, now);
+    return { attendance, ...c, genuine: isGenuinelyCompleted({ status: input.status, completionSource: c.source, completedAt: c.completedAt, squareEnvironment: environment }) };
   };
+
+  it('sandbox (test) bookings are labelled but never completed, so test data cannot start a real email', () => {
+    expect(complete({ match: strong }, 'sandbox')).toMatchObject({ attendance: 'payment_matched', completed: false, source: 'none', completedAt: null, genuine: false });
+    expect(complete({ ownerAttendance: 'attended' }, 'sandbox')).toMatchObject({ attendance: 'owner_attended', completed: false, source: 'none', genuine: false });
+  });
 
   it('future booking is upcoming and not completed', () => {
     expect(complete({ endAt: new Date(now.getTime() + HOUR) })).toMatchObject({ attendance: 'upcoming', completed: false, genuine: false });
@@ -196,7 +201,7 @@ describe('deriveAttendance and completion', () => {
   });
   it('keeps the first completion time', () => {
     const first = new Date(now.getTime() - 30 * MIN);
-    expect(deriveCompletion({ status: 'ACCEPTED', endAt: ended, missingFromSquareAt: null, ownerAttendance: null, attendance: 'payment_matched', completedAt: first }, now).completedAt).toEqual(first);
+    expect(deriveCompletion({ status: 'ACCEPTED', endAt: ended, missingFromSquareAt: null, ownerAttendance: null, attendance: 'payment_matched', completedAt: first, environment: 'production' }, now).completedAt).toEqual(first);
   });
 });
 

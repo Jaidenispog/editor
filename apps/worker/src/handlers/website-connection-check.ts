@@ -13,7 +13,7 @@ import { TransientAdapterError } from '../website/adapters/types.js';
 import { WordPressAdapter } from '../website/adapters/wordpress.js';
 import { defaultWebsiteDeps, type WebsiteDeps } from '../website/deps.js';
 import { resolveSafeAddress, systemResolver } from '../website/ssrf.js';
-import { splitWordPressCredential } from './website-edit-apply.js';
+import { splitWordPressCredential, wordPressContext } from './website-edit-apply.js';
 
 /**
  * `website.connection_check` (design §8): read-only. Search Console: refresh the token and list properties
@@ -115,7 +115,7 @@ async function checkWordPress(ctx: WorkerContext, run: TrackedRun, deps: Website
     throw new NonRetryableError('VALIDATION', 'The WordPress address points to a private or unknown address.');
   }
   const settings = await loadSettings(ctx);
-  const adapter = new WordPressAdapter(ctx, {
+  const adapter = new WordPressAdapter(wordPressContext(ctx, deps), {
     baseUrl,
     ...cred,
     publicWebsite: settings.business.website,

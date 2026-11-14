@@ -20,7 +20,7 @@ import {
   type SiteScope,
 } from '@studio/core';
 import { extractPage, type ExtractedPage } from './extract.js';
-import { RequestBudgetError, followRedirects, type FetchResult, type WebsiteFetcher } from './fetcher.js';
+import { MAX_POLITE_WAIT_MS, PoliteWaitBudgetError, RequestBudgetError, followRedirects, type FetchResult, type WebsiteFetcher } from './fetcher.js';
 import { IMAGE_HEADER_BYTES, imageWidthFromHeader } from './image-size.js';
 import { SITEMAP_MAX_BYTES, SITEMAP_MAX_URLS, parseSitemap, sitemapText } from './sitemap.js';
 
@@ -36,8 +36,8 @@ export const HTML_MAX_BYTES = 5 * 1024 * 1024;
 export const MAX_IMAGES_PER_PAGE = 60;
 export const MAX_IMAGES_TOTAL = 150;
 export const MAX_EXTERNAL_LINKS = 25;
-/** A check may spend at most this long waiting between requests because of `Crawl-delay`. */
-export const MAX_POLITE_WAIT_SECONDS = 12 * 60;
+/** A check may spend at most this long waiting between requests because of `Crawl-delay` (enforced by the fetcher). */
+export const MAX_POLITE_WAIT_SECONDS = MAX_POLITE_WAIT_MS / 1000;
 const SKIP_EXTENSIONS = /\.(pdf|jpe?g|png|gif|webp|avif|svg|ico|bmp|tiff?|mp4|mov|m4v|webm|avi|mp3|m4a|wav|ogg|zip|gz|tgz|rar|7z|docx?|xlsx?|pptx?|css|js|json|xml|txt)$/i;
 
 /** What a crawl needs. */
@@ -62,7 +62,7 @@ export interface CrawlOutput {
   /** Watched strings found on each page (normalised page URL → strings). */
   textHits: Map<string, Set<string>>;
   partialReasons: string[];
-  /** Our own product token (or `*`) is disallowed for the site root, so nothing else was fetched. */
+  /** Our own product token (or `*`) is disallowed for the site root, or robots.txt answered with a server error, so nothing else was fetched. */
   blockedByRobots: boolean;
 }
 
@@ -147,6 +147,8 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
     }
   };
   let budgetHit = false;
+  /** The polite-wait budget for the owner's site ran out: later owner-site requests are skipped, other hosts go on. */
+  let politeBudgetHit = false;
   const guarded = async <T>(fn: () => Promise<T>, fallback: T): Promise<T> => {
     if (budgetHit) return fallback;
     try {
@@ -154,6 +156,10 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
     } catch (err) {
       if (err instanceof RequestBudgetError) {
         budgetHit = true;
+        return fallback;
+      }
+      if (err instanceof PoliteWaitBudgetError) {
+        politeBudgetHit = true;
         return fallback;
       }
       throw err;
@@ -229,6 +235,18 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
     },
   });
 
+  if (robotsRes.final.status === null && robotsRes.final.error) {
+    // No HTTP answer at all for robots.txt (the address does not resolve, the connection is refused or times out, or
+    // the host is one the check never connects to): the site itself cannot be reached. A complete check with the one
+    // `site_unreachable` finding (design §4.2), not a robots.txt problem.
+    return {
+      facts: baseFacts([emptyPage(rootUrl, { error: robotsRes.final.error })], 'unknown'),
+      robotsText: null,
+      textHits: new Map(),
+      partialReasons,
+      blockedByRobots: false,
+    };
+  }
   if (robotsStatus === 'unreachable' || !allowedForUs(rootUrl)) {
     // Our token (or *) may not read the home page, or robots.txt is down (which means "read nothing"): stop here.
     if (robotsStatus !== 'unreachable') {
@@ -241,7 +259,7 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
         blockedByRobots: true,
       };
     }
-    partialReasons.push("Your robots.txt didn't answer, which asks search engines and tools not to read anything until it does, so we didn't check the pages.");
+    partialReasons.push("Your robots.txt answered with a server error, which asks search engines and tools not to read anything until it works, so we didn't check the pages.");
     return {
       facts: baseFacts([emptyPage(rootUrl, { skipped: 'robots' })], 'unknown'),
       robotsText: null,
@@ -507,7 +525,7 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
       }
       await input.progress(0.15 + 0.5 * (pages.length / maxPages), `Checking page ${pages.length + 1} of up to ${maxPages}…`);
       await guarded(() => fetchPage(next.url, next.depth), undefined);
-      if (budgetHit) break;
+      if (budgetHit || politeBudgetHit) break;
     }
     if (hitPageLimit) partialReasons.push(`We stopped at ${maxPages} pages.`);
 
@@ -718,6 +736,8 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
     }
 
     if (budgetHit) partialReasons.push('We stopped after 400 requests.');
+    if (politeBudgetHit)
+      partialReasons.push('Your robots.txt asks for a slow crawl (Crawl-delay), so to finish within 12 minutes we skipped some pages, images, files or link checks on your site.');
     const robotsSkipped = robotsFacts.blockedForUs.length;
     if (robotsSkipped)
       partialReasons.push(

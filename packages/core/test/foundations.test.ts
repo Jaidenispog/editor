@@ -26,7 +26,12 @@ describe('isGenuinelyCompleted', () => {
     ['accepted', 'payment', at, false],
   ];
   it.each(cases)('status %s, source %s, completedAt %s → %s', (status, completionSource, completedAt, expected) => {
-    expect(isGenuinelyCompleted({ status, completionSource, completedAt })).toBe(expected);
+    expect(isGenuinelyCompleted({ status, completionSource, completedAt, squareEnvironment: 'production' })).toBe(expected);
+  });
+  it('a sandbox (test) booking never counts as a real visit, whatever its stored completion', () => {
+    expect(isGenuinelyCompleted({ status: 'ACCEPTED', completionSource: 'payment', completedAt: at, squareEnvironment: 'sandbox' })).toBe(false);
+    expect(isGenuinelyCompleted({ status: 'ACCEPTED', completionSource: 'owner_marked', completedAt: at, squareEnvironment: 'sandbox' })).toBe(false);
+    expect(isGenuinelyCompleted({ status: 'ACCEPTED', completionSource: 'payment', completedAt: at, squareEnvironment: '' })).toBe(false);
   });
 });
 

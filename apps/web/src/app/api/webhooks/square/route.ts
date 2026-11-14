@@ -5,7 +5,7 @@ import { handlePublicApi } from '@/lib/api';
 import { getDb } from '@/lib/db';
 import { getEnv } from '@/lib/env';
 import { getLogger } from '@/lib/logger';
-import { SQUARE_SIGNATURE_HEADER, squareNotificationUrl, verifySquareSignature } from '@/lib/square/webhook';
+import { SQUARE_SIGNATURE_HEADER, squareNotificationUrl, squareWebhookEnvelope, verifySquareSignature } from '@/lib/square/webhook';
 import { readRawBody, storeWebhookEvent } from '@/lib/webhooks';
 
 /**
@@ -13,6 +13,10 @@ import { readRawBody, storeWebhookEvent } from '@/lib/webhooks';
  * exact registered address before anything is parsed. A bad signature is refused and NOT stored (a forged event id
  * could otherwise block the real one). A good delivery is stored once per Square event id and handed to
  * `webhook.process`, which only re-reads the object from Square. No Square call happens in the request.
+ *
+ * Only a minimal envelope is stored ({@link squareWebhookEnvelope}): the event id, type, merchant, time and the
+ * object's type and id. Square's copy of the object (a customer's name, email, phone, address, notes; booking notes;
+ * payment amounts) is never kept, because the worker re-reads the object from Square anyway.
  */
 export const POST = handlePublicApi(
   async ({ req }) => {
@@ -34,7 +38,7 @@ export const POST = handlePublicApi(
     if (typeof event.event_id !== 'string' || typeof event.type !== 'string' || typeof event.merchant_id !== 'string') {
       return NextResponse.json({ error: { code: 'VALIDATION', message: 'event_id, type and merchant_id are required.' } }, { status: 400 });
     }
-    const stored = await storeWebhookEvent({ provider: 'square', externalEventId: event.event_id, eventType: event.type, payload: event, signatureValid: true });
+    const stored = await storeWebhookEvent({ provider: 'square', externalEventId: event.event_id, eventType: event.type, payload: squareWebhookEnvelope(event), signatureValid: true });
     const t = schema.integrationConnections;
     await getDb()
       .update(t)

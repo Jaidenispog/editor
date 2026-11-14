@@ -196,12 +196,24 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   that started in the other environment.
 - **Webhook endpoint (built)**: `POST /api/webhooks/square` checks `x-square-hmacsha256-signature` =
   base64(HMAC-SHA256(key, notification URL + raw body)) with a timing-safe compare before parsing (body ≤ 256 KiB).
-  Invalid deliveries are refused and never stored; valid ones are stored once per event id. Payloads are hints only:
-  the worker ignores other merchants and re-reads every object from Square.
+  Invalid deliveries are refused and never stored; valid ones are stored once per event id as a minimal envelope
+  (event id, type, merchant, time, the object's type and id); Square's copy of the object (names, contact details,
+  address, notes, amounts) is dropped before anything is written. Payloads are hints only: the worker ignores other
+  merchants and re-reads every object from Square. Processed Square deliveries are deleted after 7 days
+  (`maintenance.cleanup`) and with every purge.
 - **Roles**: owner only for connect, disconnect, location, service confirmations and sync. Staff see bookings, client
   names, services and free times, and may mark attendance; client email/phone and booking notes are owner-only.
-- **Personal data**: only names, email, phone, Square ids and the email opt-out are copied. Disconnect offers a purge;
-  switching environment or Square account purges automatically; customers are scrubbed, never deleted. No Square data
+- **Personal data**: only names, email, phone, Square ids and the email opt-out are copied, and bookings only for the
+  studio's own Square location (none while the owner still has to choose between several; choosing one deletes the
+  other locations' copied bookings). Disconnect offers a purge (bookings, searches and stored Square webhook
+  deliveries deleted, customers scrubbed) under the connection row's lock: a sync, refresh or webhook job that is
+  still running checks the same lock before every write and stops, so it cannot copy the removed data back. Switching
+  environment or Square account purges automatically; customers are scrubbed, never deleted. A revoke queued by a
+  disconnect is skipped when the owner has already reconnected the same Square account (it would revoke the new
+  tokens).
+- **Test data never acts as real**: a booking copied from Square's sandbox never counts as a completed visit
+  (`deriveCompletion` stores none; `isGenuinelyCompleted` and every "real visit" query require `production`), so a
+  sandbox test booking can never start a follow-up, a review request or an inferred-consent visit. No Square data
   goes to an AI model. Square text (names, notes, error details) is rendered as text. Audit entries hold ids, codes and
   the environment, never names, contact details, notes or tokens.
 
@@ -222,6 +234,9 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   webhook credentials. Logs redact `X-Postmark-Server-Token`, `X-Goog-Api-Key` and hash email addresses; job payloads
   and audit entries hold ids and reason codes, never addresses or bodies.
 - **Rendering**: a Markdown subset with full escaping; previews in `<iframe sandbox srcdoc>` with no scripts.
+- **Withdrawn approval wins**: campaign expansion locks the campaign row before every insert and stops once the owner
+  pauses or cancels; pausing hands queued, unsubmitted messages back to `approved`; `email.send` re-checks the campaign
+  (under a share lock at the claim) and never sends while it is paused or cancelled.
 - **Retention**: `email_messages`, `consent_events` and `email_suppressions` are kept at least 24 months and survive a
   client's soft delete (suppressions must keep working). Processed Postmark webhook payloads are blanked after 90 days
   (`maintenance.cleanup`); their effects stay.
@@ -235,8 +250,12 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
 - **SSRF guard** (`apps/worker/src/website/ssrf.ts`, `fetcher.ts`): the crawler resolves every host and refuses it if
   any address is in 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.168/16, 198.18/15, multicast,
   reserved, ::1, fc00::/7, fe80::/10 or an IPv4-mapped private address; it connects to the checked address only (no
-  DNS rebinding), uses ports 80/443 only and re-validates every redirect. The owner-entered WordPress address goes
-  through the same resolver check. Only test code can allow loopback; no setting turns the guard off.
+  DNS rebinding), uses ports 80/443 only and re-validates every redirect. WordPress REST calls go through the same
+  guard (`guarded-fetch.ts`): resolved, checked and pinned on every call, https on 443 only, redirects never followed
+  (a 3xx is refused, so page content and the password are never re-sent elsewhere); the apply job checks the address
+  again before writing. Saving the WordPress address refuses private and reserved IP literals, `localhost` and local
+  network names. The ranges live in `packages/core/src/address-ranges.ts` (server-only). Only test code can allow
+  loopback; no setting turns the guard off.
 - **Fetched pages are data**: parsed with cheerio into capped fields, never executed; nothing on a page is followed
   except plain links in scope; React renders every string as text. The optional AI step wraps page text in a JSON
   field declared untrusted, uses structured output and drops options with ranking claims, other phone numbers or
@@ -245,6 +264,9 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   decrypted only in the worker, never echoed, logged or audited; HTTPS only. A dedicated Editor user is recommended
   (an Administrator gets a note). Disconnect wipes it; deleting the Application Password in WordPress revokes it.
 - **No live change without the owner**: connection checks are read-only; apply needs `approved_by` from the explicit
-  confirmation; a retry never writes twice (`already_applied`). Search Console is read-only (`webmasters.readonly`).
+  confirmation; a retry never writes twice: a durable marker (`apply_result.writeSentAt` and the SHA-256 of the content
+  the write was computed from) is stored before the write, and only that record, never the page text alone, decides
+  `already_applied`. Edits, AI drafts and audit refreshes change a prepared change only while it is still open, and an
+  approval holds only for the wording the dialog showed. Search Console is read-only (`webmasters.readonly`).
 - **Privacy**: checks store extracted facts, never page HTML or images. Search queries stay server-side and owner-only
   and can be deleted on disconnect ("Also delete stored search data").

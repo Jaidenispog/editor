@@ -1,13 +1,60 @@
 import { and, eq, isNull, sql } from 'drizzle-orm';
-import { bookingEndAt, deriveAttendance, deriveCompletion, newId, type OwnerAttendance, type PaymentMatch, type SquareEnvironmentName, type SquareSnapshot } from '@studio/core';
+import {
+  bookingEndAt,
+  deriveAttendance,
+  deriveCompletion,
+  effectiveLocationId,
+  newId,
+  parseSquareConfig,
+  type OwnerAttendance,
+  type PaymentMatch,
+  type SquareConnectionConfig,
+  type SquareEnvironmentName,
+  type SquareSnapshot,
+} from '@studio/core';
 import { schema, type Database } from '@studio/db';
+import type { DbTransaction } from '../lib/connections.js';
 import type { SquareBookingData, SquareCustomerData } from './api.js';
 
 /** A `bookings` row. */
 export type BookingRow = typeof schema.bookings.$inferSelect;
 
-/** What an upsert did. */
-export type UpsertOutcome = 'inserted' | 'updated' | 'unchanged' | 'stale';
+/** What an upsert did (`ignored`: a booking at a Square location other than the studio's, never copied). */
+export type UpsertOutcome = 'inserted' | 'updated' | 'unchanged' | 'stale' | 'ignored';
+
+/** The connection a job opened: copied rows are written only while it is still the live connection. */
+export interface MirrorOwner {
+  environment: SquareEnvironmentName;
+  merchantId: string;
+}
+
+/**
+ * The owner disconnected Square (or reconnected another account or environment) while a job was copying data. The
+ * job stops without writing: anything it wrote now could bring back client details the owner asked to remove.
+ */
+export class SquareConnectionChangedError extends Error {
+  constructor() {
+    super('Square was disconnected or changed while this was running, so nothing more was copied.');
+    this.name = 'SquareConnectionChangedError';
+  }
+}
+
+/**
+ * Runs one mirror write in a transaction that first takes `SELECT … FOR SHARE` on the `square` connection row and
+ * goes ahead only while it is still connected (or in a transient error state) for the same seller and environment.
+ * `disconnectSquare` and `storeSquareConnection` take the same row `FOR UPDATE` before purging, so a purge and a
+ * write can never interleave: a write either lands before the purge (and is purged) or sees the change and stops.
+ */
+export async function withMirrorGuard<T>(db: Database, owner: MirrorOwner, fn: (tx: DbTransaction, config: SquareConnectionConfig) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => {
+    const t = schema.integrationConnections;
+    const row = (await tx.select({ status: t.status, externalAccountId: t.externalAccountId, config: t.config }).from(t).where(eq(t.provider, 'square')).limit(1).for('share'))[0];
+    const config = parseSquareConfig(row?.config);
+    const live = row && (row.status === 'connected' || row.status === 'error') && row.externalAccountId === owner.merchantId && config.environment === owner.environment;
+    if (!live) throw new SquareConnectionChangedError();
+    return fn(tx, config);
+  });
+}
 
 /** The payment evidence stored on a booking, read back for re-derivation (null when none is stored). */
 export function storedMatch(evidence: Record<string, unknown> | null | undefined): PaymentMatch | null {
@@ -32,12 +79,13 @@ export function serviceNameFor(snapshot: SquareSnapshot | null, variationId: str
 
 /** Attendance, evidence and completion columns for a booking after a change in Square, a payment match or an owner mark. */
 export function derivedColumns(
-  b: { status: string; endAt: Date; ownerAttendance: OwnerAttendance | null; missingFromSquareAt: Date | null; completedAt: Date | null },
+  b: { status: string; endAt: Date; ownerAttendance: OwnerAttendance | null; missingFromSquareAt: Date | null; completedAt: Date | null; environment: string },
   match: PaymentMatch | null,
   now: Date,
 ): Pick<BookingRow, 'attendance' | 'attendanceEvidence' | 'completionSource' | 'completedAt'> {
   const attendance = deriveAttendance({ status: b.status, endAt: b.endAt, ownerAttendance: b.ownerAttendance, missingFromSquareAt: b.missingFromSquareAt, match }, now);
-  const completion = deriveCompletion({ status: b.status, endAt: b.endAt, missingFromSquareAt: b.missingFromSquareAt, ownerAttendance: b.ownerAttendance, attendance, completedAt: b.completedAt }, now);
+  // Sandbox (test) bookings are labelled but never completed: test data must never start a real email (completion.ts).
+  const completion = deriveCompletion({ status: b.status, endAt: b.endAt, missingFromSquareAt: b.missingFromSquareAt, ownerAttendance: b.ownerAttendance, attendance, completedAt: b.completedAt, environment: b.environment }, now);
   return {
     attendance,
     attendanceEvidence: match ? { kind: match.kind, paymentId: match.paymentId, score: match.score, signals: match.signals, confidence: match.confidence, matchedAt: now.toISOString() } : {},
@@ -50,8 +98,19 @@ export function derivedColumns(
  * Upserts one booking by its Square id (design §6.2). A stored version newer than Square's answer is kept (stale
  * reads never overwrite); the same version and update time leaves the row untouched apart from `synced_at`. The
  * owner's attendance mark and the stored payment evidence are kept, and attendance/completion are re-derived.
+ * Written only while `owner` is still the live connection ({@link withMirrorGuard}), and only for the studio's own
+ * Square location (the owner's choice, or the only active one): bookings of other locations, or any booking while
+ * the owner still has to choose, are `ignored`.
  */
-export async function upsertBooking(db: Database, b: SquareBookingData, environment: SquareEnvironmentName, snapshot: SquareSnapshot | null, now: Date = new Date()): Promise<UpsertOutcome> {
+export async function upsertBooking(db: Database, b: SquareBookingData, owner: MirrorOwner, snapshot: SquareSnapshot | null, now: Date = new Date()): Promise<UpsertOutcome> {
+  return withMirrorGuard(db, owner, (tx, config) => {
+    const locationId = effectiveLocationId(config);
+    if (!locationId || b.locationId !== locationId) return Promise.resolve('ignored' as const);
+    return upsertBookingIn(tx, b, owner.environment, snapshot, now);
+  });
+}
+
+async function upsertBookingIn(db: DbTransaction, b: SquareBookingData, environment: SquareEnvironmentName, snapshot: SquareSnapshot | null, now: Date): Promise<UpsertOutcome> {
   const t = schema.bookings;
   const existing = await db.query.bookings.findFirst({ where: eq(t.squareBookingId, b.id) });
   if (existing && existing.squareVersion > b.version) return 'stale';
@@ -65,7 +124,7 @@ export async function upsertBooking(db: Database, b: SquareBookingData, environm
   const first = b.segments[0];
   const customer = b.customerId ? await db.query.customers.findFirst({ where: eq(schema.customers.squareCustomerId, b.customerId), columns: { id: true } }) : undefined;
   const ownerAttendance = (existing?.ownerAttendance ?? null) as OwnerAttendance | null;
-  const derived = derivedColumns({ status: b.status, endAt, ownerAttendance, missingFromSquareAt: null, completedAt: existing?.completedAt ?? null }, storedMatch(existing?.attendanceEvidence), now);
+  const derived = derivedColumns({ status: b.status, endAt, ownerAttendance, missingFromSquareAt: null, completedAt: existing?.completedAt ?? null, environment }, storedMatch(existing?.attendanceEvidence), now);
   const values = {
     squareVersion: b.version,
     customerId: customer?.id ?? null,
@@ -98,9 +157,14 @@ export async function upsertBooking(db: Database, b: SquareBookingData, environm
 /**
  * Upserts one customer by its Square id. Only the Square-owned fields are written: consent, review opt-out,
  * unsubscribe and notes belong to other modules and are never touched. An older Square version never overwrites a
- * newer one. Bookings already mirrored for this customer are linked to the row.
+ * newer one. Bookings already mirrored for this customer are linked to the row. Written only while `owner` is still
+ * the live connection ({@link withMirrorGuard}).
  */
-export async function upsertCustomer(db: Database, c: SquareCustomerData, environment: SquareEnvironmentName, now: Date = new Date()): Promise<UpsertOutcome> {
+export async function upsertCustomer(db: Database, c: SquareCustomerData, owner: MirrorOwner, now: Date = new Date()): Promise<UpsertOutcome> {
+  return withMirrorGuard(db, owner, (tx) => upsertCustomerIn(tx, c, owner.environment, now));
+}
+
+async function upsertCustomerIn(db: DbTransaction, c: SquareCustomerData, environment: SquareEnvironmentName, now: Date): Promise<UpsertOutcome> {
   const t = schema.customers;
   const existing = await db.query.customers.findFirst({ where: eq(t.squareCustomerId, c.id) });
   if (existing && existing.squareVersion !== null && c.version !== null && existing.squareVersion > c.version) return 'stale';
@@ -145,7 +209,7 @@ export async function upsertCustomer(db: Database, c: SquareCustomerData, enviro
  */
 export async function applyAttendance(db: Database, row: BookingRow, match: PaymentMatch | null, now: Date = new Date()): Promise<boolean> {
   const endAt = row.endAt ?? new Date(row.startAt.getTime() + row.durationMinutes * 60_000);
-  const next = derivedColumns({ status: row.status, endAt, ownerAttendance: (row.ownerAttendance ?? null) as OwnerAttendance | null, missingFromSquareAt: row.missingFromSquareAt, completedAt: row.completedAt }, match, now);
+  const next = derivedColumns({ status: row.status, endAt, ownerAttendance: (row.ownerAttendance ?? null) as OwnerAttendance | null, missingFromSquareAt: row.missingFromSquareAt, completedAt: row.completedAt, environment: row.squareEnvironment }, match, now);
   const prevMatch = storedMatch(row.attendanceEvidence);
   const sameEvidence = (prevMatch?.paymentId ?? null) === (match?.paymentId ?? null) && (prevMatch?.kind ?? null) === (match?.kind ?? null);
   if (row.attendance === next.attendance && row.completionSource === next.completionSource && (row.completedAt?.getTime() ?? null) === (next.completedAt?.getTime() ?? null) && sameEvidence) return false;

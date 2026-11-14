@@ -12,6 +12,16 @@ import { isMelbourneDate } from './time.js';
 export const REVIEW_REQUEST_STATUSES = ['pending_approval', 'scheduled', 'sent', 'skipped', 'failed', 'cancelled'] as const;
 export type ReviewRequestStatus = (typeof REVIEW_REQUEST_STATUSES)[number];
 
+/** Owner-facing words for a review request's status (the Reviews page and the Appointments badge use the same). */
+export const REVIEW_REQUEST_STATUS_WORDS: Record<ReviewRequestStatus, string> = {
+  pending_approval: 'Waiting for approval',
+  scheduled: 'Scheduled',
+  sent: 'Sent',
+  skipped: 'Skipped',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
 /** Why a client was not asked. Fixed list; there is deliberately no "client unhappy" reason. */
 export const REVIEW_SKIP_REASONS = [
   'no_email',
@@ -60,7 +70,7 @@ export function validateReviewLink(url: string): { valid: boolean; message: stri
 
 /** The evidence that the appointment went ahead: a stored booking completion or the owner's attestation. */
 export type CompletionEvidence =
-  | { kind: 'booking'; booking: { status: string; completionSource: string; completedAt: Date | null } }
+  | { kind: 'booking'; booking: { status: string; completionSource: string; completedAt: Date | null; squareEnvironment: string } }
   | { kind: 'attestation'; visitDate: string; attestedBy: string };
 
 /**
@@ -139,3 +149,13 @@ export const SkipReviewRequestSchema = z
 export const ReviewLinkSchema = z.object({ url: z.string().trim().max(500) });
 export const PlaceIdSchema = z.object({ placeId: z.string().regex(/^[A-Za-z0-9_-]{10,300}$/, 'That Place ID looks wrong. Copy it from Google’s Place ID Finder.') });
 export const ConfirmPlaceSchema = z.object({ confirm: z.boolean() });
+
+/**
+ * The badge on a past booking (design §9.1): "Review request: Waiting for approval", "Review request: Sent",
+ * "Review request: Skipped — no email permission recorded", "Review request: Cancelled" and so on.
+ */
+export function reviewRequestBadgeLabel(status: string, skipReason: string | null): string {
+  const word = (REVIEW_REQUEST_STATUS_WORDS as Record<string, string>)[status] ?? status;
+  const reason = status === 'skipped' && skipReason ? (REVIEW_SKIP_LABELS as Record<string, string>)[skipReason] : undefined;
+  return `Review request: ${word}${reason ? ` — ${reason.charAt(0).toLowerCase()}${reason.slice(1)}` : ''}`;
+}

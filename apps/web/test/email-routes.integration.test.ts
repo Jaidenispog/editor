@@ -257,6 +257,21 @@ suite('Email and review routes (database-backed)', () => {
       expect(ok.status).toBe(200);
       expect(ok.json.campaign.status).toBe('approved');
       expect(await jobsOf('email.campaign.expand')).toHaveLength(1);
+
+      // Paused part-way through expansion (one message prepared, one queued for email.send): the queued one goes back
+      // to approved, and resuming expands again (it never adds a message twice) because expansion never finished.
+      const k = await customer();
+      const queuedId = randomUUID();
+      await db.insert(schema.emailMessages).values({ id: queuedId, customerId: k.id, toEmail: k.email, subject: 'Holiday hours', bodyHtml: '', bodyText: '', purpose: 'campaign', messageClass: 'campaign', origin: 'campaign', campaignId: id, dedupeKey: `campaign:${id}:${k.id}`, status: 'queued' });
+      const pause = await import('../src/app/api/email/campaigns/[id]/pause/route');
+      const resume = await import('../src/app/api/email/campaigns/[id]/resume/route');
+      expect((await call(pause.POST, 'POST', `/api/email/campaigns/${id}/pause`, { id }, {})).json.campaign.status).toBe('paused');
+      expect((await db.query.emailMessages.findFirst({ where: eq(schema.emailMessages.id, queuedId) }))?.status).toBe('approved');
+      expect((await call(resume.POST, 'POST', `/api/email/campaigns/${id}/resume`, { id }, {})).json.campaign.status).toBe('sending');
+      expect(await jobsOf('email.campaign.expand')).toHaveLength(2);
+      const cancel = await import('../src/app/api/email/campaigns/[id]/cancel/route');
+      expect((await call(cancel.POST, 'POST', `/api/email/campaigns/${id}/cancel`, { id }, {})).json.campaign.status).toBe('cancelled');
+      expect((await db.query.emailMessages.findFirst({ where: eq(schema.emailMessages.id, queuedId) }))?.status).toBe('cancelled');
     });
   });
 
