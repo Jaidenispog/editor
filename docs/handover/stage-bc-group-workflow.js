@@ -78,7 +78,14 @@ Return a plain-text report: merge commits, renumbered migrations, verification r
 const pkgs = args.packages
 phase('Build')
 log(`Group ${args.group}: building ${pkgs.map((p) => p.wp).join(', ')} in worktrees`)
-const reports = await parallel(pkgs.map((p) => () => agent(BUILD(p), { label: `build:${p.wp}`, phase: 'Build', schema: REPORT, isolation: 'worktree', effort: 'high' })))
+const RESUME = (p) => BUILD(p).replace(
+  'You run in your OWN git worktree. First run "pwd" and call that directory ROOT.',
+  `You CONTINUE work in an existing git worktree: ROOT is ${p.resumeWorktree} (branch ${p.resumeBranch}). Do not run "pwd" to find ROOT; use that path. A previous agent built part of ${p.wp} there and was stopped by a usage limit before verifying; its work is in the latest commit ("WIP: ${p.wp}…"). Start by reviewing that diff against the plan's Owns list and acceptance tests, keep what is sound, finish what is missing, fix what is wrong, then verify and commit as below (a normal commit on top of the WIP commit).`,
+)
+const reports = await parallel(pkgs.map((p) => () =>
+  p.resumeWorktree
+    ? agent(RESUME(p), { label: `resume:${p.wp}`, phase: 'Build', schema: REPORT, effort: 'high' })
+    : agent(BUILD(p), { label: `build:${p.wp}`, phase: 'Build', schema: REPORT, isolation: 'worktree', effort: 'high' })))
 const ordered = pkgs.map((p, i) => ({ wp: p.wp, migration: p.migration || null, report: reports[i] }))
 const missing = ordered.filter((o) => !o.report).map((o) => o.wp)
 if (missing.length) log(`No report from: ${missing.join(', ')} — the integrator will merge only the packages that reported a branch`)

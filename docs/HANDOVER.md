@@ -34,7 +34,7 @@ History of the background runs:
    `docs/handover/stage-bc-group-workflow.js` (args: `{ group, packages: [{ wp, migration, docs }] }`): each work
    package builds in its own worktree and commits there; an integration agent then merges in plan order in the main
    checkout, renumbers migrations, re-runs every check (incl. the Stage A browser test) and commits WITHOUT pushing.
-   The lead session reviews, pushes, then launches the next group. G0 (WP0 foundations) started 2026-11-14.
+   The lead session reviews, pushes, then launches the next group. G0 (WP0 foundations) started 2026-11-14, was stopped by the usage limit before committing; its work was saved as a WIP commit on branch `worktree-wf_733f80c8-1d0-1` (worktree `.claude/worktrees/wf_733f80c8-1d0-1`) and a resume agent was relaunched there (packages accept `resumeWorktree`/`resumeBranch` in the workflow args).
    Next: G1 = WP1 (music, migration "music") ∥ WP3 (trends, "trends"); G2 = WP2 ("preferences") ∥ WP4
    ("publishing"); G3 = WP5 (no migration) then Stage B acceptance; G4 = WP6 ("square") ∥ WP7 ("email_reviews") ∥
    WP8 ("website"); G5 = WP6b ("square_changes") ∥ WP9 ("business_profile") ∥ WP10 (none).
