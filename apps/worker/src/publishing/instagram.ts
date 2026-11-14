@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { CancelledError, formatDateTime, instagramPollDelaySeconds, manualStepMessage, methodVariantRefusal, validatePostLink, type TargetStatus } from '@studio/core';
+import { CancelledError, PREFERENCES_RECOMPUTE_DELAY_SEC, PREFERENCES_RECOMPUTE_KEY, formatDateTime, instagramPollDelaySeconds, manualStepMessage, methodVariantRefusal, validatePostLink, type TargetStatus } from '@studio/core';
 import { schema, type PublishProviderState } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import { writeWorkerAudit } from '../lib/audit.js';
@@ -286,7 +286,16 @@ async function readBack(ctx: WorkerContext, client: MetaGraphClient, igUserId: s
   const message = url
     ? `Published ${formatDateTime(new Date(), { dateStyle: undefined, timeStyle: 'short' })}`
     : 'Instagram reports this reel was published. Open Instagram to see it, or paste the link.';
-  await markPublishedByPlatform(ctx.db, target, { externalPostId: mediaId, publishedUrl: url, message });
+  const published = await markPublishedByPlatform(ctx.db, target, { externalPostId: mediaId, publishedUrl: url, message });
+  // The `publish` feedback event was just written: queue the debounced preferences recompute (as the web does after
+  // every owner action). A failure here never fails the publish; the nightly recompute catches up.
+  if (published) {
+    try {
+      await enqueueTracked(ctx, 'preferences.recompute', { reason: 'feedback' }, { singletonKey: PREFERENCES_RECOMPUTE_KEY, startAfterSeconds: PREFERENCES_RECOMPUTE_DELAY_SEC });
+    } catch (err) {
+      ctx.logger.warn({ err, targetId: target.id }, 'could not queue a preferences recompute; the nightly run will catch up');
+    }
+  }
 }
 
 /** `publish.poll` for an Instagram target: reads the container until it settles. */

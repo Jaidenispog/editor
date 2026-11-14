@@ -43,7 +43,7 @@ import { writeAudit } from './audit.js';
 import { encryptToken } from './crypto.js';
 import { getDb } from './db.js';
 import { getEnv } from './env.js';
-import { recordFeedback } from './feedback.js';
+import { recordFeedback, scheduleRecompute } from './feedback.js';
 import { createTrackedJob } from './jobs.js';
 import { getLogger } from './logger.js';
 import { downloadNameFor, maybeSignedUrl, signedUrlFor } from './media-links.js';
@@ -702,7 +702,7 @@ export async function confirmPosted(targetId: string, rawUrl: string | undefined
   if (!confirmable) throw new AppError('CONFLICT', 'This destination is not waiting for you to post it.');
   if (target.manualStep === 'check_before_retry') requireOwner(user);
   const now = new Date();
-  await db.transaction(async (tx) => {
+  const confirmed = await db.transaction(async (tx) => {
     const updated = await tx
       .update(schema.publishTargets)
       .set({
@@ -720,7 +720,10 @@ export async function confirmPosted(targetId: string, rawUrl: string | undefined
       .returning();
     if (updated[0]) await recordPublishedEffects(tx, updated[0], post, user.id);
     await refreshPostStatus(tx, post.id);
+    return Boolean(updated[0]);
   });
+  // A `publish` feedback event may have been written: queue the debounced preferences recompute (never throws).
+  if (confirmed) await scheduleRecompute();
   await writeAudit({ userId: user.id, action: 'publish.target.confirmed_manual', entityType: 'publish_target', entityId: target.id, data: { platform: target.platform, withLink: Boolean(url), from: target.manualStep } });
   return getPublishPost(post.id, user);
 }

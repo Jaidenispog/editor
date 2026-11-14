@@ -260,6 +260,8 @@ suite('Publishing routes (database-backed)', () => {
     const fb = await getDb().query.feedbackEvents.findMany({ where: and(eq(schema.feedbackEvents.type, 'publish'), eq(schema.feedbackEvents.editVersionId, ids.v1)) });
     expect(fb).toHaveLength(1);
     expect(fb[0]?.data).toMatchObject({ platform: 'instagram', method: 'manual', variant: 'standard' });
+    // The confirmation queues the debounced preferences recompute.
+    expect(await getDb().query.jobs.findMany({ where: eq(schema.jobs.type, 'preferences.recompute') })).not.toHaveLength(0);
     const usage = await getDb().query.musicUsage.findMany({ where: eq(schema.musicUsage.editVersionId, ids.v1) });
     expect(usage).toHaveLength(1);
     expect(usage[0]).toMatchObject({ purpose: 'publish', platform: 'instagram', trackId: ids.track });
