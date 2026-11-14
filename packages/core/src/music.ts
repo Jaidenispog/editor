@@ -135,9 +135,13 @@ export function licenceExpired(licence: Pick<MusicLicence, 'expiresAt'>, now: Da
 /** The chip shown on a track: confirmed, not confirmed, expired, or locked to Instagram and Facebook. */
 export type LicenceState = 'confirmed' | 'not_confirmed' | 'expired' | 'meta_only';
 
-/** The track's licence chip. Not confirmed wins over expired; the Meta lock is shown only for a usable licence. */
+/**
+ * The track's licence chip. Not confirmed wins over expired; the Meta lock is shown only for a usable licence. A
+ * track whose origin is "I'm not sure" (`unknown`) is never shown as confirmed, even after the owner ticked the rights
+ * box: its exports stay blocked ({@link musicClearanceFor}) until the licence type is recorded.
+ */
 export function licenceStateOf(licence: MusicLicence, now: Date = new Date()): LicenceState {
-  if (!licence.confirmedByOwnerAt) return 'not_confirmed';
+  if (!licence.confirmedByOwnerAt || normaliseLicence(licence).kind === 'unknown') return 'not_confirmed';
   if (licenceExpired(licence, now)) return 'expired';
   if (normaliseLicence(licence).destinationLock === 'meta_only') return 'meta_only';
   return 'confirmed';

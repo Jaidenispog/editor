@@ -244,3 +244,76 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   whether `business_management` is needed, the resumable size limit, quota and token expiry, `thumb_offset` with
   resumable upload, Sound Collection copyright matching, Web Share on iOS. The first verification post is a real public
   reel the owner chooses.
+
+## Stage B browser test
+
+`apps/web/e2e/stage-b.e2e.mjs` is the Stage B acceptance check from `docs/design/stage-bc-plan.md` ("music licence →
+export gates → publish manually and (with fakes) to Instagram → learned preferences visible → trends labelled"). Like
+the Stage A test it is plain Node + Playwright (Chromium), drives the real UI as the owner would and prints
+`N checks passed, 0 failed`.
+
+```bash
+bash apps/web/e2e/run-stage-b.sh                       # fresh database studio_e2e_b, build, port 3500
+E2E_SKIP_BUILD=1 bash apps/web/e2e/run-stage-b.sh      # reuse the last build
+```
+
+The runner creates and migrates a throwaway database, builds the web app (with `NODE_ENV=production`), then starts
+three detached processes: the local fake of Meta (`apps/web/e2e/fake-meta.ts`, on a free port or
+`E2E_FAKE_META_PORT`), `next start` and the worker. The web app and worker run with `NODE_ENV=test`, dummy
+`META_APP_ID` / `META_APP_SECRET` / `META_LOGIN_CONFIG_ID`, and `META_GRAPH_BASE_URL`, `META_RUPLOAD_BASE_URL` and
+`META_DIALOG_BASE_URL` all pointing at the fake; no `YOUTUBE_API_KEY`. Everything is stopped and the database dropped
+afterwards (logs and downloads are kept on failure or with `E2E_KEEP=1`). Other settings: `E2E_PG_URL`, `E2E_DB`,
+`E2E_PORT`, `E2E_WORK_DIR`.
+
+**What the fake replaces.** One process plays the three Meta hosts the app talks to, using WP4's Graph model
+(`apps/worker/test/fakes/graph-server.ts`, shared with the worker's tests): the Unified Login dialog on
+`www.facebook.com` (it "approves" at once and redirects back with a code), the code exchange
+(`oauth/access_token`), `debug_token`, account discovery, the publishing quota, the Reels container, the resumable
+upload on `rupload.facebook.com`, status and copyright polling, `media_publish` and the permalink, and the hashtag
+reads (`ig_hashtag_search`, `top_media`, three scripted posts). `GET /__fake/state` reports what was published and how
+often each endpoint was called. `META_DIALOG_BASE_URL` is the one configuration hook added for this test: like the
+other base URLs it is ignored unless `NODE_ENV=test`, so a deployment always sends the owner to
+`https://www.facebook.com` (unit tests in `apps/web/test/publishing.test.ts` and `packages/config/test/env.test.ts`).
+
+**What it covers** (database rows are read only where the UI cannot show them):
+
+- Honest states first: Instagram shows "Connect Instagram", the YouTube chart "Needs setup", the hashtag watch asks
+  for Instagram to be connected.
+- Music library: with no project yet, an upload explains that a project is needed (a deliberate 409). The synthetic
+  click track is uploaded through the licence passport as "I'm not sure" (rights box ticked): it is listed as "Not
+  confirmed" and "Origin not recorded", analysed at 120 BPM. CC BY-NC shows the refusal and cannot continue; nothing is
+  stored.
+- Export gates: five edits generated with that track; the card says "Music licence not confirmed — previews only";
+  "Export full quality" is refused with the licence message (a deliberate 409) and starts nothing; "Make a music-free
+  version" exports a 1080×1920 file without a music stream (ffprobe); no `music_usage` row. After "Licence details" →
+  "I made it, or I own the recording" with the rights confirmation, the standard export works (AAC stereo music) and
+  exactly one `music_usage` row (`export`, owner_upload snapshot) exists.
+- Meta-only music: a Meta Sound Collection track is locked to Instagram/Facebook; after the Sound panel switches one
+  edit to it, the composer offers TikTok only "Without music" ("With music" disabled) and labels Instagram "For
+  Instagram/Facebook upload only".
+- Manual posting: the composer starts empty ("Nothing is picked for you"), no edit is ticked in the picker, and both
+  platform switches start off. One exported edit goes to Instagram as "Post it yourself": the destination is "Your
+  turn" (not posted, no `publish` feedback and no ledger row) until "I've posted it"; the download is the 1080×1920
+  file with music and the caption to copy is the one written. After confirming it reads "Posted (you confirmed)" and
+  one `publish` feedback event and one `music_usage` (`publish`, instagram) row exist.
+- Instagram direct: "Connect Instagram" goes through the real connect route, the fake login dialog and the callback;
+  the read-only check finds `@ivanhoe_studio_test`; the token is stored encrypted. A first verification post is
+  approved; the worker uploads to the fake and publishes once; the destination is published with the fake's media id
+  and permalink; one `music_usage` row (`publish`, instagram). A second `publish.target` job for the same destination
+  (sent through `@studio/queue` by `apps/web/e2e/requeue-job.ts`) claims nothing and the fake still has one post. The
+  owner answers "Yes, it's there".
+- Trends: every curated reference shows its source and "last reviewed" date; a note is listed under "Noted by staff"
+  as "Noted by E2E Owner on …"; the hashtag `skinfade` is watched and its three posts are labelled "Top posts under
+  #skinfade — Instagram, fetched …" with counts "as Instagram reported them" and Instagram permalinks; one search and
+  one `top_media` read at the fake; no popularity words (trending, viral, popular …) on any of these.
+- Learned preferences: three favourites and a download give a learned "Default length" (10 seconds) with its evidence
+  ("From 3 favourites …"); "Keep this" makes it "Set by you"; "Reset what it learned" leaves nothing marked "Learned".
+- No page errors or console errors except the two deliberate 409s above (each must actually appear).
+
+**Not verified without real accounts.** Everything Meta-specific stays unproven until the owner's own accounts are
+used (publishing design §11.4 and the WP5 notes above): whether a Unified Login system-user configuration may publish
+in Development mode and search hashtags, the real permission names, the resumable size limit, quota and token expiry,
+`thumb_offset`, Sound Collection copyright matching, real container processing times and errors, and how Instagram
+renders the reel. The fake answers the documented happy path immediately. Manual posting in the real Instagram and
+TikTok apps, Web Share on iOS, the YouTube chart (no key), and how learned defaults feel after weeks of real use are not
+covered either; all footage and music are synthetic.

@@ -2,9 +2,13 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 
 /**
- * A local fake of the two Meta hosts the worker calls (graph.facebook.com and rupload.facebook.com), for tests only.
- * It plays the documented Instagram Reels flow (memo §4) with a scripted scenario and records every call, so tests
- * can assert that nothing is published twice. No real Meta endpoint is ever contacted.
+ * A local fake of the Meta hosts the app calls (graph.facebook.com, rupload.facebook.com and the www.facebook.com
+ * login dialog), for tests only. It plays the documented Instagram Reels flow (memo §4), the Unified Login code
+ * exchange and the hashtag reads (`ig_hashtag_search`, `top_media`) with a scripted scenario and records every call,
+ * so tests can assert that nothing is published twice. No real Meta endpoint is ever contacted.
+ *
+ * Used in-process by the worker's tests and, through `apps/web/e2e/fake-meta.ts`, as a separate process by the
+ * Stage B browser test (which reads `GET /__fake/state`).
  */
 
 /** A Graph error the fake answers with. */
@@ -40,9 +44,28 @@ export interface GraphScenario {
   dropAfterPublish: boolean;
   /** Accept the upload body but never answer (to interrupt a run mid-upload). */
   hangUpload: boolean;
+  /** The code the fake login dialog hands back and `oauth/access_token` accepts (exchanged for `token`). */
+  oauthCode: string;
+  /** `top_media` rows per hashtag (lower case, no `#`); a hashtag not listed gets {@link defaultTopMedia}. */
+  topMedia: Record<string, Array<Record<string, unknown>>>;
 }
 
-export type Endpoint = 'debug_token' | 'assigned' | 'ig_user' | 'limit' | 'create' | 'upload' | 'status' | 'copyright' | 'publish' | 'permalink' | 'media_list';
+export type Endpoint =
+  | 'debug_token'
+  | 'assigned'
+  | 'ig_user'
+  | 'limit'
+  | 'create'
+  | 'upload'
+  | 'status'
+  | 'copyright'
+  | 'publish'
+  | 'permalink'
+  | 'media_list'
+  | 'dialog'
+  | 'access_token'
+  | 'hashtag_search'
+  | 'top_media';
 
 /** One recorded request. */
 export interface GraphCall {
@@ -98,7 +121,36 @@ export function defaultScenario(): GraphScenario {
     failOnce: {},
     dropAfterPublish: false,
     hangUpload: false,
+    oauthCode: 'fake-oauth-code',
+    topMedia: {},
   };
+}
+
+/** Three plain posts for a hashtag nobody scripted (ids are digits, links are Instagram permalinks). */
+export function defaultTopMedia(hashtag: string, now: Date = new Date()): Array<Record<string, unknown>> {
+  const day = 86_400_000;
+  return [1, 2, 3].map((n) => ({
+    id: `1795${String(hashtagId(hashtag)).slice(-6)}${n}`,
+    media_type: n === 2 ? 'CAROUSEL_ALBUM' : 'VIDEO',
+    permalink: `https://www.instagram.com/p/Fake${hashtag.replace(/[^a-z0-9]/gi, '')}${n}/`,
+    timestamp: new Date(now.getTime() - n * day).toISOString(),
+    like_count: 100 * n,
+    comments_count: 3 * n,
+  }));
+}
+
+/** A stable numeric hashtag id for a name (Instagram's ids are digits). */
+export function hashtagId(hashtag: string): string {
+  let h = 17;
+  for (const ch of hashtag) h = (h * 31 + ch.charCodeAt(0)) % 1_000_000_007;
+  return `1784${String(h).padStart(10, '0')}`;
+}
+
+/** Options for where the fake listens. */
+export interface FakeGraphListenOptions {
+  /** 0 (default) picks a free port. */
+  port?: number;
+  host?: string;
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -116,12 +168,17 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-/** Starts the fake on 127.0.0.1 (random port). Use `url` for both META_GRAPH_BASE_URL and META_RUPLOAD_BASE_URL. */
-export async function startFakeGraphServer(initial: Partial<GraphScenario> = {}): Promise<FakeGraphServer> {
+/**
+ * Starts the fake on 127.0.0.1 (a free port unless one is given). Use `url` for META_GRAPH_BASE_URL,
+ * META_RUPLOAD_BASE_URL and META_DIALOG_BASE_URL.
+ */
+export async function startFakeGraphServer(initial: Partial<GraphScenario> = {}, listen: FakeGraphListenOptions = {}): Promise<FakeGraphServer> {
   let scenario: GraphScenario = { ...defaultScenario(), ...initial };
   const calls: GraphCall[] = [];
   const containers = new Map<string, Container>();
   const published: FakeGraphServer['published'] = [];
+  /** Hashtag ids handed out by `ig_hashtag_search`, with their names. */
+  const searched = new Map<string, string>();
   let seq = 1;
 
   const server: Server = createServer((req, res) => {
@@ -133,8 +190,15 @@ export async function startFakeGraphServer(initial: Partial<GraphScenario> = {})
       const form = req.method === 'POST' && !isUpload ? Object.fromEntries(new URLSearchParams(raw.toString('utf8'))) : {};
       const parts = u.pathname.split('/').filter(Boolean);
       const call: GraphCall = { endpoint: 'unknown', method: req.method ?? 'GET', path: u.pathname, query, form, headers: req.headers, bytes: raw.length };
+      if (u.pathname === '/__fake/state') {
+        // Test-only read-out for a harness in another process (the Stage B browser test).
+        const counts: Record<string, number> = {};
+        for (const c of calls) counts[c.endpoint] = (counts[c.endpoint] ?? 0) + 1;
+        return send(res, 200, { published, counts, containers: containers.size });
+      }
       calls.push(call);
-      const token = query['access_token'] ?? form['access_token'];
+      const authHeader = typeof req.headers['authorization'] === 'string' ? req.headers['authorization'] : '';
+      const token = query['access_token'] ?? form['access_token'] ?? (authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined);
       const once = (e: Endpoint): boolean => {
         call.endpoint = e;
         const f = scenario.failOnce[e];
@@ -163,6 +227,27 @@ export async function startFakeGraphServer(initial: Partial<GraphScenario> = {})
       if (parts[0] !== scenario.version) return graphError(res, { code: 2500, message: `Unknown version ${parts[0] ?? ''}` });
       const path = parts.slice(1);
 
+      if (path[0] === 'dialog' && path[1] === 'oauth') {
+        // The Unified Login dialog: the owner "approves" at once and Meta sends them back with a code.
+        call.endpoint = 'dialog';
+        const redirect = query['redirect_uri'] ?? '';
+        if (!query['client_id'] || !query['config_id'] || query['response_type'] !== 'code' || !/^https?:\/\//.test(redirect)) {
+          return graphError(res, { code: 100, message: 'Invalid login dialog parameters' });
+        }
+        const back = new URL(redirect);
+        back.searchParams.set('code', scenario.oauthCode);
+        if (query['state'] !== undefined) back.searchParams.set('state', query['state']);
+        res.writeHead(302, { location: back.toString() });
+        res.end();
+        return;
+      }
+      if (path[0] === 'oauth' && path[1] === 'access_token') {
+        if (once('access_token')) return;
+        if (!query['client_id'] || !query['client_secret'] || !query['redirect_uri'] || query['code'] !== scenario.oauthCode) {
+          return graphError(res, { code: 100, message: 'Invalid verification code format.' });
+        }
+        return send(res, 200, { access_token: scenario.token, token_type: 'bearer' });
+      }
       if (path[0] === 'debug_token') {
         if (once('debug_token')) return;
         return send(res, 200, {
@@ -183,7 +268,21 @@ export async function startFakeGraphServer(initial: Partial<GraphScenario> = {})
         if (once('assigned')) return;
         return send(res, 200, { data: scenario.assignedAccounts });
       }
+      if (path[0] === 'ig_hashtag_search') {
+        if (once('hashtag_search')) return;
+        const q = (query['q'] ?? '').toLowerCase();
+        if (query['user_id'] !== scenario.igUserId || !q) return graphError(res, { code: 100, message: 'user_id and q are required' });
+        searched.set(hashtagId(q), q);
+        return send(res, 200, { data: [{ id: hashtagId(q) }] });
+      }
       const id = path[0] ?? '';
+      if (path[1] === 'top_media') {
+        if (once('top_media')) return;
+        const tag = searched.get(id) ?? Object.keys(scenario.topMedia).find((t) => hashtagId(t) === id) ?? null;
+        if (!tag) return graphError(res, { code: 100, subcode: 33, message: 'Unknown hashtag id' });
+        const rows = scenario.topMedia[tag] ?? defaultTopMedia(tag);
+        return send(res, 200, { data: rows.slice(0, Number(query['limit'] ?? 25)) });
+      }
       if (path[1] === 'content_publishing_limit') {
         if (once('limit')) return;
         return send(res, 200, { data: [{ quota_usage: scenario.quotaUsage, config: { quota_total: scenario.quotaTotal, quota_duration: 86400 } }] });
@@ -246,7 +345,10 @@ export async function startFakeGraphServer(initial: Partial<GraphScenario> = {})
       if (!res.headersSent) send(res, 500, { error: { message: String(err), code: 1 } });
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(listen.port ?? 0, listen.host ?? '127.0.0.1', resolve);
+  });
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}`,

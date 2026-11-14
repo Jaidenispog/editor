@@ -311,7 +311,11 @@ export function MusicTab({ tracks, maxUploadBytes }: { tracks: MusicTrackSummary
                         </div>
                       ) : null}
                     </dl>
-                    {info.help ? <p className="mt-2 text-sm text-charcoal-600">{info.help}</p> : null}
+                    {state === 'not_confirmed' && t.licenceConfirmed ? (
+                      <p className="mt-2 text-sm text-charcoal-600">Previews only: open “Licence details” and choose where this track is from before edits with it can be exported.</p>
+                    ) : info.help ? (
+                      <p className="mt-2 text-sm text-charcoal-600">{info.help}</p>
+                    ) : null}
                   </div>
                   <div className="flex shrink-0 flex-wrap gap-1.5">
                     <Button variant={state === 'confirmed' || state === 'meta_only' ? 'ghost' : 'secondary'} size="sm" onClick={() => setEditing(t)} aria-label={`Licence details for ${t.title}`}>

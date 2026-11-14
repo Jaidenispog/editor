@@ -235,6 +235,9 @@ describe('status payload shaping', () => {
     expect(dto.music[0]).toMatchObject({ bpm: 120, licenceConfirmed: true, licenceSummary: 'Licence confirmed · Instagram, TikTok' });
     expect(dto.music[1]).toMatchObject({ licenceConfirmed: false, licenceSummary: 'Licence not confirmed' });
     expect(licenceSummary({ ...licence, expiresAt: '2020-01-01T00:00:00Z' })).toBe('Licence expired');
+    // "I'm not sure" with the rights box ticked is never summarised as a confirmed licence (its exports are blocked).
+    expect(licenceSummary({ ...licence, kind: 'unknown' })).toBe('Origin not recorded · previews only');
+    expect(shapeMusicOption(track('t9', { licence: { ...licence, kind: 'unknown' } }))).toMatchObject({ licenceConfirmed: true, licenceState: 'not_confirmed' });
   });
 
   it('reports busy while work is happening and idle when everything has settled', async () => {

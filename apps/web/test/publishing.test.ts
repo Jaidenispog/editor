@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { testOnlyBaseUrl } from '@studio/config';
 import { buildPublishingIntegrations } from '../src/lib/integrations/publishing';
+import { META_DIALOG_HOST, buildMetaAuthUrl } from '../src/lib/publishing';
 import { publishingRefId } from '../src/lib/jobs/publishing';
 import { defaultRefId } from '../src/lib/jobs';
 import { addVideo, buildCreateRequest, draftProblems, initialDraft } from '../src/components/publishing/composer-state';
@@ -38,6 +40,25 @@ describe('publishing integration cards (design §5.3)', () => {
     expect(err.state).toBe('error');
     expect(err.message).toContain("Instagram didn't tell us which account to use.");
     expect(find(buildPublishingIntegrations(env, conn('disconnected')), 'instagram').state).toBe('not_connected');
+  });
+});
+
+describe('Meta login dialog address', () => {
+  const input = { version: 'v26.0', appId: 'app', configId: 'cfg', redirectUri: 'https://studio.example/api/integrations/instagram/callback', state: 'st' };
+
+  it("goes to Meta's own host unless a test-only dialog host is set under NODE_ENV=test", () => {
+    expect(META_DIALOG_HOST).toBe('https://www.facebook.com');
+    const real = new URL(buildMetaAuthUrl(input));
+    expect(real.origin + real.pathname).toBe('https://www.facebook.com/v26.0/dialog/oauth');
+    expect(Object.fromEntries(real.searchParams)).toEqual({ client_id: 'app', redirect_uri: input.redirectUri, config_id: 'cfg', response_type: 'code', override_default_response_type: 'true', state: 'st' });
+    // A stray META_DIALOG_BASE_URL in production or development changes nothing.
+    for (const NODE_ENV of ['production', 'development'] as const) {
+      const u = new URL(buildMetaAuthUrl({ ...input, dialogBase: testOnlyBaseUrl({ NODE_ENV }, 'http://127.0.0.1:4555') }));
+      expect(u.origin).toBe('https://www.facebook.com');
+    }
+    const fake = new URL(buildMetaAuthUrl({ ...input, dialogBase: testOnlyBaseUrl({ NODE_ENV: 'test' }, 'http://127.0.0.1:4555/') }));
+    expect(fake.origin + fake.pathname).toBe('http://127.0.0.1:4555/v26.0/dialog/oauth');
+    expect(fake.searchParams.get('state')).toBe('st');
   });
 });
 

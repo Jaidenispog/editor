@@ -80,10 +80,12 @@ export async function shapeAsset(asset: MediaAsset, sign: LinkSigner): Promise<A
   };
 }
 
-/** Plain one-line summary of what a music licence covers. */
+/** Plain one-line summary of what a music licence covers (the same states as the licence chip, `licenceStateOf`). */
 export function licenceSummary(licence: MusicLicence): string {
-  if (!licence.confirmedByOwnerAt) return 'Licence not confirmed';
-  if (licence.expiresAt && new Date(licence.expiresAt).getTime() < Date.now()) return 'Licence expired';
+  const state = licenceStateOf(licence);
+  // "I'm not sure" with the rights box ticked: usable in previews, never shown as a confirmed licence.
+  if (state === 'not_confirmed') return licence.confirmedByOwnerAt ? 'Origin not recorded · previews only' : 'Licence not confirmed';
+  if (state === 'expired') return 'Licence expired';
   const places = (
     [
       ['instagram', 'Instagram'],

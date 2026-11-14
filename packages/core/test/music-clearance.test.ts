@@ -128,6 +128,14 @@ describe('musicClearanceFor', () => {
     expect(licenceStateOf(licence({ kind: 'meta_sound_collection' }), NOW)).toBe('meta_only');
   });
 
+  it('never labels an "I\'m not sure" track as confirmed, because its exports stay blocked', () => {
+    const unsure = licence({ kind: 'unknown', source: '', planName: '' });
+    expect(unsure.confirmedByOwnerAt).not.toBeNull();
+    expect(musicClearanceFor(unsure, NOW).state).toBe('blocked');
+    expect(licenceStateOf(unsure, NOW)).toBe('not_confirmed');
+    expect(licenceStateOf({ ...unsure, kind: 'owner_upload' }, NOW)).toBe('confirmed');
+  });
+
   it('keeps the cross-post check for publishing', () => {
     expect(checkMusicForPlatforms(licence(), ['instagram', 'tiktok']).ok).toBe(true);
     const meta = checkMusicForPlatforms(licence({ kind: 'meta_sound_collection', permitted: { tiktok: true } }), ['instagram', 'tiktok']);
