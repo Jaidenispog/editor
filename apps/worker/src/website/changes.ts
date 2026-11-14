@@ -2,6 +2,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import {
   OPEN_EDIT_STATUSES,
   WebsiteChangeSchema,
+  clearWriteMarker,
   editDedupeKey,
   normaliseUrl,
   observeChange,
@@ -18,6 +19,7 @@ import {
   type WebsiteEditSource,
   type WebsiteEditStatus,
 } from '@studio/core';
+import { changeHash } from '@studio/core/website-approval';
 import { schema, type Database } from '@studio/db';
 import type { DbTransaction } from '../lib/connections.js';
 
@@ -94,10 +96,13 @@ export async function refreshChanges(
       if (row.status !== 'proposed' && row.status !== 'apply_failed') continue; // approved or applying: leave alone
       const current = WebsiteChangeSchema.safeParse(row.proposedChange);
       const next = current.success ? refreshChange(current.data, row.source as WebsiteEditSource, parsed.data) : parsed.data;
+      // A write marker belongs to the change it was recorded for: a refresh that changes the change drops it.
+      const same = current.success && changeHash(current.data) === changeHash(next);
       await tx
         .update(t)
         .set({
           proposedChange: next,
+          ...(same ? {} : { applyResult: clearWriteMarker(row.applyResult) }),
           findingKey: p.findingKey,
           auditId: input.auditId,
           title: p.title,

@@ -1,6 +1,6 @@
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import type Anthropic from '@anthropic-ai/sdk';
-import { CancelledError, checkCopyClaims } from '@studio/core';
+import { CancelledError, checkCopyClaims, unsupportedFactClaims } from '@studio/core';
 import type { Logger } from 'pino';
 import { z } from 'zod';
 import { createAnthropicClient, mapAnthropicError, usageFrom, type AnthropicMessagesClient, type StructuredResponse } from './anthropic/client.js';
@@ -10,8 +10,9 @@ import type { AiCallOptions, AiUsage } from './types.js';
 /**
  * Optional AI wording for a website page title or search description (website design §6.7). Runs only when the owner
  * presses "Suggest wording"; one Haiku call per click. Page text is untrusted data inside a JSON field, the answer is
- * schema-constrained, and every option is checked again by `checkCopyClaims`: an option that fails is dropped, and a
- * refusal, running out of tokens or an unreadable answer gives no options (never a fallback guess).
+ * schema-constrained, and every option is checked again by `checkCopyClaims` and, when the page is known, by
+ * `unsupportedFactClaims` (no number the AI was not given): an option that fails is dropped, and a refusal, running
+ * out of tokens or an unreadable answer gives no options (never a fallback guess).
  */
 
 /** Default model (memo §10: Claude Haiku 5.5). `AI_WEBSITE_MODEL` overrides it. */
@@ -144,8 +145,31 @@ export class AnthropicWebsiteCopywriter implements WebsiteCopywriter {
   }
 }
 
-/** Keeps at most three distinct options that pass `checkCopyClaims` for the task. */
-export function filterCopyOptions(options: string[], input: Pick<WebsiteCopyInput, 'task' | 'facts'>): string[] {
+/** Everything the AI was given, as text: the only place a number in its wording may come from. */
+function suppliedText(input: Pick<WebsiteCopyInput, 'facts' | 'page'>): Array<string | null> {
+  const f = input.facts;
+  const p = input.page;
+  return [
+    f.businessName,
+    f.suburb,
+    f.state,
+    f.tagline,
+    f.phone,
+    f.phone.replace(/\D/g, ''),
+    p.url,
+    p.currentTitle,
+    p.currentDescription,
+    ...p.h1.slice(0, 3),
+    p.textSample ? p.textSample.slice(0, WEBSITE_COPY_SAMPLE_MAX) : null,
+  ];
+}
+
+/**
+ * Keeps at most three distinct options that pass `checkCopyClaims` for the task and, when the page is given, carry no
+ * number (a year, price, count or "ten years") that is not in what the AI was given.
+ */
+export function filterCopyOptions(options: string[], input: Pick<WebsiteCopyInput, 'task' | 'facts'> & Partial<Pick<WebsiteCopyInput, 'page'>>): string[] {
+  const sources = input.page ? suppliedText({ facts: input.facts, page: input.page }) : null;
   const out: string[] = [];
   for (const raw of options) {
     const option = raw.replace(/\s+/g, ' ').trim();
@@ -158,6 +182,7 @@ export function filterCopyOptions(options: string[], input: Pick<WebsiteCopyInpu
       }).length
     )
       continue;
+    if (sources && unsupportedFactClaims(option, sources).length) continue;
     out.push(option);
     if (out.length === 3) break;
   }

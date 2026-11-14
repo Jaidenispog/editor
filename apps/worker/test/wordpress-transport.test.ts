@@ -82,7 +82,7 @@ describe('guarded WordPress transport', () => {
     );
     seen.length = 0;
     expect(await adapter.check(signal)).toMatchObject({ ok: false, problem: WP_MESSAGES.redirected });
-    await expect(adapter.write({ resourceType: 'page', resourceId: '12', link: 'http://wp.example.com.au/contact/', current: 'a' }, 'b', signal)).rejects.toBeInstanceOf(AdapterRedirectError);
+    await expect(adapter.write({ resourceType: 'page', resourceId: '12', link: 'http://wp.example.com.au/contact/', current: 'a', modifiedGmt: null }, 'b', signal)).rejects.toBeInstanceOf(AdapterRedirectError);
     // Only the two requests to the WordPress host itself; the redirect targets were never contacted.
     expect(seen.map((s) => s.url)).toEqual(['/wp-json/', '/wp-json/wp/v2/pages/12']);
   });

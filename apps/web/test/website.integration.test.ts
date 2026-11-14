@@ -324,4 +324,142 @@ suite('Website routes (database-backed)', () => {
     expect(after.json.groups.local.impressions).toBe(180);
     expect((await call(perf.GET, 'GET', '/api/website/search-performance?range=1y')).status).toBe(400);
   });
+
+  it('binds an approval to the old text, the new text and the destination; keeps audit text short; new wording drops a write marker', async () => {
+    const { getDb } = await import('../src/lib/db');
+    const { schema } = await import('@studio/db');
+    const { eq } = await import('drizzle-orm');
+    const { approvalHash } = await import('@studio/core/website-approval');
+    const apply = await import('../src/app/api/website/edits/[id]/apply/route');
+    const patch = await import('../src/app/api/website/edits/[id]/route');
+    const choose = await import('../src/app/api/website/edits/[id]/choose-draft/route');
+    await getDb()
+      .update(schema.integrationConnections)
+      .set({ status: 'connected', config: { baseUrl: 'https://staging.ivanhoebarber.example.com.au' }, capabilities: { supportedKinds: 'text_replace,image_alt_text', environment: 'staging' } })
+      .where(eq(schema.integrationConnections.provider, 'website'));
+    const page = 'https://www.ivanhoebarber.example.com.au/about/';
+    const long = `${'Fades, tapers and beard trims for every age in Ivanhoe. '.repeat(5)}Since 2015.`;
+    const change = { kind: 'text_replace' as const, pageUrl: page, before: long, after: long.replace('2015', '2016') };
+    const id = randomUUID();
+    const marker = { writeSentAt: '2026-11-14T03:00:00.000Z', preWriteHash: 'a'.repeat(64), changeHash: 'b'.repeat(64), resourceId: '12', outcome: 'error' as const, message: 'x' };
+    await getDb().insert(schema.websiteEdits).values({ id, title: 'About', pageUrl: page, proposedChange: change, status: 'apply_failed', applyResult: marker, aiOptions: ['Option one'] });
+    const destination = { host: 'staging.ivanhoebarber.example.com.au', environment: 'staging' };
+    // The old text the dialog showed is no longer the change's (a check refreshed it): 409, nothing approved.
+    const staleBefore = await call(apply.POST, 'POST', `/api/website/edits/${id}/apply`, { confirm: true, expectedAfter: change.after, expectedBefore: 'something else', expectedDestination: destination }, { id });
+    expect(staleBefore.status).toBe(409);
+    // The dialog showed another WordPress site (the connection was saved again since): 409.
+    const otherSite = await call(
+      apply.POST,
+      'POST',
+      `/api/website/edits/${id}/apply`,
+      { confirm: true, expectedAfter: change.after, expectedBefore: change.before, expectedDestination: { host: 'old.ivanhoebarber.example.com.au', environment: 'staging' } },
+      { id },
+    );
+    expect(otherSite.status).toBe(409);
+    expect(otherSite.json.error.message).toMatch(/WordPress connection changed/);
+    expect((await getDb().query.websiteEdits.findFirst({ where: eq(schema.websiteEdits.id, id) }))?.status).toBe('apply_failed');
+    const ok = await call(apply.POST, 'POST', `/api/website/edits/${id}/apply`, { confirm: true, expectedAfter: change.after, expectedBefore: change.before, expectedDestination: destination }, { id });
+    expect(ok.status).toBe(202);
+    const approved = await getDb().query.websiteEdits.findFirst({ where: eq(schema.websiteEdits.id, id) });
+    // The approval is stored beside the earlier attempt's marker (the worker decides with both).
+    expect(approved?.applyResult).toMatchObject({
+      ...marker,
+      approvalHash: approvalHash(change, { baseUrl: 'https://staging.ivanhoebarber.example.com.au', environment: 'staging' }),
+    });
+    const requested = await getDb().select().from(schema.auditLog).where(eq(schema.auditLog.action, 'website.edit.apply_requested'));
+    const entry = requested.find((r) => r.entityId === id)?.data as { before: string; after: string };
+    expect(long.length).toBeGreaterThan(200);
+    expect(entry.before).toHaveLength(200);
+    expect(entry.after).toHaveLength(200);
+
+    // Back to apply_failed with a marker (as the worker leaves it): new wording, or an AI option, drops the marker.
+    await getDb().update(schema.websiteEdits).set({ status: 'apply_failed', applyResult: marker }).where(eq(schema.websiteEdits.id, id));
+    const longer = `${long} Walk-ins welcome. `.repeat(3).trim();
+    expect((await call(patch.PATCH, 'PATCH', `/api/website/edits/${id}`, { after: longer.slice(0, 480) }, { id })).status).toBe(200);
+    const patched = await getDb().query.websiteEdits.findFirst({ where: eq(schema.websiteEdits.id, id) });
+    expect(patched?.applyResult).toEqual({ resourceId: '12', outcome: 'error', message: 'x' });
+    const edited = await getDb().select().from(schema.auditLog).where(eq(schema.auditLog.action, 'website.edit.edited'));
+    expect((edited.find((r) => r.entityId === id)?.data as { after: string }).after).toHaveLength(200);
+    await getDb().update(schema.websiteEdits).set({ applyResult: marker }).where(eq(schema.websiteEdits.id, id));
+    expect((await call(choose.POST, 'POST', `/api/website/edits/${id}/choose-draft`, { index: 0 }, { id })).status).toBe(200);
+    const chosen = await getDb().query.websiteEdits.findFirst({ where: eq(schema.websiteEdits.id, id) });
+    expect(chosen?.applyResult.writeSentAt).toBeUndefined();
+    expect(chosen?.applyResult.changeHash).toBeUndefined();
+  });
+
+  it('an edit or AI option that loses the race to an apply never changes the wording the owner approved', async () => {
+    const { getDb } = await import('../src/lib/db');
+    const { schema } = await import('@studio/db');
+    const { eq } = await import('drizzle-orm');
+    const patch = await import('../src/app/api/website/edits/[id]/route');
+    const choose = await import('../src/app/api/website/edits/[id]/choose-draft/route');
+    const page = 'https://www.ivanhoebarber.example.com.au/prices/';
+    const change = { kind: 'meta_description' as const, pageUrl: page, before: null, after: 'Prices for fades, tapers and beard trims at Ivanhoe Barber Co in Ivanhoe, VIC.' };
+    // A second connection holds the row the way the apply does (approve, then the worker's claim) and commits only once
+    // the edit is waiting on it: the edit read "proposed" before, and must still not overwrite the approved wording.
+    const race = async (status: 'approved' | 'applying', edit: (id: string) => Promise<{ status: number; json: any }>) => {
+      const id = randomUUID();
+      await getDb().insert(schema.websiteEdits).values({ id, title: 'Prices', pageUrl: page, proposedChange: change, aiOptions: ['A different description for the prices page, written by the AI step for Ivanhoe.'] });
+      const other = new pg.Client({ connectionString: process.env.DATABASE_URL });
+      await other.connect();
+      try {
+        await other.query('BEGIN');
+        await other.query(`UPDATE website_edits SET status = $1, approved_by = $2, approved_at = now() WHERE id = $3`, [status, owner.id, id]);
+        const pending = edit(id);
+        let blocked = false;
+        // Wait until the edit's conditional UPDATE is blocked on this transaction's row lock (statistics are a snapshot
+        // inside a transaction, so it is cleared before each look).
+        for (let i = 0; i < 200; i++) {
+          await other.query('SELECT pg_stat_clear_snapshot()');
+          const waiting = await other.query(
+            `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query ILIKE 'update "website_edits"%'`,
+          );
+          if (waiting.rows[0].n > 0) {
+            blocked = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        expect(blocked).toBe(true);
+        await other.query('COMMIT');
+        const res = await pending;
+        expect(res.status).toBe(409);
+        expect(res.json.error.message).toMatch(/being applied/);
+      } finally {
+        await other.end();
+      }
+      const row = await getDb().query.websiteEdits.findFirst({ where: eq(schema.websiteEdits.id, id) });
+      expect(row?.status).toBe(status);
+      expect(row?.proposedChange).toEqual(change);
+    };
+    for (const status of ['approved', 'applying'] as const) {
+      await race(status, (id) =>
+        call(patch.PATCH, 'PATCH', `/api/website/edits/${id}`, { after: 'An owner rewrite of the prices page description for Ivanhoe Barber Co, VIC.' }, { id }),
+      );
+      await race(status, (id) => call(choose.POST, 'POST', `/api/website/edits/${id}/choose-draft`, { index: 0 }, { id }));
+    }
+  });
+
+  it('disconnecting Search Console with "Also delete stored search data" removes every stored property’s rows', async () => {
+    const { getDb } = await import('../src/lib/db');
+    const { schema } = await import('@studio/db');
+    const { eq } = await import('drizzle-orm');
+    const gsc = await import('../src/app/api/integrations/google-search-console/route');
+    const row = (property: string) => ({
+      id: randomUUID(),
+      source: 'search_console' as const,
+      property,
+      granularity: 'day' as const,
+      periodStart: '2026-11-09',
+      kind: 'total' as const,
+      key: '',
+      clicks: 1,
+      impressions: 10,
+      position: 5,
+    });
+    // Rows from the chosen property and from one chosen earlier (choosing another property keeps old rows).
+    await getDb().insert(schema.searchMetrics).values([row('https://other.example/'), row('sc-domain:ivanhoebarber.example.com.au')]);
+    expect((await call(gsc.DELETE, 'DELETE', '/api/integrations/google-search-console?deleteData=true')).status).toBe(202);
+    expect(await getDb().select().from(schema.searchMetrics).where(eq(schema.searchMetrics.source, 'search_console'))).toEqual([]);
+  });
 });

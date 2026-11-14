@@ -134,6 +134,15 @@ export class WebsiteFetcher {
     if (seconds !== null && seconds * 1000 > this.intervalMs) this.intervalMs = Math.round(seconds * 1000);
   }
 
+  /**
+   * How many more requests to the owner's site fit in the polite-wait budget at the current gap (the first request to
+   * the site costs no gap). Lets a crawl keep budget for what matters most (the home page) before optional requests.
+   */
+  get ownerRequestsLeft(): number {
+    const spacing = Math.floor((MAX_POLITE_WAIT_MS - this.ownerSpacingMs) / Math.max(1, this.intervalMs));
+    return (this.ownerRequests === 0 ? 1 : 0) + Math.max(0, spacing);
+  }
+
   /** Current gap between requests to the owner's site, in milliseconds. */
   get politeIntervalMs(): number {
     return this.intervalMs;

@@ -64,6 +64,11 @@ export interface CrawlOutput {
   partialReasons: string[];
   /** Our own product token (or `*`) is disallowed for the site root, or robots.txt answered with a server error, so nothing else was fetched. */
   blockedByRobots: boolean;
+  /**
+   * The home page was not read although the site answers: a very long Crawl-delay left no budget for it, or it
+   * forwards to an address robots.txt asks us not to read. There are no findings then, only the partial reason.
+   */
+  homeNotRead: boolean;
 }
 
 function pathOf(url: string): string {
@@ -189,14 +194,21 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
     robots = ROBOTS_DISALLOW_ALL;
     robotsStatus = 'unreachable';
   }
-  const crawlDelay = crawlDelayFor(robots, AUDIT_PRODUCT_TOKEN);
+  let crawlDelay = crawlDelayFor(robots, AUDIT_PRODUCT_TOKEN);
   fetcher.setCrawlDelay(crawlDelay);
-  if (crawlDelay && crawlDelay * (maxPages + 15) > MAX_POLITE_WAIT_SECONDS) {
-    maxPages = Math.max(1, Math.floor(MAX_POLITE_WAIT_SECONDS / crawlDelay) - 15);
-    partialReasons.push('Your robots.txt asks for a slow crawl, so we checked fewer pages.');
-  }
-  const allowedForUs = (u: string) => isAllowed(robots, AUDIT_PRODUCT_TOKEN, pathOf(u));
-  const allowedForGoogle = (u: string) => isAllowed(robots, 'Googlebot', pathOf(u));
+  /** robots.txt applies per host: the www./bare twin has its own (read below, before any page on it). */
+  let twinRobots: ParsedRobots = ROBOTS_DISALLOW_ALL;
+  const robotsForUrl = (u: string): ParsedRobots => {
+    try {
+      return new URL(u).hostname.toLowerCase() === scope.twinHost && scope.twinHost !== scope.host ? twinRobots : robots;
+    } catch {
+      return robots;
+    }
+  };
+  const allowedForUs = (u: string) => isAllowed(robotsForUrl(u), AUDIT_PRODUCT_TOKEN, pathOf(u));
+  const allowedForGoogle = (u: string) => isAllowed(robotsForUrl(u), 'Googlebot', pathOf(u));
+  /** In scope and allowed for us: what a page fetch, and every redirect hop of it, may go to. */
+  const mayRead = (u: string) => inScope(u) && allowedForUs(u);
   const robotsSitemaps = robots.sitemaps.filter((s) => inScope(s)).slice(0, 10);
   const googlebotBlocksHome = robotsStatus === 'ok' && !allowedForGoogle(rootUrl);
   const robotsFacts: CrawlFacts['robots'] = {
@@ -245,6 +257,7 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
       textHits: new Map(),
       partialReasons,
       blockedByRobots: false,
+      homeNotRead: false,
     };
   }
   if (robotsStatus === 'unreachable' || !allowedForUs(rootUrl)) {
@@ -257,6 +270,7 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
         textHits: new Map(),
         partialReasons,
         blockedByRobots: true,
+        homeNotRead: false,
       };
     }
     partialReasons.push("Your robots.txt answered with a server error, which asks search engines and tools not to read anything until it works, so we didn't check the pages.");
@@ -266,11 +280,48 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
       textHits: new Map(),
       partialReasons,
       blockedByRobots: true,
+      homeNotRead: false,
     };
   }
   input.checkCancelled();
 
-  // 2. Host variants (redirects not followed; Location recorded).
+  // The polite-wait budget goes first to what the check cannot do without: the home page (one request kept back for
+  // it), then the twin host's robots.txt, then the optional host-variant requests.
+  const affordable = (requests: number) => fetcher.ownerRequestsLeft >= requests + 1;
+  const slowCrawlSkipped: string[] = [];
+
+  // 1b. The twin host's robots.txt (www. or bare), read before any page there is fetched.
+  if (scope.twinHost !== scope.host) {
+    const twinRes = affordable(1)
+      ? await guarded(
+          () =>
+            followRedirects(fetcher, `${scope.scheme}://${scope.twinHost}/robots.txt`, {
+              method: 'GET',
+              maxBytes: ROBOTS_MAX_BYTES,
+              accept: 'text/plain,*/*;q=0.1',
+              signal,
+              allowHop: sameSite,
+            }),
+          null,
+        )
+      : null;
+    if (!twinRes) slowCrawlSkipped.push(`pages on ${scope.twinHost}`);
+    else {
+      const twinOutcome = twinRes.final.error ? 'disallow_all' : robotsOutcomeForStatus(twinRes.final.status);
+      // Unreadable (no answer, 5xx): read nothing on that host, as for the main one.
+      twinRobots = twinOutcome === 'parse' ? parseRobots((twinRes.final.body ?? Buffer.alloc(0)).toString('utf8')) : twinOutcome === 'allow_all' ? ROBOTS_ALLOW_ALL : ROBOTS_DISALLOW_ALL;
+      const twinDelay = crawlDelayFor(twinRobots, AUDIT_PRODUCT_TOKEN);
+      if (twinDelay !== null && (crawlDelay === null || twinDelay > crawlDelay)) crawlDelay = twinDelay;
+      fetcher.setCrawlDelay(crawlDelay);
+    }
+  }
+  robotsFacts.crawlDelaySec = crawlDelay;
+  if (crawlDelay && crawlDelay * (maxPages + 15) > MAX_POLITE_WAIT_SECONDS) {
+    maxPages = Math.max(1, Math.floor(MAX_POLITE_WAIT_SECONDS / crawlDelay) - 15);
+    partialReasons.push('Your robots.txt asks for a slow crawl, so we checked fewer pages.');
+  }
+
+  // 2. Host variants (redirects not followed; Location recorded). Skipped when they would use the home page's budget.
   await input.progress(0.05, 'Checking your web addresses…');
   const variants: CrawlFacts['hostVariants'] = [];
   for (const url of [
@@ -279,9 +330,13 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
     `http://${scope.twinHost}${scope.pathPrefix}`,
     `https://${scope.twinHost}${scope.pathPrefix}`,
   ]) {
+    if (!affordable(1)) {
+      if (!slowCrawlSkipped.includes('your other web addresses (http and www)')) slowCrawlSkipped.push('your other web addresses (http and www)');
+      continue;
+    }
     const res = await guarded(async () => {
       let r = await fetcher.request(url, { method: 'HEAD', signal });
-      if (r.status === 405 || r.status === 501)
+      if ((r.status === 405 || r.status === 501) && affordable(1))
         r = await fetcher.request(url, {
           method: 'GET',
           maxBytes: 1024,
@@ -295,6 +350,8 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
       redirectsTo: res?.location ? (normaliseUrl(res.location, url) ?? res.location).slice(0, 500) : null,
     });
   }
+  if (slowCrawlSkipped.length)
+    partialReasons.push(`Your robots.txt asks for a very slow crawl (Crawl-delay), so to finish within 12 minutes we didn't check ${slowCrawlSkipped.join(' or ')}.`);
 
   // 3. Site root, then sitemap discovery.
   await input.progress(0.08, 'Reading your home page…');
@@ -376,10 +433,18 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
       method: 'GET',
       maxBytes: HTML_MAX_BYTES,
       signal,
-      allowHop: inScope,
+      // Every hop: in scope, and allowed by that host's robots.txt (a page may forward to a disallowed one).
+      allowHop: mayRead,
     });
     const f = res.final;
     const chain = res.chain.map((u) => u.slice(0, 500)).slice(0, 6);
+    if (res.leftScope && inScope(res.leftScope)) {
+      // Forwarded to an address robots.txt asks us not to read: that address is never requested.
+      const target = normaliseUrl(res.leftScope) ?? res.leftScope;
+      if (robotsFacts.blockedForUs.length < 50 && !robotsFacts.blockedForUs.includes(target.slice(0, 500))) robotsFacts.blockedForUs.push(target.slice(0, 500));
+      if (skippedPages.length < 15) skippedPages.push(emptyPage(url, { skipped: 'robots', status: f.status, redirectChain: chain }));
+      return;
+    }
     if (res.leftScope) {
       if (skippedPages.length < 15)
         skippedPages.push(
@@ -480,8 +545,27 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
   };
 
   try {
-    await fetchPage(normaliseUrl(rootUrl) ?? rootUrl, 0);
+    // Guarded like every other owner-site request: a polite-wait budget that runs out here ends the check as partial.
+    await guarded(() => fetchPage(normaliseUrl(rootUrl) ?? rootUrl, 0), undefined);
     queued.add(normaliseUrl(rootUrl) ?? rootUrl);
+    const homeSkip = pages.length === 0 ? skippedPages.find((p) => p.skipped === 'robots') : undefined;
+    if (pages.length === 0 && (politeBudgetHit || budgetHit || homeSkip)) {
+      partialReasons.push(
+        homeSkip
+          ? "Your home page forwards to an address your robots.txt asks automated tools not to read, so we didn't check your pages."
+          : "Your robots.txt asks for a very slow crawl (Crawl-delay), so we couldn't read your home page within the check's 12-minute limit.",
+      );
+      const facts = baseFacts([homeSkip ?? emptyPage(rootUrl, { skipped: 'page_limit' })], 'unknown');
+      facts.hostVariants = variants;
+      return {
+        facts,
+        robotsText: robotsText?.slice(0, 5000) ?? null,
+        textHits,
+        partialReasons,
+        blockedByRobots: false,
+        homeNotRead: true,
+      };
+    }
     const home = pages[0];
     if (!home || home.status === null || home.status >= 500) {
       const facts = baseFacts(pages.length ? pages : [emptyPage(rootUrl, { error: 'No answer' })], 'unknown');
@@ -492,6 +576,7 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
         textHits,
         partialReasons,
         blockedByRobots: false,
+        homeNotRead: false,
       };
     }
     // Sitemap: robots.txt entries in scope, else /sitemap.xml, else /sitemap_index.xml.
@@ -728,7 +813,7 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
             method: 'GET',
             maxBytes: 256 * 1024,
             signal,
-            allowHop: inScope,
+            allowHop: mayRead,
           }),
         null,
       );
@@ -786,6 +871,7 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
       textHits,
       partialReasons,
       blockedByRobots: false,
+      homeNotRead: false,
     };
   } catch (err) {
     if (err instanceof RequestBudgetError) throw new Error('The request budget was exceeded outside a guarded step');

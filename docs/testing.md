@@ -448,10 +448,14 @@ All with fakes; nothing contacts a real website, WordPress or Google.
 - **Unit** (`pnpm -r test`): `packages/core/test/{robots,website-scope,website-checks,classify-query,
   website-suggestions,change-lifecycle}.test.ts` (RFC 9309 cases, scope/normalisation, one fixture per check plus a
   clean fixture, prioritisation, query groups, suggestions, `checkCopyClaims`, instructions, dedupe/refresh/supersede);
-  `packages/ai/test/website-copy.test.ts` (fake Anthropic client); `apps/worker/test/{website-ssrf,extract,
-  wordpress-adapter,search-console}.test.ts` (blocked ranges incl. IPv4-mapped IPv6, redirect to a private address,
-  pinned DNS, polite spacing; HTML fixtures incl. a hostile page; fake WordPress REST API; recorded-shape Search
-  Console responses); `apps/web/test/website.test.ts` (card states, apply availability, read-time grouping, settings).
+  `packages/ai/test/website-copy.test.ts` (fake Anthropic client; options with numbers the AI was not given are
+  dropped); `packages/core/test/address-ranges.test.ts` (names that resolve to private addresses refused on save);
+  `apps/worker/test/{website-ssrf,website-crawl,extract,wordpress-adapter,search-console}.test.ts` (blocked ranges incl.
+  IPv4-mapped IPv6 and the IPv6 ranges that embed IPv4 (NAT64, 6to4, Teredo, ::/96), redirect to a private address,
+  pinned DNS, polite spacing; a fake-clock crawl with `Crawl-delay: 300` and `600` that ends partial with the home
+  page read (never a thrown budget error), a redirect to a robots-disallowed address never followed, the www. twin's
+  own robots.txt, a home page forwarding to a disallowed address; HTML fixtures incl. a hostile page; fake WordPress
+  REST API; recorded-shape Search Console responses); `apps/web/test/website.test.ts` (card states, apply availability, read-time grouping, settings).
 - **Database** (`TEST_DATABASE_URL`): `apps/worker/test/website-db.test.ts` runs `website.audit` against a local
   fixture site (`apps/worker/test/helpers/fixture-site.ts`: robots.txt with a disallowed folder, `Crawl-delay: 1`, a
   gzip sitemap behind an index, a 404 and a redirect in the sitemap, `noindex`, a redirect chain, a redirect off the
@@ -463,10 +467,19 @@ All with fakes; nothing contacts a real website, WordPress or Google.
   no apply without approval; an unreachable site (refused, unresolvable) → complete check with one critical
   `site_unreachable`; robots.txt 503 → `robots_unreachable` and nothing else read; a long Crawl-delay keeps the total
   wait under 12 minutes. `apps/worker/test/wordpress-adapter.test.ts` adds the durable apply marker (a deletion whose
-  write landed is `already_applied` on the retry; a first attempt never short-circuits on the new text);
+  write landed is `already_applied` on the retry; a first attempt never short-circuits on the new text; a marker never
+  counts for re-worded text; a refused write is flagged and a page edited later never leaves the change stuck; the
+  page is re-read right before the write and nothing is written when it changed; image descriptions with `<`, `>`, `&`
+  and quotes read back as applied). The database suite also covers the worker side: a refused write leaves no
+  marker, a landed write's marker never turns re-worded text into "applied", and the worker refuses an approval whose
+  change or WordPress destination changed;
   `wordpress-transport.test.ts` the guarded WordPress transport (private/metadata addresses refused, https on 443
   only, redirects never followed, a redirecting REST API refused). Fake Google: token refresh, `sites.list` auto-select, 16-month backfill, idempotent
-  upsert, `invalid_grant` → `needs_reauth`. `apps/web/test/website.integration.test.ts` covers the routes.
+  upsert, `invalid_grant` → `needs_reauth`. `apps/web/test/website.integration.test.ts` covers the routes, including
+  the approval bound to the old text and the destination, audit text trimmed to 200 characters, new wording dropping
+  a write marker, a deterministic lock-interleaving test (a second connection holds the row as the apply does) proving
+  an edit or AI option never overwrites the wording once the change is `approved`/`applying`, and "Also delete stored
+  search data" removing every property's rows.
 - **Smoke test on a real site you own** (never in CI): `pnpm --filter @studio/worker exec tsx
   scripts/website-smoke.ts --audit https://your-site/ --i-own-this-site` prints the request log and findings and
   writes nothing. Then, with the owner present: connect Search Console and compare one 28-day total with the Search

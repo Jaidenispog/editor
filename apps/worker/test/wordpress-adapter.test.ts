@@ -1,8 +1,19 @@
 import pino from 'pino';
 import { describe, expect, it } from 'vitest';
 import type { WebsiteChange } from '@studio/core';
+import { changeHash } from '@studio/core/website-approval';
 import { WP_MESSAGES, WordPressAdapter } from '../src/website/adapters/wordpress.js';
-import { CHANGED_SINCE_EARLIER_WRITE, applyChange, computeNextContent, contentHash, type PriorWrite, type WriteRecord } from '../src/website/apply.js';
+import {
+  CHANGED_SINCE_EARLIER_WRITE,
+  CHANGED_WHILE_APPLYING,
+  applyChange,
+  changePresent,
+  computeNextContent,
+  contentHash,
+  decodeAttr,
+  type PriorWrite,
+  type WriteRecord,
+} from '../src/website/apply.js';
 import { fakeWordPress } from './fakes/wordpress.js';
 
 const logger = pino({ level: 'silent' });
@@ -44,8 +55,8 @@ function memoryRecord(): WriteRecord & { saved: PriorWrite | null } {
     get prior() {
       return r.saved;
     },
-    beforeWrite: async (target, preWriteHash) => {
-      r.saved = { resourceId: target.resourceId, preWriteHash };
+    beforeWrite: async (target, preWriteHash, hash) => {
+      r.saved = { resourceId: target.resourceId, preWriteHash, changeHash: hash };
       return true;
     },
   };
@@ -115,7 +126,7 @@ describe('WordPress adapter (fake REST API)', () => {
       verification: 'confirmed_api',
       wrote: true,
     });
-    expect(record.saved).toEqual({ resourceId: '12', preWriteHash: contentHash(contact.raw) });
+    expect(record.saved).toEqual({ resourceId: '12', preWriteHash: contentHash(contact.raw), changeHash: changeHash(change) });
     expect(wp.state.items[0]?.raw).toContain('Phone 03 9499 1234.');
     const second = await applyChange(a, change, signal, async () => '<p>Phone 03 9499 1234.</p>', record);
     expect(second).toMatchObject({
@@ -171,6 +182,83 @@ describe('WordPress adapter (fake REST API)', () => {
     expect(computeNextContent(change, contact.raw, prior)).toEqual({ kind: 'next', content: contact.raw.replace('(03) 9876 5432', '03 9499 1234') });
     expect(computeNextContent(change, '<p>Phone 9999 0000.</p>', prior)).toEqual({ kind: 'conflict', message: CHANGED_SINCE_EARLIER_WRITE });
     expect(computeNextContent(change, '<p>Phone 03 9499 1234.</p>', prior)).toEqual({ kind: 'already_applied' });
+  });
+
+  it('a marker belongs to its change: re-wording after a landed write never reports the new wording as applied (N1)', async () => {
+    const wp = fakeWordPress({ base: BASE, items: [contact] });
+    const a = adapterFor(wp);
+    const record = memoryRecord();
+    // X -> Y lands, then reading it back fails on the last attempt: the row keeps the marker for X -> Y.
+    const readBack = a.readBack.bind(a);
+    let failRead = true;
+    a.readBack = async (t, sig) => {
+      if (failRead) {
+        failRead = false;
+        throw new Error('timed out');
+      }
+      return readBack(t, sig);
+    };
+    const first = replace('(03) 9876 5432', '03 9499 1234');
+    await expect(applyChange(a, first, signal, async () => null, record)).rejects.toThrow(/timed out/);
+    expect(wp.state.items[0]?.raw).toContain('03 9499 1234');
+    // The owner re-words it to a deletion of the old text. X is absent, so "the change shows" would be true, but the
+    // marker was for another change: it is ignored and the first-attempt rule says the old text isn't there.
+    const reworded = replace('(03) 9876 5432', '');
+    const retry = await applyChange(a, reworded, signal, async () => null, record);
+    expect(retry).toMatchObject({ outcome: 'conflict', wrote: false, earlierWrite: false });
+    expect(wp.state.writes).toHaveLength(1);
+    expect(wp.state.items[0]?.raw).toContain('03 9499 1234');
+  });
+
+  it('a refused write is flagged, and a page edited later never makes the change stuck (N1)', async () => {
+    const wp = fakeWordPress({ base: BASE, items: [contact] });
+    const a = adapterFor(wp);
+    const record = memoryRecord();
+    const change = replace('(03) 9876 5432', '03 9499 1234');
+    wp.state.failNextWrite = 403;
+    const refused = await applyChange(a, change, signal, async () => null, record);
+    expect(refused).toMatchObject({ outcome: 'forbidden', wrote: true, writeRefused: true });
+    // The page is then edited in WordPress (another paragraph); the old text is still there once.
+    wp.state.items[0]!.raw = `<p>Open Tuesday to Saturday.</p>${contact.raw}`;
+    // Even if a marker of this same change survived, the edited page falls back to the first-attempt rule (old text
+    // exactly once) instead of a permanent "changed since an earlier write" conflict.
+    const stale: PriorWrite = { resourceId: '12', preWriteHash: contentHash(contact.raw), changeHash: changeHash(change) };
+    expect(computeNextContent(change, wp.state.items[0]!.raw, stale)).toEqual({
+      kind: 'next',
+      content: wp.state.items[0]!.raw.replace('(03) 9876 5432', '03 9499 1234'),
+    });
+    const retry = await applyChange(a, change, signal, async () => null, { prior: stale, beforeWrite: record.beforeWrite });
+    expect(retry).toMatchObject({ outcome: 'applied', wrote: true });
+    expect(wp.state.items[0]?.raw).toBe('<p>Open Tuesday to Saturday.</p><p>Phone 03 9499 1234.</p><img src="/wp-content/uploads/chair.jpg" alt="">');
+  });
+
+  it('re-reads the page right before writing and writes nothing when it changed in WordPress meanwhile (WG1)', async () => {
+    const change = replace('(03) 9876 5432', '03 9499 1234');
+    // The owner edits the page in WordPress between locate and write.
+    const wp = fakeWordPress({ base: BASE, items: [contact] });
+    wp.state.beforeSingleGet = (item) => {
+      item.raw = `${item.raw}<p>New hours from December.</p>`;
+      item.modified = '2026-11-14T02:59:00';
+      wp.state.beforeSingleGet = null;
+    };
+    const record = memoryRecord();
+    const edited = await applyChange(adapterFor(wp), change, signal, async () => null, record);
+    expect(edited).toMatchObject({ outcome: 'conflict', message: CHANGED_WHILE_APPLYING, wrote: false });
+    expect(wp.state.writes).toEqual([]);
+    expect(record.saved).toBeNull();
+    expect(wp.state.items[0]?.raw).toContain('New hours from December.');
+    // A save that moved modified_gmt without changing the content is also treated as an edit (nothing written).
+    const touched = fakeWordPress({ base: BASE, items: [contact] });
+    touched.state.beforeSingleGet = (item) => {
+      item.modified = '2026-11-14T03:00:00';
+      touched.state.beforeSingleGet = null;
+    };
+    expect(await applyChange(adapterFor(touched), change, signal, async () => null)).toMatchObject({ outcome: 'conflict', message: CHANGED_WHILE_APPLYING });
+    expect(touched.state.writes).toEqual([]);
+    // Unchanged: the re-read passes and the change is written once.
+    const calm = fakeWordPress({ base: BASE, items: [contact] });
+    expect(await applyChange(adapterFor(calm), change, signal, async () => null)).toMatchObject({ outcome: 'applied' });
+    expect(calm.calls.filter((c) => c.url.includes('_fields=id,content,modified_gmt'))).toHaveLength(1);
   });
 
   it('writes nothing when the marker cannot be stored (the change was taken back meanwhile)', async () => {
@@ -232,5 +320,25 @@ describe('WordPress adapter (fake REST API)', () => {
       kind: 'already_applied',
     });
     expect(computeNextContent(change, '<img src="/x.jpg">').kind).toBe('conflict');
+  });
+
+  it('image descriptions with < > & and quotes are written escaped and read back as applied (W1)', async () => {
+    const wp = fakeWordPress({ base: BASE, items: [contact] });
+    const change: WebsiteChange = {
+      kind: 'image_alt_text',
+      pageUrl: `${PUBLIC}contact/`,
+      imageSrc: `${PUBLIC}wp-content/uploads/chair.jpg`,
+      before: '',
+      after: `Skin fade <5 min> & "Ivanhoe's" chair`,
+    };
+    const attempt = await applyChange(adapterFor(wp), change, signal, async () => null);
+    expect(attempt).toMatchObject({ outcome: 'applied', verification: 'confirmed_api' });
+    expect(wp.state.items[0]?.raw).toContain(`alt="Skin fade &lt;5 min&gt; &amp; &quot;Ivanhoe's&quot; chair"`);
+    // The same text already there (escaped, or with numeric references) is recognised, so nothing is written twice.
+    expect(computeNextContent(change, wp.state.items[0]!.raw)).toEqual({ kind: 'already_applied' });
+    expect(changePresent(change, '<img src="/wp-content/uploads/chair.jpg" alt="Skin fade &#60;5 min&#x3E; &amp; &#34;Ivanhoe&#39;s&#34; chair">')).toBe(true);
+    // Decoded once only, and unknown references are left as they are.
+    expect(decodeAttr('&amp;lt;')).toBe('&lt;');
+    expect(decodeAttr('&lt;b&gt; &unknown; &#0;')).toBe('<b> &unknown; &#0;');
   });
 });

@@ -34,7 +34,7 @@ export interface WordPressConfig {
   publicWebsite: string;
 }
 
-type WpItem = { id?: unknown; link?: unknown; content?: { raw?: unknown } };
+type WpItem = { id?: unknown; link?: unknown; content?: { raw?: unknown }; modified_gmt?: unknown };
 
 export class WordPressAdapter implements WebsiteEditAdapter {
   readonly id = 'wordpress' as const;
@@ -195,6 +195,7 @@ export class WordPressAdapter implements WebsiteEditAdapter {
           resourceId: String(match.id),
           link: String(match.link),
           current: match.content.raw,
+          modifiedGmt: typeof match.modified_gmt === 'string' ? match.modified_gmt : null,
         };
       }
     }
@@ -236,6 +237,28 @@ export class WordPressAdapter implements WebsiteEditAdapter {
     if (res.status >= 400) throw new TransientAdapterError("Your website didn't respond while we were checking the change.");
     const raw = (res.json as WpItem | null)?.content?.raw;
     return typeof raw === 'string' ? raw : '';
+  }
+
+  /**
+   * Re-reads the located item right before a write (WordPress core has no conditional update): the same single-item
+   * GET as the read-back, with `modified_gmt` (one of the fields locate asks for, design §7.4.2).
+   */
+  async recheck(target: LocatedTarget, signal: AbortSignal): Promise<{ current: string; modifiedGmt: string | null } | null> {
+    const type = target.resourceType === 'page' ? 'pages' : 'posts';
+    const res = await this.call(
+      `/wp-json/wp/v2/${type}/${encodeURIComponent(target.resourceId)}?context=edit&_fields=id,content,modified_gmt`,
+      { method: 'GET' },
+      signal,
+      'wordpress.recheck',
+    );
+    if (res.status === 401) throw new AdapterAuthError();
+    if (res.status === 403) throw new AdapterForbiddenError();
+    if (res.status === 404 || res.status === 410) return null;
+    if (res.status >= 400) throw new TransientAdapterError("Your website didn't respond. Nothing was changed.");
+    const item = res.json as WpItem | null;
+    const raw = item?.content?.raw;
+    if (typeof raw !== 'string') return null;
+    return { current: raw, modifiedGmt: typeof item?.modified_gmt === 'string' ? item.modified_gmt : null };
   }
 }
 

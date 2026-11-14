@@ -645,8 +645,11 @@ negative difference if Google's totals are computed differently.)
 - Post-validation (`checkCopyClaims` in core, also applied to owner-edited text as a soft warning): length per kind;
   no URL, email or phone other than the settings phone; reject words/phrases `best`, `#1`, `number one`, `no. 1`,
   `top-rated`, `top rated`, `award`, `guarantee`, `rank`, `first page`, `cheapest`, `google` (case-insensitive, whole
-  words); title options must contain the business name. Options failing any rule are dropped; zero left → the
-  "didn't pass our checks" message.
+  words); title options must contain the business name. AI options are also checked by `unsupportedFactClaims`
+  (core): every number (years, prices, counts, times, postcodes) and every spelled-out span of years ("ten years") must
+  appear in what the AI was given (`facts` and `page`). Invented facts in words only (opening days, services) cannot
+  be caught without refusing normal wording; the prompt and the "AI wording — check before using" label cover them.
+  Options failing any rule are dropped; zero left → the "didn't pass our checks" message.
 - Cost: ≈ 1,500 input + 300 output tokens → about US$0.0003 per click at memo §10 rates; logged to `ai_usage` with
   `purpose: 'website_copy'`. A refusal, `max_tokens` stop or parse failure returns no options (never a fallback guess).
 
@@ -839,6 +842,12 @@ export interface WebsiteEditAdapter {
    attribute on the matching `<img src>`) must occur **exactly once**:
    - `after` already present and `before` absent → `already_applied` (idempotent retry after a write that succeeded).
    - `before` occurs 0 or > 1 times → `conflict`.
+   *As built (G4 review):* `already_applied` is decided only from the durable marker (`apply_result.writeSentAt`,
+   `preWriteHash`, `changeHash`), never from the page text alone; the marker counts only for the change it was written
+   for, is dropped when the change changes or WordPress refuses the write, and a page edited since falls back to this
+   first-attempt rule. Before step 4 the item is read again (`content`, `modified_gmt`) and nothing is written when it
+   changed since `locate` (WordPress core has no conditional update). The worker also refuses to write unless
+   `apply_result.approvalHash` (stored by the apply route) still matches the change and the destination.
 4. `write(next)` → map result.
 5. `readBack` → `after` present → verification `confirmed_api`; then a public `GET` of the page through the §7.1
    fetcher → `confirmed_public` or `not_visible` (cache).
@@ -867,7 +876,10 @@ export interface WebsiteEditAdapter {
   `already_applied` rule makes the retry safe). WordPress keeps a revision of the previous content (core behaviour ⚠),
   mentioned in the confirm dialog.
 - Read-back: the same GET as locate.
-- Rate: one apply at a time (job concurrency 1); each apply makes ≤ 4 WordPress requests.
+- Re-check right before the write: `GET …/pages/{id}?context=edit&_fields=id,content,modified_gmt` (the read-back's
+  single-item GET with the `modified_gmt` field locate asks for; not yet confirmed against a real WordPress, see §12.3).
+- Rate: one apply at a time (job concurrency 1); each apply makes ≤ 5 WordPress requests (≤ 6 when the slug is
+  searched in pages and then posts).
 
 #### 7.4.3 Why WordPress
 
@@ -941,7 +953,7 @@ envelope. **Owner-only** unless stated (`requireOwner`). Responses never include
 | PATCH | `/api/website/edits/[id]` | `{ after: string }` | `{ edit, warnings: string[] }` | Only `proposed` / `apply_failed`; kind limits via `WebsiteChangeSchema`; `checkCopyClaims` warnings (non-blocking for owner text); source → `owner`; audit `website.edit.edited` |
 | POST | `/api/website/edits/[id]/draft` | `{}` | 202 `{ job }` | 422 `UNSUPPORTED` when AI isn't configured or kind isn't title/description; audit `website.edit.ai_draft_requested` |
 | POST | `/api/website/edits/[id]/choose-draft` | `{ index: 0..2 }` | `{ edit }` | Copies the option into `after`, source `ai_draft` |
-| POST | `/api/website/edits/[id]/apply` | `{ confirm: true, expectedAfter: string }` | 202 `{ edit, job }` | 409 if `after` changed; 422 if no connected adapter or kind unsupported (reason in message); sets `approved`, `approved_by/at`; audit `website.edit.apply_requested` |
+| POST | `/api/website/edits/[id]/apply` | `{ confirm: true, expectedAfter: string, expectedBefore?: string \| null, expectedDestination?: { host, environment } }` | 202 `{ edit, job }` | 409 if `after` changed (*as built:* also when the old text, the destination or the stored change differs from what the dialog showed; the approval is stored as `apply_result.approvalHash` and checked by the worker); 422 if no connected adapter or kind unsupported (reason in message); sets `approved`, `approved_by/at`; audit `website.edit.apply_requested` |
 | POST | `/api/website/edits/[id]/mark-done` | `{}` | `{ edit }` | `applied`, `applied_via='manual'`, verification `pending`; audit `website.edit.marked_done` |
 | POST | `/api/website/edits/[id]/reject` | `{ reason?: string(≤200) }` | `{ edit }` | audit `website.edit.rejected` |
 | POST | `/api/website/edits/[id]/undo` | `{}` | 201 `{ edit }` | Only for `applied_via='wordpress'`; creates the reverse change (source `undo`, `reverts_edit_id`); the owner then applies it with the normal confirm |
@@ -965,7 +977,7 @@ Cancel/retry of website jobs use the existing `/api/jobs/[id]/cancel|retry` (own
 | GET | `/api/integrations/google/callback` | `code`, `state` | 302 to `/settings?tab=integrations&checking=search_console` | Shared; for `search_console` upserts the `google_search_console` row (tokens encrypted, `scopes`), enqueues `website.connection_check` (`connect`); audit `integration.google_search_console.connected` |
 | PUT | `/api/integrations/google-search-console/property` | `{ siteUrl }` (one of `config.properties`) | `{ state }` + enqueues `search.sync` (`connect`) | Audit `integration.google_search_console.property_selected` |
 | POST | `/api/integrations/google-search-console/check` | `{}` | 202 `{ job }` | Read-only check |
-| DELETE | `/api/integrations/google-search-console` | `?deleteData=true\|false` | 202 | Status `disconnected`; enqueues shared `google.disconnect`; optional deletion of `search_metrics` rows for that property; audit `integration.google_search_console.disconnected` |
+| DELETE | `/api/integrations/google-search-console` | `?deleteData=true\|false` | 202 | Status `disconnected`; enqueues shared `google.disconnect`; optional deletion of the stored `search_metrics` rows (*as built:* every `search_console` row, not only the current property's, because choosing another property keeps the earlier rows and §10.6 promises the stored queries are deleted on request); audit `integration.google_search_console.disconnected` |
 | POST | `/api/integrations/website/wordpress` | `{ baseUrl, username, applicationPassword }` | 202 `{ state: 'checking', job }` | `baseUrl` https, in Zod; credential encrypted with `encryptToken` and never echoed; audit `integration.website.connected` (no secret) |
 | POST | `/api/integrations/website/check` | `{}` | 202 `{ job }` | Read-only |
 | DELETE | `/api/integrations/website` | — | 204 | Nulls the credential, status `disconnected`; open `approved` changes go back to `proposed`; audit `integration.website.disconnected` |

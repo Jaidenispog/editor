@@ -1,4 +1,5 @@
 import 'server-only';
+import { lookup as dnsLookup } from 'node:dns/promises';
 import { and, desc, eq, gte, inArray, isNotNull, ne, sql } from 'drizzle-orm';
 import {
   AppError,
@@ -13,6 +14,7 @@ import {
   changeTitle,
   checkCopyClaims,
   classifyQuery,
+  clearWriteMarker,
   editDedupeKey,
   fixedSince,
   inSiteScope,
@@ -36,7 +38,8 @@ import {
   type WebsiteEditSource,
   type WebsiteEditStatus,
 } from '@studio/core';
-import { privateHostReason } from '@studio/core/address-ranges';
+import { resolvedPrivateHostReason } from '@studio/core/address-ranges';
+import { approvalDestination, approvalHash } from '@studio/core/website-approval';
 import { schema } from '@studio/db';
 import type { AuditSummaryDto, GroupTotals, QueryRowDto, SearchPanelState, SearchPerformanceDto, WebsiteEditDto, WebsiteOverviewDto } from '@/components/website/types';
 import type { SessionUser } from './auth.js';
@@ -794,6 +797,9 @@ export async function createOwnerEdit(
 
 /** Statuses in which a prepared change's wording, source or status may still change. */
 const EDITABLE_EDIT_STATUSES = ['proposed', 'apply_failed'] as const;
+/** Audit entries keep at most this much of a change's before and after text (design §10.6). */
+const AUDIT_TEXT_MAX = 200;
+const auditText = (v: string | null | undefined): string | null => (typeof v === 'string' ? v.slice(0, AUDIT_TEXT_MAX) : null);
 /** Answer (409) when a change was claimed for applying between reading and writing it. */
 const EDIT_BEING_APPLIED = 'This change is being applied, so it can no longer be edited.';
 
@@ -826,6 +832,8 @@ export async function patchEdit(user: SessionUser, id: string, after: string): P
       status: 'proposed',
       statusMessage: '',
       statusReason: null,
+      // A write marker belongs to the wording it was recorded for (design §7.4.1): new wording starts afresh.
+      applyResult: clearWriteMarker(row.applyResult),
       updatedAt: new Date(),
     })
     .where(and(eq(schema.websiteEdits.id, id), inArray(schema.websiteEdits.status, [...EDITABLE_EDIT_STATUSES])))
@@ -836,7 +844,7 @@ export async function patchEdit(user: SessionUser, id: string, after: string): P
     action: 'website.edit.edited',
     entityType: 'website_edit',
     entityId: id,
-    data: { kind: current.kind, after },
+    data: { kind: current.kind, after: auditText(after) },
   });
   return { edit: await oneEditDto(id), warnings };
 }
@@ -877,7 +885,7 @@ export async function chooseDraft(user: SessionUser, id: string, index: number):
   });
   const updated = await getDb()
     .update(schema.websiteEdits)
-    .set({ proposedChange: next, source: 'ai_draft', updatedAt: new Date() })
+    .set({ proposedChange: next, source: 'ai_draft', applyResult: clearWriteMarker(row.applyResult), updatedAt: new Date() })
     .where(and(eq(schema.websiteEdits.id, id), inArray(schema.websiteEdits.status, [...EDITABLE_EDIT_STATUSES])))
     .returning({ id: schema.websiteEdits.id });
   if (!updated.length) throw new AppError('CONFLICT', EDIT_BEING_APPLIED);
@@ -891,18 +899,47 @@ export async function chooseDraft(user: SessionUser, id: string, index: number):
   return oneEditDto(id);
 }
 
+/** What the confirmation dialog showed besides the new wording (each optional, checked when sent). */
+export interface ApplyExpectations {
+  /** The old text the dialog showed (null when the change has none). */
+  expectedBefore?: string | null | undefined;
+  /** The destination the dialog showed. */
+  expectedDestination?: { host: string; environment: 'live' | 'staging' } | undefined;
+}
+
 /**
- * The owner's explicit "Apply now": checks the wording is what the dialog showed, that a connected adapter supports
- * the change, records the approval and queues the apply job.
+ * The owner's explicit "Apply now": checks the wording (and, when sent, the old text and the destination) is what the
+ * dialog showed, that a connected adapter supports the change, records the approval bound to that change and
+ * destination (`approvalHash`, checked again by the worker before it writes) and queues the apply job.
  */
-export async function applyEdit(user: SessionUser, id: string, expectedAfter: string): Promise<{ edit: WebsiteEditDto; job: ReturnType<typeof toJobDto> }> {
+export async function applyEdit(
+  user: SessionUser,
+  id: string,
+  expectedAfter: string,
+  expected: ApplyExpectations = {},
+): Promise<{ edit: WebsiteEditDto; job: ReturnType<typeof toJobDto> }> {
   const row = await loadEdit(id);
   const change = WebsiteChangeSchema.parse(row.proposedChange);
-  if (change.after !== expectedAfter) throw new AppError('CONFLICT', 'This change was edited since you opened it. Check the new wording and apply again.');
+  const before = 'before' in change ? change.before : null;
+  if (change.after !== expectedAfter || (expected.expectedBefore !== undefined && expected.expectedBefore !== before))
+    throw new AppError('CONFLICT', 'This change was edited since you opened it. Check the new wording and apply again.');
   const conn = await connection('website');
   const available = applyAvailability(change, row.status as WebsiteEditStatus, conn);
   if (!available.ok)
     throw new AppError(row.status === 'proposed' || row.status === 'apply_failed' ? 'UNSUPPORTED' : 'CONFLICT', available.reason ?? 'This change is not waiting to be applied.');
+  const destination = approvalDestination(conn);
+  if (!destination) throw new AppError('UNSUPPORTED', 'Your website editing connection needs attention. Check it in Settings → Integrations.');
+  if (expected.expectedDestination) {
+    let host = '';
+    try {
+      host = new URL(destination.baseUrl).hostname;
+    } catch {
+      host = '';
+    }
+    if (host !== expected.expectedDestination.host || destination.environment !== expected.expectedDestination.environment)
+      throw new AppError('CONFLICT', 'Your WordPress connection changed since you opened this. Check where the change goes and apply again.');
+  }
+  const approval = approvalHash(change, destination);
   const now = new Date();
   const updated = await getDb()
     .update(schema.websiteEdits)
@@ -912,15 +949,17 @@ export async function applyEdit(user: SessionUser, id: string, expectedAfter: st
       approvedAt: now,
       statusMessage: 'Applying…',
       statusReason: null,
+      // Kept beside any write marker of an earlier attempt of this same change (the worker decides with it).
+      applyResult: sql`${schema.websiteEdits.applyResult} || ${JSON.stringify({ approvalHash: approval })}::jsonb`,
       updatedAt: now,
     })
-    // The approval holds only for the wording the dialog showed: an edit that landed after it was read wins the race
-    // and this approval is refused (the owner sees the new wording and confirms again).
+    // The approval holds only for the change as it was read here (and the dialog showed): an edit or a check's refresh
+    // that landed after it was read wins the race and this approval is refused (the owner confirms again).
     .where(
       and(
         eq(schema.websiteEdits.id, id),
         inArray(schema.websiteEdits.status, [...EDITABLE_EDIT_STATUSES]),
-        sql`${schema.websiteEdits.proposedChange} ->> 'after' = ${expectedAfter}`,
+        sql`${schema.websiteEdits.proposedChange} = ${JSON.stringify(row.proposedChange)}::jsonb`,
       ),
     )
     .returning({ id: schema.websiteEdits.id });
@@ -939,8 +978,8 @@ export async function applyEdit(user: SessionUser, id: string, expectedAfter: st
     data: {
       kind: change.kind,
       pageUrl: change.pageUrl,
-      before: 'before' in change ? change.before : null,
-      after: change.after,
+      before: auditText(before),
+      after: auditText(change.after),
     },
   });
   const job = await createTrackedJob({
@@ -1254,8 +1293,9 @@ export async function saveWordPress(
   const base = new URL(input.baseUrl);
   if (base.protocol !== 'https:') throw new AppError('VALIDATION', 'Use your site’s https:// address.');
   if (base.username || base.password || (base.port && base.port !== '443')) throw new AppError('VALIDATION', 'Use your site’s plain https:// address.');
-  // The worker refuses private addresses when it connects; refuse the obvious ones here so the owner hears at once.
-  const privateHost = privateHostReason(base.hostname);
+  // The worker refuses private addresses when it connects (with DNS, every time); refuse them here as well, also for a
+  // name that resolves to one, so the owner hears at once instead of after the check runs.
+  const privateHost = await resolvedPrivateHostReason(base.hostname, async (host) => dnsLookup(host, { all: true, verbatim: true }));
   if (privateHost) throw new AppError('VALIDATION', `That address points to ${privateHost}, not a public website. Use your site’s public https:// address.`);
   const baseUrl = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
   const values = {

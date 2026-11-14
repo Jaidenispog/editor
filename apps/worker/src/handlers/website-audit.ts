@@ -95,7 +95,11 @@ export async function handleWebsiteAudit(ctx: WorkerContext, run: TrackedRun, pa
               }),
             ]
           : []
-      : prioritiseFindings(runWebsiteChecks(out.facts, settings, deps.now()));
+      : out.homeNotRead
+        ? // The home page could not be read (a very long Crawl-delay, or it forwards to an address robots.txt keeps us
+          // out of): no findings, only the partial reason; never a false "site unreachable".
+          []
+        : prioritiseFindings(runWebsiteChecks(out.facts, settings, deps.now()));
     const result: WebsiteAuditResult = WebsiteAuditResultSchema.parse({
       ...out.facts,
       findings,
@@ -117,7 +121,7 @@ export async function handleWebsiteAudit(ctx: WorkerContext, run: TrackedRun, pa
         .where(and(eq(a.id, audit.id), eq(a.status, 'running')))
         .returning({ id: a.id });
       if (!stored.length) return null; // cancelled or replaced meanwhile
-      if (out.blockedByRobots || !result.pages.some((p) => p.status !== null && p.status < 400 && !p.skipped)) return { inserted: 0, refreshed: 0, superseded: 0, verified: 0 };
+      if (out.blockedByRobots || out.homeNotRead || !result.pages.some((p) => p.status !== null && p.status < 400 && !p.skipped)) return { inserted: 0, refreshed: 0, superseded: 0, verified: 0 };
       return refreshChanges(tx, {
         auditId: audit.id,
         facts: out.facts,

@@ -25,11 +25,25 @@ describe('crawler SSRF guard', () => {
     '::ffff:10.0.0.1',
     '::ffff:127.0.0.1',
     '::ffff:a9fe:a9fe',
+    // IPv6 ranges that embed or translate IPv4 (a NAT64 gateway or tunnel could reach internal IPv4 through them).
+    '::a00:1',
+    '::10.0.0.1',
+    '::ffff:0:a00:1',
+    '0:0:0:0:0:ffff:a00:1',
+    '64:ff9b::a00:1',
+    '64:ff9b:1::a00:1',
+    '100::1',
+    '2001::a00:1',
+    '2001:0:4136:e378:8000:63bf:3fff:fdd2',
+    '2002:a00:1::1',
+    '2002:808:808::1',
+    'fec0::1',
+    'feff::1',
   ])('blocks %s', (ip) => {
     expect(isBlockedAddress(ip)).toBe(true);
   });
 
-  it.each(['1.1.1.1', '142.250.70.164', '2606:4700:4700::1111', '::ffff:8.8.8.8'])('allows public %s', (ip) => {
+  it.each(['1.1.1.1', '142.250.70.164', '2606:4700:4700::1111', '2001:4860:4860::8888', '2400:cb00::1', '::ffff:8.8.8.8', '0:0:0:0:0:ffff:808:808'])('allows public %s', (ip) => {
     expect(isBlockedAddress(ip)).toBe(false);
   });
 

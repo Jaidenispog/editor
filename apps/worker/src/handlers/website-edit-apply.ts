@@ -1,5 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { CancelledError, NonRetryableError, WebsiteChangeSchema, isInScope, siteScopeFrom, type ApplyResult, type JobPayload } from '@studio/core';
+import { approvalDestination, approvalHash } from '@studio/core/website-approval';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import { writeWorkerAudit } from '../lib/audit.js';
@@ -17,6 +18,10 @@ import { BlockedHostError, resolveSafeAddress, systemResolver } from '../website
 
 /** Plain message when the editing connection is not usable. */
 export const CONNECTION_NEEDS_ATTENTION = 'Your website editing connection needs attention. Check it in Settings → Integrations.';
+
+/** Plain message when the change or its destination is no longer what the owner approved. */
+export const APPROVAL_NO_LONGER_MATCHES =
+  'The change or the WordPress site it goes to changed after you approved it, so nothing was changed. Check the change and apply it again.';
 
 /**
  * The HTTP context for WordPress calls: the SSRF-guarded, address-pinned transport (no redirects followed), unless a
@@ -62,13 +67,22 @@ export async function handleWebsiteEditApply(
     await run.message('This change is not waiting to be applied');
     return;
   }
-  // The durable "a write was sent" record (design §7.4.1): kept across retries and failures, so a later attempt can
-  // tell a write that landed from one that never did.
+  // The durable "a write was sent" record (design §7.4.1): kept across retries and failures whose outcome is unknown,
+  // so a later attempt can tell a write that landed from one that never did. It belongs to one change (changeHash):
+  // applyChange ignores it for any other wording, and it is dropped when WordPress definitely refused the write.
   const stored = edit.applyResult;
-  let marker: Pick<ApplyResult, 'writeSentAt' | 'preWriteHash' | 'resourceId' | 'resourceType'> | null =
-    stored.writeSentAt && stored.preWriteHash && stored.resourceId
-      ? { writeSentAt: stored.writeSentAt, preWriteHash: stored.preWriteHash, resourceId: stored.resourceId, ...(stored.resourceType ? { resourceType: stored.resourceType } : {}) }
+  let marker: Pick<ApplyResult, 'writeSentAt' | 'preWriteHash' | 'changeHash' | 'resourceId' | 'resourceType'> | null =
+    stored.writeSentAt && stored.preWriteHash && stored.changeHash && stored.resourceId
+      ? {
+          writeSentAt: stored.writeSentAt,
+          preWriteHash: stored.preWriteHash,
+          changeHash: stored.changeHash,
+          resourceId: stored.resourceId,
+          ...(stored.resourceType ? { resourceType: stored.resourceType } : {}),
+        }
       : null;
+  // What the owner approved (kept on the row across retries of this job; a failure ends the approval).
+  const approved = stored.approvalHash ?? null;
   const fail = async (outcome: NonNullable<ApplyResult['outcome']>, message: string, extra: Partial<ApplyResult> = {}) => {
     await ctx.db
       .update(t)
@@ -113,6 +127,13 @@ export async function handleWebsiteEditApply(
     await fail('auth', CONNECTION_NEEDS_ATTENTION);
     throw new NonRetryableError('INTEGRATION_NOT_CONFIGURED', CONNECTION_NEEDS_ATTENTION);
   }
+  // The approval covers the change and the destination the dialog showed: a WordPress connection saved again for
+  // another site (or relabelled live/staging), or a change whose text moved on, is never written on that approval.
+  const destination = approvalDestination(conn);
+  if (!approved || !destination || approvalHash(change.data, destination) !== approved) {
+    await fail('error', APPROVAL_NO_LONGER_MATCHES);
+    throw new NonRetryableError('VALIDATION', APPROVAL_NO_LONGER_MATCHES);
+  }
   // The same address guard as the read-only check, here too: the address (or its DNS) may have changed since.
   try {
     await resolveSafeAddress(new URL(baseUrl).hostname, deps.fetchPolicy, deps.fetchPolicy.resolver ?? systemResolver);
@@ -142,13 +163,17 @@ export async function handleWebsiteEditApply(
   try {
     await run.progress(0.2, 'Applying the change through WordPress…');
     const attempt = await applyChange(adapter, change.data, run.signal, readPublic, {
-      prior: marker?.preWriteHash && marker.resourceId ? { resourceId: marker.resourceId, preWriteHash: marker.preWriteHash } : null,
-      beforeWrite: async (target, preWriteHash) => {
-        const next = { writeSentAt: deps.now().toISOString(), preWriteHash, resourceId: target.resourceId, resourceType: target.resourceType };
-        // Only while this attempt still holds the change: a row moved on meanwhile is never written.
+      prior:
+        marker?.preWriteHash && marker.changeHash && marker.resourceId
+          ? { resourceId: marker.resourceId, preWriteHash: marker.preWriteHash, changeHash: marker.changeHash }
+          : null,
+      beforeWrite: async (target, preWriteHash, changeHash) => {
+        const next = { writeSentAt: deps.now().toISOString(), preWriteHash, changeHash, resourceId: target.resourceId, resourceType: target.resourceType };
+        // Only while this attempt still holds the change: a row moved on meanwhile is never written. The approval
+        // stays with the marker, so a retry of this job still knows what was approved.
         const rows = await ctx.db
           .update(t)
-          .set({ applyResult: { adapter: 'wordpress', ...next }, updatedAt: deps.now() })
+          .set({ applyResult: { adapter: 'wordpress', ...next, approvalHash: approved }, updatedAt: deps.now() })
           .where(and(eq(t.id, edit.id), eq(t.status, 'applying')))
           .returning({ id: t.id });
         if (rows.length) marker = next;
@@ -204,6 +229,7 @@ export async function handleWebsiteEditApply(
             earlierWrite: attempt.earlierWrite,
             kind: change.data.kind,
             pageUrl: change.data.pageUrl,
+            // writeWorkerAudit trims every string to 200 characters (design §10.6).
             before: 'before' in change.data ? change.data.before : null,
             after: change.data.after,
           },
@@ -213,6 +239,9 @@ export async function handleWebsiteEditApply(
       await run.progress(1, attempt.outcome === 'applied' ? 'Change applied' : 'Change was already applied');
       return;
     }
+    // WordPress definitely refused the write (401, 403, 404): nothing landed, so no later attempt may treat the page as
+    // "written by us" (the record would otherwise outlive the refusal and turn a later page edit into a conflict).
+    if (attempt.writeRefused) marker = null;
     if (attempt.outcome === 'auth')
       await recordConnectionCheck(ctx.db, 'website', {
         status: 'needs_reauth',

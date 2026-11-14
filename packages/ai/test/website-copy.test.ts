@@ -100,6 +100,29 @@ describe('AI website wording (fake Anthropic client)', () => {
     expect(result.options).toEqual(['Ivanhoe Barber Co | Fades and beard trims, Ivanhoe']);
   });
 
+  it('drops options with numbers the AI was not given (years, prices, counts), keeps ordinary wording and real numbers', async () => {
+    const page = { ...input.page, textSample: 'Ivanhoe Barber Co has cut hair in Ivanhoe since 2015. Open 6 days. Walk-ins welcome.' };
+    const { client } = fakeClient([
+      reply({
+        options: [
+          'Ivanhoe Barber Co | 20 years of fades in Ivanhoe',
+          'Ivanhoe Barber Co | Fades from $35 in Ivanhoe',
+          'Ivanhoe Barber Co | Ten years of fades in Ivanhoe',
+          'Ivanhoe Barber Co | Open 7 days in Ivanhoe',
+          'Ivanhoe Barber Co | Fades in Ivanhoe since 2015',
+          'Ivanhoe Barber Co | Open 6 days, call 03 9499 1234',
+          'Ivanhoe Barber Co | Fades and beard trims, Ivanhoe',
+        ],
+      }),
+    ]);
+    const result = await new AnthropicWebsiteCopywriter({ client, model: 'claude-haiku-5-5' }).draft({ ...input, page });
+    expect(result.options).toEqual([
+      'Ivanhoe Barber Co | Fades in Ivanhoe since 2015',
+      'Ivanhoe Barber Co | Open 6 days, call 03 9499 1234',
+      'Ivanhoe Barber Co | Fades and beard trims, Ivanhoe',
+    ]);
+  });
+
   it('returns no options (never a guess) on refusal, max_tokens or an unreadable answer, but still reports usage', async () => {
     const { client } = fakeClient([reply(null, 'refusal'), reply({ options: ['x'] }, 'max_tokens'), reply({ wrong: true })]);
     const writer = new AnthropicWebsiteCopywriter({
@@ -115,7 +138,7 @@ describe('AI website wording (fake Anthropic client)', () => {
   });
 
   it('keeps at most three options for descriptions, checked against description length', async () => {
-    const ok = (n: number) => `Ivanhoe Barber Co is a barber studio in Ivanhoe, VIC, offering fades and beard trims, option ${n}.`;
+    const ok = (n: number) => `Ivanhoe Barber Co is a barber studio in Ivanhoe, VIC, offering fades and beard trims, option ${'ABCD'[n - 1]}.`;
     const { client } = fakeClient([reply({ options: [ok(1), ok(2), ok(3), ok(4), 'Too short.'] })]);
     const r = await new AnthropicWebsiteCopywriter({
       client,

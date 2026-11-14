@@ -292,7 +292,13 @@ export function ChangeCard({ edit, aiAvailable, onChanged }: { edit: WebsiteEdit
             () =>
               apiRequest(`/api/website/edits/${edit.id}/apply`, {
                 method: 'POST',
-                body: { confirm: true, expectedAfter: edit.change.after },
+                // Everything the dialog showed, so the approval covers exactly that (design §4.4).
+                body: {
+                  confirm: true,
+                  expectedAfter: edit.change.after,
+                  expectedBefore: 'before' in edit.change ? edit.change.before : null,
+                  ...(edit.destination ? { expectedDestination: edit.destination } : {}),
+                },
               }),
             'Applying the change…',
           ).then((ok) => {
