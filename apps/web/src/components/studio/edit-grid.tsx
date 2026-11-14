@@ -257,6 +257,11 @@ export function EditCard({ edit, ttlSeconds, onChanged }: { edit: EditDto; ttlSe
           ) : null}
         </div>
         {version?.exportStatus === 'failed' ? <p className="text-xs text-red-600">{version.exportMessage || 'The export did not finish. Press Export to try again.'}</p> : null}
+        {version?.status === 'preview_ready' && version.exportStatus === 'none' && version.exportMessage ? (
+          <p className="text-xs text-charcoal-600" aria-live="polite">
+            {version.exportMessage.replace(/[.]$/, '')}. Press Export full quality to start it again.
+          </p>
+        ) : null}
       </div>
       <ReviseDialog edit={edit} open={reviseOpen} onClose={() => setReviseOpen(false)} onDone={onChanged} />
     </li>

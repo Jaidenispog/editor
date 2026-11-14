@@ -122,8 +122,90 @@ export async function cancelJob(id: string): Promise<JobRow> {
       getLogger().warn({ err, jobId: id }, 'queue cancel failed; relying on the cancel flag');
     }
   }
+  // A running job records its own outcome when the worker notices the cancel; one that never started has nobody
+  // to do that, so the clip, version or export it was for would otherwise show "in progress" for ever.
+  if (job.status === 'queued') {
+    try {
+      await settleCancelledQueuedJob(job);
+    } catch (err) {
+      getLogger().error({ err, jobId: id }, 'could not update the work a cancelled job was for');
+    }
+  }
   return updated[0] ?? job;
 }
+
+/**
+ * Records the same end state the worker writes when the owner cancels a running job, for a job cancelled before
+ * the worker picked it up. Each update only applies while the item is still waiting, so it never overwrites a
+ * result the worker has already written.
+ */
+export async function settleCancelledQueuedJob(job: Pick<JobRow, 'type' | 'payload'>): Promise<void> {
+  const type = job.type as JobType;
+  const parsed = JOB_PAYLOAD_SCHEMAS[type]?.safeParse(job.payload);
+  if (!parsed?.success) return;
+  const payload = parsed.data as Record<string, unknown>;
+  const db = getDb();
+  const now = new Date();
+  const editVersionId = typeof payload['editVersionId'] === 'string' ? payload['editVersionId'] : null;
+  switch (type) {
+    case 'render.export':
+      if (!editVersionId) return;
+      await db
+        .update(schema.editVersions)
+        .set({ exportStatus: 'none', exportMessage: 'Export cancelled', updatedAt: now })
+        .where(and(eq(schema.editVersions.id, editVersionId), inArray(schema.editVersions.exportStatus, ['queued', 'rendering'])));
+      return;
+    case 'render.preview':
+      if (!editVersionId) return;
+      await db
+        .update(schema.editVersions)
+        .set({ status: 'cancelled', statusMessage: 'Preview cancelled', updatedAt: now })
+        .where(and(eq(schema.editVersions.id, editVersionId), inArray(schema.editVersions.status, ['planned', 'rendering_preview'])));
+      return;
+    case 'edits.revise':
+      await db
+        .update(schema.editVersions)
+        .set({ status: 'cancelled', statusMessage: 'Cancelled', updatedAt: now })
+        .where(and(eq(schema.editVersions.id, String(payload['newVersionId'])), eq(schema.editVersions.status, 'planning')));
+      return;
+    case 'edits.generate': {
+      const generationId = String(payload['generationId']);
+      await db
+        .update(schema.generations)
+        .set({ status: 'cancelled', statusMessage: 'Cancelled', updatedAt: now })
+        .where(and(eq(schema.generations.id, generationId), inArray(schema.generations.status, ['queued', 'planning'])));
+      const edits = await db.query.edits.findMany({ columns: { id: true }, where: eq(schema.edits.generationId, generationId) });
+      if (edits.length) {
+        await db
+          .update(schema.editVersions)
+          .set({ status: 'cancelled', statusMessage: 'Cancelled', updatedAt: now })
+          .where(and(inArray(schema.editVersions.editId, edits.map((e) => e.id)), eq(schema.editVersions.status, 'planning')));
+      }
+      await db
+        .update(schema.projects)
+        .set({ status: 'ready', updatedAt: now })
+        .where(and(eq(schema.projects.id, String(payload['projectId'])), eq(schema.projects.status, 'generating')));
+      return;
+    }
+    case 'ingest.asset':
+      await db
+        .update(schema.mediaAssets)
+        .set({ status: 'failed', statusMessage: CANCELLED_ANALYSIS_MESSAGE, updatedAt: now })
+        .where(and(eq(schema.mediaAssets.id, String(payload['assetId'])), inArray(schema.mediaAssets.status, ['uploaded', 'processing'])));
+      return;
+    case 'music.analyse':
+      await db
+        .update(schema.musicTracks)
+        .set({ status: 'uploaded', statusMessage: 'Analysis cancelled', updatedAt: now })
+        .where(and(eq(schema.musicTracks.id, String(payload['trackId'])), inArray(schema.musicTracks.status, ['uploaded', 'processing'])));
+      return;
+    default:
+      return;
+  }
+}
+
+/** Shown on a clip whose analysis was cancelled; the clip card offers Retry for it. */
+export const CANCELLED_ANALYSIS_MESSAGE = 'Analysis cancelled. Press Retry to analyse it again.';
 
 /** Re-queues a failed or cancelled job on the same tracking row (progress and error are reset). */
 export async function retryJob(id: string): Promise<JobRow> {

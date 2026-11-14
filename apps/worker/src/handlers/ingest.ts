@@ -182,7 +182,7 @@ export async function handleIngestAsset(ctx: WorkerContext, run: TrackedRun, pay
   } catch (err) {
     const outcome = err instanceof CancelledError ? await stopOutcome(run) : null;
     if (outcome === 'cancelled') {
-      await setAsset({ status: 'uploaded', statusMessage: 'Processing cancelled' });
+      await setAsset({ status: 'failed', statusMessage: 'Analysis cancelled. Press Retry to analyse it again.' });
     } else if (outcome === 'resume') {
       // The queue runs this job again (worker restart or time limit); keep the clip in "processing".
       await setAsset({ status: 'processing', statusMessage: INTERRUPTED_MESSAGE });

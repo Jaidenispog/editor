@@ -283,9 +283,9 @@ async function main() {
     await waitFor('three Ready pills in the clip list', async () => (await clipCards.filter({ hasText: 'Ready' }).count()) === 3, { timeoutMs: 30_000 });
     check(true, 'three clips uploaded and analysed');
     const hevcCard = clipCards.filter({ hasText: 'sample_b_rotated_hevc_hlg.mov' });
-    check((await hevcCard.getByText('HDR, colour converted').count()) === 1, 'HEVC HLG clip shows the HDR badge');
-    check((await hevcCard.getByText('Rotated').count()) === 1, 'HEVC HLG clip shows the Rotated badge');
-    check((await clipCards.filter({ hasText: 'sample_c_noaudio_scenes.mp4' }).getByText('No sound').count()) === 1, 'silent clip shows the No sound badge');
+    check((await hevcCard.getByText('HDR, colour converted', { exact: true }).count()) === 1, 'HEVC HLG clip shows the HDR badge');
+    check((await hevcCard.getByText('Rotated', { exact: true }).count()) === 1, 'HEVC HLG clip shows the Rotated badge');
+    check((await clipCards.filter({ hasText: 'sample_c_noaudio_scenes.mp4' }).getByText('No sound', { exact: true }).count()) === 1, 'silent clip shows the No sound badge');
 
     // ---- 3. Tag the clips, set the length, generate. ---------------------------------------------------------
     log('Tag clips and generate');
@@ -343,8 +343,16 @@ async function main() {
     log(`Favourite "${favName}"`);
     await cardFor(page, favName).getByRole('button', { name: `Mark ${favName} as a favourite` }).click();
     await cardFor(page, favName).getByRole('button', { name: `Remove ${favName} from favourites` }).waitFor({ timeout: 15_000 });
-    const afterFav = await getStatus(page, projectId);
-    check(afterFav.generations[0].edits.find((e) => e.styleName === favName)?.isFavourite === true, `"${favName}" saved as a favourite`);
+    const afterFav = await waitFor(
+      'the favourite to be saved',
+      async () => {
+        const s = await getStatus(page, projectId);
+        return s.generations[0].edits.find((e) => e.styleName === favName)?.isFavourite === true ? s : null;
+      },
+      { timeoutMs: 15_000, intervalMs: 500 },
+    ).catch(() => null);
+    check(afterFav !== null, `"${favName}" saved as a favourite`);
+    if (!afterFav) throw new Error('the favourite was not saved');
 
     // ---- 5. Revise one to 15 seconds; the others must not change. -----------------------------------------------
     log(`Revise "${reviseName}" with "Make this 15 seconds"`);
@@ -378,7 +386,7 @@ async function main() {
       const same = now && now.currentVersionId === old.currentVersionId && now.versions.length === old.versions.length && now.versions.every((v, i) => v.id === old.versions[i].id && v.status === old.versions[i].status);
       check(Boolean(same), `"${old.styleName}" unchanged by the revision`);
     }
-    const versionSelect = reviseCard.getByLabel('Version');
+    const versionSelect = reviseCard.getByLabel('Version', { exact: true });
     await versionSelect.waitFor({ timeout: 20_000 });
     const optionLabels = await versionSelect.locator('option').allTextContents();
     check(optionLabels.length === 2 && optionLabels.some((l) => l.startsWith('v1')) && optionLabels.some((l) => l.startsWith('v2')), 'version switcher lists v1 and v2', optionLabels.join(' | '));
