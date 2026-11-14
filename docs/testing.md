@@ -396,3 +396,34 @@ its process alive, and five clips sat on "Waiting to be analysed" with no hint w
 - Only verifiable with the owner's accounts: `session=false` and the code lifetime, webhook delivery to the production
   URL, payment-match quality, the location time zone and the Dashboard deep links.
 
+## Email and review requests (Stage C, WP7)
+
+- Unit: `packages/core/test/email-render.test.ts` (escaping, Markdown subset, footer, commercial footer, markers in
+  stored copies), `email-lint.test.ts` (every word list, whole words only, built-in templates pass),
+  `email-policy.test.ts` (one case per gate reason, window and caps across Melbourne days, preview only to the owner,
+  sandbox label, consent fold incl. inferred rule and ties, auto-pause, spread by daily cap, audience reasons),
+  `reviews.test.ts` (parameter-key pin test, completion evidence, `enabledAt`/`maxAgeDays` boundaries, link
+  validation); `apps/worker/test/email.test.ts` (Postmark response mapping, webhook parsing of the fixtures in
+  `test/fixtures/postmark/`, the provider against a fake fetch, DNS hints, Places errors, module registration);
+  `apps/web/test/email.test.ts` (webhook ids and Basic auth, every Postmark and Places card state, ref ids, public
+  paths).
+- Database with a fake provider (`apps/worker/test/helpers/fake-email.ts`) and a fake fetch for Google:
+  `apps/worker/test/email-db.test.ts` — `email.send` twice → one provider call; unknown outcome → `findSent` → sent or
+  `check_before_retry` with no second send; 429 → re-queued and sent; 406 → suppressed + suppression row; 412 →
+  `approved=false`; no consent and Square's opt-out block marketing; the sweep run twice at once → one request;
+  completed before `enabledAt` ignored; cancelled after creation → cancelled; 12 eligible with a cap of 10 → 10 today,
+  2 at 9:00 am tomorrow (Melbourne); campaign expanded twice → no duplicates; a spam complaint on a campaign of 42 →
+  auto-pause; `SuppressSending=false` never lifts a suppression; provider check and Places snapshot (404 → error).
+- Database-backed routes: `apps/web/test/email-routes.integration.test.ts` — webhook with wrong credentials → 401 and
+  nothing stored, replayed delivery → one row and one job; unsubscribe POST idempotent (form and one-click), GET
+  changes nothing; staff 403 and the CSRF guard; approval refused by the gate (422); stale campaign preview → 409;
+  consent with the wording hash; review link validation and the `/r` redirect; manual review requests; the review
+  automation blocked while Square sends feedback; Places refresh limit.
+- Sandbox smoke test (owner present, Postmark **Sandbox** server, never a client):
+  `pnpm --filter @studio/worker exec tsx scripts/email-smoke.ts` runs the read-only check; add
+  `--send-to-self <your address>` to send one Transactional and one Broadcast message to yourself and look both up by
+  metadata (it refuses unless the server is a Sandbox server). Record the response shapes (addresses removed) in
+  `docs/research/email-smoke-YYYY-MM-DD.md`, then send Postmark's test webhooks and use both unsubscribe links.
+- Only verifiable with the owner's accounts: Postmark approval, DKIM/Return-Path, real Gmail/Outlook delivery with the
+  one-click button, Postmark's unsubscribe links after 30 days, the Places billing SKU and attribution text, the first
+  live send (a one-off email to a consenting client, approved by the owner), and real Square completions.

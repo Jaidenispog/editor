@@ -14,6 +14,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
 import { StatusPill } from '@/components/ui/status-pill';
 import { getDb } from '@/lib/db';
+import { approvalCounts } from '@/lib/email';
 import { getIntegrationStatuses } from '@/lib/integrations';
 import { listActiveJobs, toJobDto } from '@/lib/jobs';
 import { listProjects } from '@/lib/projects';
@@ -38,7 +39,13 @@ export default async function DashboardPage() {
   const user = await getCurrentUser();
   if (!user) redirect('/login');
   // Staff see only their own projects and jobs; the owner sees everything.
-  const [projects, jobs, integrations, worker] = await Promise.all([listProjects(user, { limit: 6 }), activeJobsWithTitles(user), getIntegrationStatuses(), getWorkerStatus()]);
+  const [projects, jobs, integrations, worker, approvals] = await Promise.all([
+    listProjects(user, { limit: 6 }),
+    activeJobsWithTitles(user),
+    getIntegrationStatuses(),
+    getWorkerStatus(),
+    user.role === 'owner' ? approvalCounts() : Promise.resolve({ emails: 0, reviewRequests: 0 }),
+  ]);
   // Shown only when no worker heartbeat is fresh; the quieter wording when nothing is waiting yet.
   const notice = workerNotice(worker, jobs.length > 0, { whenIdle: true });
   const firstName = user.displayName.split(/\s+/)[0] ?? '';
@@ -82,6 +89,22 @@ export default async function DashboardPage() {
                 <Alert tone="warning" title={notice.title}>
                   {notice.body}
                 </Alert>
+              ) : null}
+              {approvals.emails + approvals.reviewRequests > 0 ? (
+                <p className="rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                  {approvals.emails ? (
+                    <Link href="/emails" className="font-medium underline">
+                      {approvals.emails} email{approvals.emails === 1 ? '' : 's'}
+                    </Link>
+                  ) : null}
+                  {approvals.emails && approvals.reviewRequests ? ' and ' : ''}
+                  {approvals.reviewRequests ? (
+                    <Link href="/reviews" className="font-medium underline">
+                      {approvals.reviewRequests} review request{approvals.reviewRequests === 1 ? '' : 's'}
+                    </Link>
+                  ) : null}{' '}
+                  waiting for your approval
+                </p>
               ) : null}
               {jobs.length === 0 ? (
                 <div className="flex items-center gap-3 rounded-lg bg-charcoal-50 px-4 py-4 text-sm text-charcoal-600">
