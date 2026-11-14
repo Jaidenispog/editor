@@ -159,6 +159,27 @@ describe('renderEditPlan with real footage', () => {
   );
 
   it(
+    'renders a transition that follows a hard cut',
+    async () => {
+      // concat's output timebase differs from the segment chains'; xfade refuses mismatched inputs unless it is reset.
+      const plan = samplePlan();
+      plan.segments = [
+        { ...plan.segments[0]!, transitionIn: null },
+        { ...plan.segments[1]!, transitionIn: null },
+        { ...plan.segments[2]!, transitionIn: { type: 'dissolve', durationSec: 0.4 } },
+        { ...plan.segments[3]!, transitionIn: null },
+      ];
+      plan.textOverlays = [];
+      const expected = computeTimeline(plan).totalDurationSec;
+      const result = await renderEditPlan(inputs({ plan, brand: { ...TEST_BRAND, socialHandle: '' } }), join(workDir, 'cut-then-transition.mp4'));
+      expect(result.ffmpegArgs.join(' ')).toMatch(/concat=n=2:v=1:a=0,settb=1\/30\[x_1\];\[x_1\]\[v_2\]xfade=transition=dissolve/);
+      expect(result.probe.video).toMatchObject({ codec: 'h264', displayWidth: 540, displayHeight: 960 });
+      expect(Math.abs(result.durationSec - expected)).toBeLessThan(0.15);
+    },
+    RENDER_TIMEOUT,
+  );
+
+  it(
     'renders a silent edit with no audio stream at all',
     async () => {
       const plan = samplePlan();

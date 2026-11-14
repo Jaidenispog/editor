@@ -47,7 +47,7 @@ describe('buildRenderCommand', () => {
     expect(Number(offsets[1]?.[3])).toBeCloseTo(3.6, 6);
     expect(command.filterComplex).toContain('[v_0][v_1]xfade=');
     expect(command.filterComplex).toContain('[x_1][v_2]xfade=');
-    expect(command.filterComplex).toContain('[x_2][v_3]concat=n=2:v=1:a=0[x_3]');
+    expect(command.filterComplex).toContain('[x_2][v_3]concat=n=2:v=1:a=0,settb=1/30[x_3]');
     expect(command.filterComplex.match(/concat=/g)).toHaveLength(1);
   });
 

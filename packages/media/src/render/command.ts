@@ -77,7 +77,9 @@ export function buildRenderCommand(inputs: RenderInputs, outputPath: string, ass
         `[${current}][v_${k}]xfade=transition=${transition.type}:duration=${formatNumber(transition.durationSec)}:offset=${formatNumber(placed.startSec)}[${label}]`,
       );
     } else {
-      filters.push(`[${current}][v_${k}]concat=n=2:v=1:a=0[${label}]`);
+      // concat outputs a 1/1000000 timebase; xfade needs both inputs on the same 1/F timebase, so restore it
+      // here or any transition that follows a hard cut fails to configure.
+      filters.push(`[${current}][v_${k}]concat=n=2:v=1:a=0,settb=1/${output.fps}[${label}]`);
     }
     current = label;
   }
