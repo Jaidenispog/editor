@@ -7,6 +7,7 @@ import { MAX_REVIEW_PAGES, discoverLocations, fetchReviewsPage, type DiscoveredL
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
 import {
+  PERFORMANCE_STATE_CLEARED,
   PROVIDER,
   ProfileStoppedError,
   chosenLocation,
@@ -171,6 +172,8 @@ async function storeDiscovery(ctx: Pick<WorkerContext, 'db'>, found: DiscoveredL
     .update(t)
     .set({
       config: sql`(${t.config} || ${JSON.stringify({ locations: found.slice(0, 100) })}::jsonb) || (case when ${names}::jsonb ? coalesce(${t.config}->>'location', '') then '{}'::jsonb else ${choice}::jsonb end)`,
+      // A location chosen here (or cleared) starts with no Performance state; the old location's never carries over.
+      capabilities: sql`case when ${names}::jsonb ? coalesce(${t.config}->>'location', '') then ${t.capabilities} else ${t.capabilities} || ${JSON.stringify(PERFORMANCE_STATE_CLEARED)}::jsonb end`,
       updatedAt: new Date(),
     })
     .where(signedInRow())

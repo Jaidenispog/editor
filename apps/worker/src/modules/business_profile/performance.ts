@@ -47,7 +47,10 @@ export async function checkProfilePerformance(ctx: WorkerContext, run: TrackedRu
   try {
     await fetchDailyMetrics(ctx, token, location.location, probeWindow(melbourneDateOf(now())), run.signal);
   } catch (err) {
-    await handleProfileError(ctx, err, 'performanceApi', location.location);
+    if ((await handleProfileError(ctx, err, 'performanceApi', location.location)) === 'location_changed') {
+      await run.progress(1, LOCATION_CHANGED);
+      return 'skipped';
+    }
     await run.progress(1, "Waiting for Google's approval of API access");
     return 'awaiting_approval';
   }
@@ -109,7 +112,10 @@ export async function syncProfilePerformance(ctx: WorkerContext, run: TrackedRun
       await run.progress(1, err.message);
       return { stored, outcome: 'skipped' };
     }
-    await handleProfileError(ctx, err, 'performanceApi', location.location);
+    if ((await handleProfileError(ctx, err, 'performanceApi', location.location)) === 'location_changed') {
+      await run.progress(1, LOCATION_CHANGED);
+      return { stored, outcome: 'skipped' };
+    }
     await run.progress(1, "Waiting for Google's approval of API access");
     return { stored, outcome: 'awaiting_approval' };
   }

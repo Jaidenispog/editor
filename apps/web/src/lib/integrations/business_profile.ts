@@ -56,8 +56,8 @@ export function profilePerformanceState(env: IntegrationEnv, conn: ConnectionFac
   return 'not_checked';
 }
 
-/** The Settings card's one Performance line (website design §4.7). */
-export function performanceLine(state: ProfilePerformanceState): string | null {
+/** The Settings card's one Performance line (website design §4.7). While a check runs it never asks to check again. */
+export function performanceLine(state: ProfilePerformanceState, checkInFlight = false): string | null {
   switch (state) {
     case 'available':
       return 'Performance numbers: available.';
@@ -66,7 +66,7 @@ export function performanceLine(state: ProfilePerformanceState): string | null {
     case 'api_disabled':
       return 'Performance numbers: the Business Profile Performance API is not turned on in Google Cloud.';
     case 'error':
-      return "Performance numbers: Google's last answer couldn't be used. Press Check again.";
+      return checkInFlight ? "Performance numbers: Google's last answer couldn't be used; a new check is running." : "Performance numbers: Google's last answer couldn't be used. Press Check again.";
     case 'not_checked':
       return 'Performance numbers: not checked yet.';
     default:
@@ -79,7 +79,7 @@ export function businessProfileCard(env: IntegrationEnv, conn: ConnectionFact | 
   const missing = missingEnv(env, ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']);
   const state = businessProfileState(env, conn, checkInFlight);
   const location = chosenProfileLocation(conn);
-  const perf = performanceLine(profilePerformanceState(env, conn));
+  const perf = performanceLine(profilePerformanceState(env, conn), checkInFlight);
   const base = {
     id: 'google_business_profile',
     name: 'Google Business Profile',
@@ -104,6 +104,9 @@ export function businessProfileCard(env: IntegrationEnv, conn: ConnectionFact | 
     case 'needs_reauth':
       return { ...base, connected: false, state, liveMode: 'read_only', message: conn?.lastError || 'Google needs you to sign in again. Reconnect your Business Profile.' };
     case 'error':
+      if (checkInFlight) {
+        return { ...base, connected: false, state, stateLabel: 'Checking again', pillStatus: 'processing', liveMode: 'read_only', message: "The last check couldn't read your Business Profile. Checking again now (read-only)…" };
+      }
       return { ...base, connected: false, state, liveMode: 'read_only', message: conn?.lastError || "Your Business Profile couldn't be read. Press Check again." };
     case 'awaiting_approval':
       return { ...base, connected: true, state, stateLabel: 'Waiting for Google', liveMode: 'read_only', message: BUSINESS_PROFILE_AWAITING_APPROVAL_MESSAGE };

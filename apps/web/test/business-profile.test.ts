@@ -41,6 +41,15 @@ describe('Business Profile card states (email design §4.8, website design §10.
     // Facts that were not read, or another card's check, never make it "checking".
     expect(buildBusinessProfileIntegrations(env, facts())[0]).toMatchObject({ stateLabel: 'Not checked yet' });
     expect(buildBusinessProfileIntegrations(env, facts(['square']))[0]).toMatchObject({ stateLabel: 'Not checked yet' });
+    // An earlier failure (or a Performance error) never says "Press Check again" while a new check is running.
+    const failed = row({ status: 'error', lastError: "Your Business Profile couldn't be read. Press Check again." });
+    const rechecking = businessProfileCard(env, failed as never, true);
+    expect(rechecking).toMatchObject({ state: 'error', stateLabel: 'Checking again', pillStatus: 'processing' });
+    expect(rechecking.message).not.toMatch(/Press Check again/);
+    expect(businessProfileCard(env, failed as never).message).toMatch(/Press Check again/);
+    const perfError = row({ capabilities: { apiAccess: 'available', performanceApi: 'error' }, config: located });
+    expect(businessProfileCard(env, perfError as never, true).message).not.toMatch(/Press Check again/);
+    expect(businessProfileCard(env, perfError as never).message).toMatch(/Press Check again/);
   });
 
   it('derives the Performance state from the shared connection', () => {

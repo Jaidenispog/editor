@@ -295,6 +295,72 @@ describe.skipIf(skip)('Business Profile module on a real database with a fake Go
       google.state.performanceQuotaZero = false;
       await handle.db.update(t).set({ config: { account: 'accounts/111', location: 'locations/222', locationTitle: 'Ivanhoe Barber Co' } }).where(eq(t.provider, 'google_business_profile'));
     });
+
+    it('an unusable answer about the old location neither fails the job nor records an error, for the probe and the sync', async () => {
+      const t = schema.integrationConnections;
+      const here = { account: 'accounts/111', location: 'locations/222', locationTitle: 'Ivanhoe Barber Co' };
+      const chooseOther = async () => {
+        google.state.beforePerformance = null;
+        await handle.db
+          .update(t)
+          .set({ config: { account: 'accounts/111', location: 'locations/333', locationTitle: 'Second shop' }, capabilities: sql`${t.capabilities} || ${JSON.stringify({ performanceApi: null, performanceMessage: null })}::jsonb` })
+          .where(eq(t.provider, 'google_business_profile'));
+      };
+      google.state.performanceShape = 'weird';
+      for (const job of ['probe', 'sync'] as const) {
+        // The sync runs only while Performance is available for the chosen location.
+        await handle.db
+          .update(t)
+          .set({ config: here, capabilities: sql`${t.capabilities} || ${JSON.stringify({ performanceApi: 'available', performanceMessage: null })}::jsonb` })
+          .where(eq(t.provider, 'google_business_profile'));
+        google.state.beforePerformance = chooseOther;
+        enqueued.length = 0;
+        const run = fakeRun();
+        if (job === 'probe') await handleWebsiteConnectionCheck(ctx, run, { provider: 'business_profile_performance', reason: 'manual' }, deps);
+        else await handleSearchSync(ctx, run, { source: 'business_profile', reason: 'manual' }, deps, async () => {});
+        const row = await conn();
+        expect(row.capabilities['performanceApi'] ?? null).toBeNull();
+        expect(row.capabilities['performanceMessage'] ?? null).toBeNull();
+        expect(enqueued).toHaveLength(0);
+      }
+      google.state.performanceShape = 'ok';
+      await handle.db.update(t).set({ config: here }).where(eq(t.provider, 'google_business_profile'));
+    });
+
+    it("Performance answers never change the shared row's status or last error (reviews may still be failing)", async () => {
+      const t = schema.integrationConnections;
+      await handle.db
+        .update(t)
+        .set({ status: 'error', lastError: 'Reviews could not be read.', config: { account: 'accounts/111', location: 'locations/222', locationTitle: 'Ivanhoe Barber Co' } })
+        .where(eq(t.provider, 'google_business_profile'));
+      google.state.performanceQuotaZero = true;
+      await handleWebsiteConnectionCheck(ctx, fakeRun(), { provider: 'business_profile_performance', reason: 'manual' }, deps);
+      const row = await conn();
+      expect(row.capabilities['performanceApi']).toBe('awaiting_approval');
+      expect(row.status).toBe('error');
+      expect(row.lastError).toBe('Reviews could not be read.');
+      google.state.performanceQuotaZero = false;
+      await handle.db.update(t).set({ status: 'connected', lastError: null }).where(eq(t.provider, 'google_business_profile'));
+    });
+
+    it("a location discovery picks on its own starts with no Performance state; the old location's never carries over", async () => {
+      const t = schema.integrationConnections;
+      await handle.db
+        .update(t)
+        .set({
+          config: { account: 'accounts/111', location: 'locations/999', locationTitle: 'Closed shop' },
+          capabilities: sql`${t.capabilities} || ${JSON.stringify({ apiAccess: 'available', performanceApi: 'available', performanceMessage: null })}::jsonb`,
+        })
+        .where(eq(t.provider, 'google_business_profile'));
+      await handleReviewsGbpSync(ctx, fakeRun(), { reason: 'connect' });
+      const row = await conn();
+      expect(row.config['location']).toBe('locations/222');
+      expect(row.capabilities['performanceApi'] ?? null).toBeNull();
+      // A discovery that keeps the chosen location leaves its Performance state alone.
+      await handle.db.update(t).set({ capabilities: sql`${t.capabilities} || ${JSON.stringify({ performanceApi: 'available' })}::jsonb` }).where(eq(t.provider, 'google_business_profile'));
+      await handleReviewsGbpSync(ctx, fakeRun(), { reason: 'connect' });
+      expect((await conn()).capabilities['performanceApi']).toBe('available');
+    });
   });
 
   it('invalid_grant marks the shared connection needs_reauth and stops without retrying', async () => {

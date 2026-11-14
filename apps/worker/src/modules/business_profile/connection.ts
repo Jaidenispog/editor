@@ -77,15 +77,6 @@ export function recordProfileCheck(ctx: Pick<WorkerContext, 'db'>, result: Conne
   return recordConnectionCheck(ctx.db, PROVIDER, result, now, { unlessDisconnected: true });
 }
 
-/** Merges keys into the row's config (only the keys given change), unless the owner has disconnected it. */
-export async function mergeConfig(ctx: Pick<WorkerContext, 'db'>, patch: Record<string, unknown>, now: Date = new Date()): Promise<void> {
-  const t = schema.integrationConnections;
-  await ctx.db
-    .update(t)
-    .set({ config: sql`${t.config} || ${JSON.stringify(patch)}::jsonb`, updatedAt: now })
-    .where(signedInRow());
-}
-
 /** Thrown when the owner disconnected the Business Profile, or chose another location, while a job was storing data. */
 export class ProfileStoppedError extends Error {
   constructor(message: string) {
@@ -110,6 +101,9 @@ export async function whileSignedIn<T>(ctx: Pick<WorkerContext, 'db'>, location:
   });
 }
 
+/** The Performance state that belongs to one location; cleared whenever the chosen location changes. */
+export const PERFORMANCE_STATE_CLEARED = { performanceApi: null, performanceMessage: null } as const;
+
 /** Which capability key an API answer is recorded under. */
 export type ProfileApi = 'apiAccess' | 'performanceApi';
 
@@ -122,14 +116,14 @@ export type ProfileApi = 'apiAccess' | 'performanceApi';
  * recorded only while the row is still set to the `location` that was asked about (required for `performanceApi`).
  */
 export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: unknown, api: 'apiAccess'): Promise<'awaiting_approval'>;
-export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: unknown, api: 'performanceApi', location: string): Promise<'awaiting_approval'>;
-export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: unknown, api: ProfileApi, location?: string): Promise<'awaiting_approval'> {
+export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: unknown, api: 'performanceApi', location: string): Promise<'awaiting_approval' | 'location_changed'>;
+export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: unknown, api: ProfileApi, location?: string): Promise<'awaiting_approval' | 'location_changed'> {
   if (!(err instanceof BusinessProfileError)) throw err;
   const messageKey = api === 'apiAccess' ? 'apiAccessMessage' : 'performanceMessage';
   if (err.kind === 'transient') throw err;
   if (err.kind === 'awaiting_approval' && api === 'performanceApi') {
-    await setProfileCapabilities(ctx, { performanceApi: 'awaiting_approval' satisfies BusinessProfileApiState, performanceMessage: null }, location ?? null);
-    return 'awaiting_approval';
+    const recorded = await setProfileCapabilities(ctx, { performanceApi: 'awaiting_approval' satisfies BusinessProfileApiState, performanceMessage: null }, location ?? null);
+    return recorded ? 'awaiting_approval' : 'location_changed';
   }
   if (err.kind === 'awaiting_approval') {
     await recordProfileCheck(ctx, {
@@ -146,14 +140,24 @@ export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: un
   const state: BusinessProfileApiState = err.kind === 'api_disabled' ? 'api_disabled' : 'error';
   if (api === 'apiAccess') {
     if (err.kind === 'not_found') {
-      await mergeConfig(ctx, { location: null, account: null, locationTitle: null });
+      // The location is gone: clear it, and the Performance state that belonged to it.
+      const t = schema.integrationConnections;
+      await ctx.db
+        .update(t)
+        .set({
+          config: sql`${t.config} || ${JSON.stringify({ location: null, account: null, locationTitle: null })}::jsonb`,
+          capabilities: sql`${t.capabilities} || ${JSON.stringify(PERFORMANCE_STATE_CLEARED)}::jsonb`,
+          updatedAt: new Date(),
+        })
+        .where(signedInRow());
       await recordProfileCheck(ctx, { status: 'connected', lastError: err.message, capabilities: { apiAccess: 'available', apiAccessMessage: err.message } });
     } else {
       await recordProfileCheck(ctx, { status: 'error', lastError: err.message, capabilities: { apiAccess: state, apiAccessMessage: err.message } });
     }
   } else {
     // The reviews side may still work: only the Performance capability changes, and only for the location asked about.
-    await setProfileCapabilities(ctx, { performanceApi: state, performanceMessage: err.message }, location ?? null);
+    // If the owner chose another location meanwhile, this answer is about a location nobody is looking at any more.
+    if (!(await setProfileCapabilities(ctx, { performanceApi: state, performanceMessage: err.message }, location ?? null))) return 'location_changed';
   }
   throw new NonRetryableError(err.kind === 'unrecognised' ? 'PROCESSING_FAILED' : 'INTEGRATION_NOT_CONFIGURED', err.message);
 }
