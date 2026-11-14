@@ -334,6 +334,109 @@ TikTok apps, Web Share on iOS, the YouTube chart (no key), Spotify references (l
 by the WP1 unit and route tests), and how learned defaults feel after weeks of real use are not covered either; all
 footage and music are synthetic.
 
+## Stage C browser test: bookings, email and reviews
+
+`apps/web/e2e/stage-c-bookings.e2e.mjs` checks Square appointments (WP6, with WP6b's booking changes switched off),
+email and review requests (WP7) in Chromium, against local fakes of Square and Postmark. Like the Stage B test it is
+plain Node + Playwright, drives the real UI as the owner (and, where it matters, a barber) would, and prints
+`N checks passed, 0 failed`.
+
+```bash
+bash apps/web/e2e/run-stage-c-bookings.sh                    # fresh database studio_e2e_c1, build, port 3800
+E2E_SKIP_BUILD=1 bash apps/web/e2e/run-stage-c-bookings.sh   # reuse the last build
+```
+
+The runner creates and migrates a throwaway database, builds the web app, then starts one fake process
+(`apps/web/e2e/fake-stage-c.ts`, three free ports: Square, Postmark and a control port the test uses to change the
+Square scenario, hold Postmark sends and read what each fake recorded), `next start` and the worker, all with
+`NODE_ENV=test`. It runs the test file twice: phase `sandbox` with `SQUARE_ENVIRONMENT=sandbox`, then it stops the web
+app and the worker, starts both again with `SQUARE_ENVIRONMENT=production` (still the fake; the fakes keep running and
+keep what they recorded) and runs phase `production`, which loads the first phase's results from a state file and
+prints the total. Everything is stopped and the database dropped afterwards (logs and failure screenshots are kept on
+failure or with `E2E_KEEP=1`). Other settings: `E2E_PG_URL`, `E2E_DB`, `E2E_PORT`, `E2E_WORK_DIR`. A staff (barber)
+account is added with `apps/web/e2e/add-staff-user.ts` (the app has no screen for that yet), and scheduled jobs the
+test does not want to wait for (`email.automation.sweep`, `email.dispatch`, a repeated `email.send`) are sent through
+the app's own queue by `apps/web/e2e/enqueue-job.ts`. Every wait is on a real state (a job row finished, a status in
+the API, a send held at the fake), never on a fixed delay. A passing run prints `118 checks passed, 0 failed` (57 in
+the sandbox phase); three consecutive runs on 2026-11-14 took 134, 117 and 116 s including the restart (plus the build).
+
+**What the fakes replace.**
+- Square (`apps/worker/test/fakes/square-server.ts`, the same model the worker's database tests use): the authorise
+  page (it "approves" at once and redirects back with a code), the code exchange, token status, merchant, locations,
+  booking profiles, catalogue, bookings, customers, payments and orders, in Square's own JSON through the real
+  `square` SDK. Every write is refused and recorded. Reached through `SQUARE_API_BASE_URL`.
+- Postmark (`apps/worker/test/fakes/postmark-server.ts`): `GET /server`, `/message-streams`, `/webhooks` (the webhook
+  registered on both streams), `POST /email` (recorded, never delivered; it can hold a send until the test releases
+  it), the outbound message search and suppressions. Reached through `POSTMARK_API_BASE_URL`, the one configuration
+  hook added for this test: like the other base URLs it is read through `testOnlyBaseUrl` and ignored unless
+  `NODE_ENV=test`, so a deployment always calls `https://api.postmarkapp.com` (unit tests in
+  `apps/worker/test/email.test.ts` and `packages/config/test/env.test.ts`).
+- Google Places is not faked: without `GOOGLE_MAPS_API_KEY` the rating card must show its setup state and no number.
+
+**What it covers** (database rows are read only where the UI cannot show them):
+
+- Square sandbox: Settings → Integrations shows Square "Not connected" and Appointments the "nothing here is
+  simulated" overview; Connect Square goes through the real connect route, the fake authorise page and the callback,
+  asking for read scopes only (`session=false`, the registered callback); tokens are stored encrypted and never reach
+  the page. With two Square locations nothing is copied until the owner chooses one; the first sync then lists
+  tomorrow's booking as "10:00 am – 10:45 am" under tomorrow's Melbourne date, with "Sandbox — these are Square test
+  bookings and test clients, not real ones." and the "Sandbox (test)" pill; the other location's booking is not
+  shown. The owner sees a client's email and phone; a barber sees names only (Clients tab, booking dialog and both
+  APIs).
+- Booking changes stay off: no "New booking", no Move or Cancel, the header says changes are made in Square,
+  `POST /api/appointments/changes` is refused with "Booking changes from Studio Assistant aren’t available yet. Make
+  changes in Square." and nothing is recorded, write permission is never requested, and the fake records zero write
+  calls over the whole run.
+- Email set-up: business name, address, phone and email saved; "Check connection" reads Postmark's server, streams
+  and webhooks and the fake records zero sends; the card then says Live and that every email waits for approval. An
+  invalid review link is refused with the reason (a deliberate 400) and nothing is saved; a `g.page` link is saved and
+  still shown after a reload. The sending window is set to 00:00–23:59 (so the run does not depend on the hour; the
+  window rule itself is unit-tested; a send attempted in the last minute before midnight Melbourne time would wait for
+  the window and time out), and the follow-up and review automations are switched on in "Ask me to approve
+  each one" mode.
+- A past sandbox booking marked "Attended" shows "Attended — marked by E2E Owner" after a reload, but is not stored as
+  a completed visit, and an automation sweep creates no follow-up and no review request for it.
+- A correctly signed Square webhook (HMAC over the notification URL and body) is accepted, the worker re-reads the
+  booking from the fake, only the envelope is stored (not the client's note), and the booking shows "Cancelled by
+  client" after a reload; a webhook with a wrong or made-up signature gets 401 and nothing is stored.
+- Production (after the restart): Square shows "Reconnect needed" with "Studio Assistant is now set to live Square.
+  Reconnect to load your real bookings; the test data will be removed." and Appointments keeps the sandbox label and
+  "May be out of date". Reconnecting removes the sandbox bookings and scrubs the sandbox clients; after choosing the
+  location the live bookings appear with "Live Square" and no sandbox label.
+- Consent: a barber records Riley's permission at the counter ("Client ticks on this device", with the consent wording
+  shown) and the owner records three more; Emails → Clients shows "Permission recorded" for those four and "No
+  permission" for the fifth; the ledger keeps the method.
+- Review request: the owner marks the live booking attended (stored as `owner_marked`); the sweep prepares a review
+  request, listed in Reviews as "Waiting for approval" (and the follow-up waits in Emails → To approve; Emails' own
+  queue leaves review requests to the Reviews page by design); nothing is sent before approval. After "Approve and
+  send" the fake receives exactly one email for Riley, on the Broadcast stream, with the sender identification footer
+  (business name, street address, phone and email), an unsubscribe link to `/u/…` and the review link through the
+  app's `/r/…` redirect, and no incentive or selective wording. Reviews then shows "Sent" and Emails → Sent lists it.
+  Running `email.send` for the same message and `email.dispatch` again sends nothing more.
+- Unsubscribe: opening and reloading `/u/<token>` only asks ("Unsubscribe r•••@example.com …?") and records nothing;
+  the button confirms "You’re unsubscribed", which stays after a reload, and Emails → Clients shows "Unsubscribed".
+- Campaign: three clients are included and Riley (unsubscribed) and Noah (no permission) are left out. With the fake
+  holding sends, the first email is in flight when the owner presses Pause; after it is released nothing more goes out
+  (one send, "Paused", "1 of 3 sent" after a reload). After Resume, while the second email is in flight, a Postmark
+  `SpamComplaint` for the first recipient with the right Basic credentials pauses the campaign by itself ("Paused
+  automatically: 1 spam complaint out of 1 sent. …") and suppresses that address for all email ("Bounced or spam");
+  the in-flight email is the last one. A hard bounce suppresses the second address. The same complaint with a wrong or
+  missing password gets 401 and nothing is stored. "Cancel remaining" leaves nothing to send. Over the whole run Riley
+  received only the review request and Noah nothing.
+- Appointments, Appointments → Past, every Emails tab and Reviews have no horizontal overflow at 390 px (sandbox
+  Appointments too); no page or console errors in either phase except the deliberate 400 for the invalid review link
+  (it must actually appear).
+
+**Not verified without the owner's real accounts.** Square: the real authorise page and its `session=false`
+behaviour, the code lifetime, which scopes Square really grants, webhook delivery to the production address and
+Square's real signature header, real booking shapes and statuses, payment matching on real payments, the location's
+time zone, Dashboard deep links, and everything about booking changes (they stay switched off until the sandbox write
+checks are recorded). Postmark: account approval, DKIM and Return-Path, real delivery to Gmail and Outlook with the
+one-click unsubscribe button and Postmark's own unsubscribe handling, the real webhook payloads and Basic credentials,
+the message search after a lost answer, and the first live send to a consenting client. Google: the Places rating and
+attribution (no key here) and whether the owner's review link opens the review form. The fakes answer the documented
+happy path immediately.
+
 ## Worker start-up and liveness (14 Nov 2026 incident)
 
 The owner started `bash scripts/dev.sh` before the database. The worker died in `pg-boss` start, `tsx watch` kept
@@ -396,7 +499,8 @@ its process alive, and five clips sat on "Waiting to be analysed" with no hint w
   endpoint, verified webhook stored once with one job, lists, attendance refused on NO_SHOW, contact details for the
   owner only, service confirmation, `writesEnabled` refused, availability validation, disconnect with purge and revoke,
   reconnecting in the other environment purges; the webhook stores only the minimal envelope; nothing listed until a
-  location is chosen and choosing removes the other location's bookings; a sandbox mark never completes; the
+  location is chosen and choosing removes the other location's bookings and queues a sync over the connect range (so
+  the location's past bookings are copied at once); a sandbox mark never completes; the
   review-request badge on past bookings, including "Sent before the booking changed"; a signed delivery for another
   merchant or after a disconnect does not update "last update received"; the revoke outcome on the card: waiting,
   failed with the App integrations instruction, revoked; owner only). `apps/worker/test/square-map.test.ts`: a booking

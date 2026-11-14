@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { ALL_JOB_TYPES } from '@studio/core';
 import { QUEUE_SETTINGS } from '@studio/queue';
 import { POSTMARK_API_BASE, PostmarkProvider, mapSendResponse, parsePostmarkWebhook } from '../src/lib/email/postmark.js';
-import { createEmailProvider } from '../src/lib/email/provider.js';
+import { createEmailProvider, postmarkSettings } from '../src/lib/email/provider.js';
 import { hashLinkToken, newLinkToken } from '../src/lib/email/tokens.js';
 import { dnsHints } from '../src/handlers/email-check.js';
 import { placesErrorFor } from '../src/lib/google/places.js';
@@ -128,6 +128,23 @@ describe('PostmarkProvider against a fake fetch', () => {
     expect(createEmailProvider({ env: env({}), logger })).toBeNull();
     expect(createEmailProvider({ env: env({ EMAIL_PROVIDER: 'postmark', POSTMARK_SERVER_TOKEN: 't' }), logger })).toBeNull();
     expect(createEmailProvider({ env: env({ EMAIL_PROVIDER: 'postmark', POSTMARK_SERVER_TOKEN: 't', EMAIL_FROM: 'a@b.example' }), logger })).toBeInstanceOf(PostmarkProvider);
+  });
+
+  it('calls a local fake host only under NODE_ENV=test (POSTMARK_API_BASE_URL is inert in production)', async () => {
+    const env = (over: Record<string, unknown>) =>
+      ({ EMAIL_PROVIDER: 'postmark', POSTMARK_SERVER_TOKEN: 't', EMAIL_FROM: 'a@b.example', POSTMARK_TRANSACTIONAL_STREAM: 'outbound', POSTMARK_BROADCAST_STREAM: 'broadcast', POSTMARK_API_BASE_URL: 'http://127.0.0.1:4999/', ...over }) as never;
+    expect(postmarkSettings(env({ NODE_ENV: 'production' }))?.apiBase).toBe(POSTMARK_API_BASE);
+    expect(postmarkSettings(env({ NODE_ENV: 'development' }))?.apiBase).toBe(POSTMARK_API_BASE);
+    expect(postmarkSettings(env({ NODE_ENV: 'test' }))?.apiBase).toBe('http://127.0.0.1:4999');
+    expect(postmarkSettings(env({ NODE_ENV: 'test', POSTMARK_API_BASE_URL: undefined }))?.apiBase).toBe(POSTMARK_API_BASE);
+    const sent = () => fakeFetch(() => json(200, { ErrorCode: 0, MessageID: 'pm-1', SubmittedAt: '2026-11-14T00:00:00Z' }));
+    const live = sent();
+    const msg = { emailMessageId: 'm1', to: 'c@example.com', from: 'a@b.example', replyTo: null, subject: 's', html: '<p>x</p>', text: 'x', stream: 'transactional' as const, tag: 'custom', metadata: {} };
+    await new PostmarkProvider({ fetch: live, logger }, postmarkSettings(env({ NODE_ENV: 'production' }))!).send(msg, signal);
+    expect(live.calls[0]?.url).toBe(`${POSTMARK_API_BASE}/email`);
+    const local = sent();
+    await new PostmarkProvider({ fetch: local, logger }, postmarkSettings(env({ NODE_ENV: 'test' }))!).send(msg, signal);
+    expect(local.calls[0]?.url).toBe('http://127.0.0.1:4999/email');
   });
 });
 

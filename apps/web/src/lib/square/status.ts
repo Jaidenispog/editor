@@ -285,7 +285,10 @@ export async function updateSquareSettings(
       return tx.delete(b).where(and(eq(b.squareEnvironment, config.environment), ne(b.locationId, loc.id))).returning({ id: b.id });
     });
     await writeAudit({ userId: user.id, action: 'integration.square.location_selected', entityType: 'integration_connection', entityId: conn.id, data: { locationId: loc.id, otherLocationBookingsRemoved: removed.length } });
-    await queueSquareSync('manual');
+    // The first copy for a newly chosen location reads the connect range (the last 31 days and the next 62), like the
+    // sync after connecting: a scheduled-size range would leave the location's past bookings (To confirm, Past) out
+    // until the nightly reconcile.
+    await queueSquareSync('connect');
   }
   if (body.serviceConfirmation) {
     const { variationId, confirmed } = body.serviceConfirmation;

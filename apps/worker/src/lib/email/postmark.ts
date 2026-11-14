@@ -19,6 +19,8 @@ interface PostmarkSettings {
   from: string;
   transactionalStream: string;
   broadcastStream: string;
+  /** API host; {@link POSTMARK_API_BASE} unless a test points it at a local fake (only under NODE_ENV=test). */
+  apiBase?: string;
 }
 
 type Json = Record<string, unknown>;
@@ -119,8 +121,13 @@ export class PostmarkProvider implements EmailProvider {
     return stream === 'broadcast' ? this.settings.broadcastStream : this.settings.transactionalStream;
   }
 
+  /** Postmark's API host, or the local fake a test configured (see `postmarkSettings`). */
+  private get base(): string {
+    return this.settings.apiBase ?? POSTMARK_API_BASE;
+  }
+
   private async get(path: string, label: string, signal: AbortSignal): Promise<{ status: number; body: Json | null }> {
-    const res = await httpRequest(this.ctx, `${POSTMARK_API_BASE}${path}`, { method: 'GET', headers: this.headers() }, { label, signal });
+    const res = await httpRequest(this.ctx, `${this.base}${path}`, { method: 'GET', headers: this.headers() }, { label, signal });
     return { status: res.status, body: (await readJson(res)) as Json | null };
   }
 
@@ -178,7 +185,7 @@ export class PostmarkProvider implements EmailProvider {
     };
     let res: Response;
     try {
-      res = await httpRequest(this.ctx, `${POSTMARK_API_BASE}/email`, { method: 'POST', headers: this.headers(true), body: JSON.stringify(body) }, { label: 'postmark.send', signal, timeoutMs: SEND_TIMEOUT_MS });
+      res = await httpRequest(this.ctx, `${this.base}/email`, { method: 'POST', headers: this.headers(true), body: JSON.stringify(body) }, { label: 'postmark.send', signal, timeoutMs: SEND_TIMEOUT_MS });
     } catch (err) {
       if (err instanceof CancelledError) throw err;
       // The request may have reached Postmark: never assume it did not. The retry looks it up first.
@@ -203,7 +210,7 @@ export class PostmarkProvider implements EmailProvider {
   async suppress(email: string, stream: 'transactional' | 'broadcast', signal: AbortSignal): Promise<void> {
     const res = await httpRequest(
       this.ctx,
-      `${POSTMARK_API_BASE}/message-streams/${encodeURIComponent(this.streamId(stream))}/suppressions`,
+      `${this.base}/message-streams/${encodeURIComponent(this.streamId(stream))}/suppressions`,
       { method: 'POST', headers: this.headers(true), body: JSON.stringify({ Suppressions: [{ EmailAddress: email }] }) },
       { label: 'postmark.suppress', signal },
     );

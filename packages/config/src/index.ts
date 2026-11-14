@@ -123,6 +123,8 @@ export const EnvSchema = z.object({
   /** Host of Meta's login dialog (normally https://www.facebook.com); a local fake in the Stage B browser test. */
   META_DIALOG_BASE_URL: optionalUrl(),
   SQUARE_API_BASE_URL: optionalUrl(),
+  /** Postmark's API host (normally https://api.postmarkapp.com); a local fake in the Stage C browser test. */
+  POSTMARK_API_BASE_URL: optionalUrl(),
 });
 
 /** An optional absolute http(s) URL; an empty string counts as unset. */
