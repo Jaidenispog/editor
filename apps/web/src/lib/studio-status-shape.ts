@@ -1,0 +1,235 @@
+import { STYLES, STYLE_IDS, type AppSettings, type MusicLicence, type StyleId, type StyleSupport } from '@studio/core';
+import type { Edit, EditVersion, Generation, JobRow, MediaAsset, MusicTrack, Project } from '@studio/db';
+import type { AssetDto, EditDto, GenerationDto, MusicOptionDto, StudioStatusDto, StyleOptionDto, VersionDto } from './shared/studio-dto.js';
+import { ACTIVE_VERSION_STATUSES, PROCESSING_ASSET_STATUSES } from './shared/studio-dto.js';
+import type { JobDto } from './shared/dto.js';
+
+/** Turns a storage key into a short-lived link (or null when it cannot be signed). */
+export type LinkSigner = (key: string) => Promise<string | null>;
+
+/** Rows needed to build the status payload, already loaded from the database. */
+export interface StudioStatusRows {
+  project: Project;
+  assets: MediaAsset[];
+  tracks: MusicTrack[];
+  generations: Generation[];
+  edits: Edit[];
+  versions: EditVersion[];
+  jobs: JobDto[];
+  settings: AppSettings;
+  maxUploadBytes: number;
+  partSize: number;
+  now?: Date;
+}
+
+const NO_CLIPS_REASON = 'Add your clips first. Styles become available once the clips have been analysed.';
+
+/** The five styles in order, each marked supported or not with the plain reason from the analysis. */
+export function shapeStyleOptions(styleSupport: StyleSupport[] | null): StyleOptionDto[] {
+  const byId = new Map((styleSupport ?? []).map((s) => [s.styleId, s]));
+  return STYLE_IDS.map((id) => {
+    const def = STYLES[id];
+    const s = byId.get(id);
+    return {
+      id,
+      name: def.name,
+      description: def.shortDescription,
+      supported: s ? s.supported : false,
+      reason: s ? (s.supported ? '' : s.reason) : NO_CLIPS_REASON,
+    };
+  });
+}
+
+/** Browser-safe summary of one clip; the thumbnail is a signed link, the storage keys stay on the server. */
+export async function shapeAsset(asset: MediaAsset, sign: LinkSigner): Promise<AssetDto> {
+  const video = asset.probe?.video ?? asset.analysis?.probe.video ?? null;
+  const analysis = asset.analysis;
+  let shots: AssetDto['shots'] = null;
+  if (analysis) {
+    const labels: Record<string, number> = {};
+    let identified = 0;
+    for (const s of analysis.shots) {
+      labels[s.label] = (labels[s.label] ?? 0) + 1;
+      if (s.label !== 'unknown' && s.label !== 'other') identified++;
+    }
+    shots = { count: analysis.shots.length, identified, labels };
+  }
+  const probe = asset.probe ?? analysis?.probe ?? null;
+  return {
+    id: asset.id,
+    filename: asset.originalFilename,
+    status: asset.status,
+    statusMessage: asset.statusMessage,
+    sortOrder: asset.sortOrder,
+    byteSize: asset.byteSize,
+    thumbnailUrl: asset.thumbnailKey ? await sign(asset.thumbnailKey) : null,
+    durationSec: probe ? probe.durationSec : null,
+    width: video?.displayWidth ?? null,
+    height: video?.displayHeight ?? null,
+    rotation: video?.rotation ?? 0,
+    isHdr: Boolean(video?.isHdr),
+    hasAudio: analysis ? analysis.audio.hasAudio : probe ? probe.audio !== null : null,
+    speechLikely: Boolean(analysis?.audio.speechLikely),
+    hasTranscript: Boolean(analysis?.transcript && analysis.transcript.segments.length > 0),
+    clipLabel: asset.clipLabel,
+    shots,
+    createdAt: asset.createdAt.toISOString(),
+  };
+}
+
+/** Plain one-line summary of what a music licence covers. */
+export function licenceSummary(licence: MusicLicence): string {
+  if (!licence.confirmedByOwnerAt) return 'Licence not confirmed';
+  if (licence.expiresAt && new Date(licence.expiresAt).getTime() < Date.now()) return 'Licence expired';
+  const places = (
+    [
+      ['instagram', 'Instagram'],
+      ['tiktok', 'TikTok'],
+      ['youtube', 'YouTube'],
+      ['website', 'website'],
+    ] as const
+  )
+    .filter(([k]) => licence.permitted[k])
+    .map(([, name]) => name);
+  return places.length ? `Licence confirmed · ${places.join(', ')}` : 'Licence confirmed';
+}
+
+/** Library track as a music choice in the style controls. */
+export function shapeMusicOption(track: MusicTrack): MusicOptionDto {
+  return {
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    status: track.status,
+    statusMessage: track.statusMessage,
+    bpm: track.bpm,
+    durationSec: track.durationSec,
+    licence: track.licence,
+    licenceConfirmed: Boolean(track.licence.confirmedByOwnerAt),
+    licenceSummary: licenceSummary(track.licence),
+  };
+}
+
+/** One version of an edit; preview links only for finished previews, poster from the first clip used. */
+export async function shapeVersion(version: EditVersion, posterKeyFor: (assetId: string) => string | null, sign: LinkSigner): Promise<VersionDto> {
+  const firstAssetId = version.plan?.segments[0]?.assetId ?? null;
+  const posterKey = firstAssetId ? posterKeyFor(firstAssetId) : null;
+  const previewReady = version.status === 'preview_ready' && Boolean(version.previewKey);
+  return {
+    id: version.id,
+    versionNo: version.versionNo,
+    status: version.status,
+    statusMessage: version.statusMessage,
+    origin: version.origin,
+    instruction: version.instruction,
+    planSource: version.planSource,
+    warnings: (version.validation?.warnings ?? []).map((w) => w.message).filter((m) => m.trim().length > 0),
+    previewUrl: previewReady && version.previewKey ? await sign(version.previewKey) : null,
+    posterUrl: posterKey ? await sign(posterKey) : null,
+    previewDurationSec: version.previewDurationSec,
+    exportStatus: version.exportStatus,
+    exportMessage: version.exportMessage,
+    exportByteSize: version.exportByteSize,
+    createdAt: version.createdAt.toISOString(),
+  };
+}
+
+function isStyleId(value: string): value is StyleId {
+  return (STYLE_IDS as readonly string[]).includes(value);
+}
+
+/** True when anything in the payload is still queued or being worked on. */
+export function isStudioBusy(dto: Pick<StudioStatusDto, 'assets' | 'generations' | 'jobs' | 'music'>): boolean {
+  if (dto.jobs.some((j) => j.status === 'queued' || j.status === 'running')) return true;
+  if (dto.assets.some((a) => PROCESSING_ASSET_STATUSES.includes(a.status))) return true;
+  if (dto.music.some((m) => m.status === 'uploaded' || m.status === 'processing')) return true;
+  for (const g of dto.generations) {
+    if (g.status === 'queued' || g.status === 'planning' || g.status === 'rendering') return true;
+    for (const e of g.edits) {
+      for (const v of e.versions) {
+        if (ACTIVE_VERSION_STATUSES.includes(v.status)) return true;
+        if (v.exportStatus === 'queued' || v.exportStatus === 'rendering') return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Builds the GET /api/projects/[id]/status payload from loaded rows. Pure apart from the signer, so it can be
+ * unit tested; nothing private (storage keys, plans, payloads) is copied into the result.
+ */
+export async function shapeStudioStatus(rows: StudioStatusRows, sign: LinkSigner): Promise<StudioStatusDto> {
+  const { project, settings } = rows;
+  const videoAssets = rows.assets.filter((a) => a.kind === 'video' && !a.deletedAt).sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt.getTime() - b.createdAt.getTime());
+  const thumbById = new Map(rows.assets.map((a) => [a.id, a.thumbnailKey]));
+  const posterKeyFor = (assetId: string) => thumbById.get(assetId) ?? null;
+
+  const versionsByEdit = new Map<string, EditVersion[]>();
+  for (const v of rows.versions) {
+    const list = versionsByEdit.get(v.editId) ?? [];
+    list.push(v);
+    versionsByEdit.set(v.editId, list);
+  }
+
+  const generations: GenerationDto[] = [];
+  const sortedGenerations = [...rows.generations].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  for (const g of sortedGenerations) {
+    const edits: EditDto[] = [];
+    const genEdits = rows.edits.filter((e) => e.generationId === g.id && !e.deletedAt).sort((a, b) => a.slot - b.slot);
+    for (const e of genEdits) {
+      if (!isStyleId(e.styleId)) continue;
+      const def = STYLES[e.styleId];
+      const versions = [...(versionsByEdit.get(e.id) ?? [])].sort((a, b) => b.versionNo - a.versionNo);
+      edits.push({
+        id: e.id,
+        styleId: e.styleId,
+        styleName: def.name,
+        styleDescription: def.shortDescription,
+        slot: e.slot,
+        isFavourite: e.isFavourite,
+        currentVersionId: e.currentVersionId,
+        versions: await Promise.all(versions.map((v) => shapeVersion(v, posterKeyFor, sign))),
+      });
+    }
+    generations.push({
+      id: g.id,
+      status: g.status,
+      statusMessage: g.statusMessage,
+      plannerUsed: g.plannerUsed,
+      settings: g.settings,
+      createdAt: g.createdAt.toISOString(),
+      edits,
+    });
+  }
+
+  const music = rows.tracks.filter((t) => !t.deletedAt && t.projectId === null).map(shapeMusicOption);
+  const assets = await Promise.all(videoAssets.map((a) => shapeAsset(a, sign)));
+  const prefs = settings.preferences;
+  const partial = { assets, generations, jobs: rows.jobs, music };
+  return {
+    project: {
+      id: project.id,
+      title: project.title,
+      clientName: project.clientName,
+      notes: project.notes,
+      status: project.status,
+      lastSettings: project.lastSettings,
+      updatedAt: project.updatedAt.toISOString(),
+    },
+    styles: shapeStyleOptions(videoAssets.length ? project.styleSupport : null),
+    assets,
+    music,
+    generations,
+    jobs: rows.jobs,
+    defaults: {
+      durationSec: prefs.defaultDurationSec,
+      keepOriginalSound: prefs.keepOriginalSound,
+      captions: prefs.captions,
+      preferredStyles: prefs.preferredStyles,
+    },
+    limits: { maxUploadBytes: rows.maxUploadBytes, partSize: rows.partSize },
+    busy: isStudioBusy(partial),
+    generatedAt: (rows.now ?? new Date()).toISOString(),
+  };
+}
