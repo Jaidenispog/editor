@@ -68,11 +68,17 @@ if [[ "${E2E_SKIP_BUILD:-0}" != "1" ]]; then
   pnpm --dir "$REPO_ROOT/apps/web" build >"$WORK/logs/build.log" 2>&1
 fi
 
-# setsid gives each process its own group so the cleanup can stop it with everything it started.
-(cd "$REPO_ROOT/apps/web" && exec setsid ./node_modules/.bin/next start -p "$PORT" >"$WORK/logs/web.log" 2>&1 </dev/null) &
-WEB_PID=$!
-(cd "$REPO_ROOT/apps/worker" && exec setsid ./node_modules/.bin/tsx src/main.ts >"$WORK/logs/worker.log" 2>&1 </dev/null) &
-WORKER_PID=$!
+# Each process runs in its own session (setsid) so the cleanup can stop it with everything it started. The
+# session leader writes its own pid, which is also the process-group id the cleanup signals.
+start_detached() {
+  local dir="$1" pidfile="$2" logfile="$3"
+  shift 3
+  (cd "$dir" && setsid bash -c 'echo $$ >"$0"; exec "$@"' "$pidfile" "$@" >"$logfile" 2>&1 </dev/null &)
+  for _ in $(seq 1 50); do [[ -s "$pidfile" ]] && break; sleep 0.1; done
+  cat "$pidfile"
+}
+WEB_PID="$(start_detached "$REPO_ROOT/apps/web" "$WORK/web.pid" "$WORK/logs/web.log" ./node_modules/.bin/next start -p "$PORT")"
+WORKER_PID="$(start_detached "$REPO_ROOT/apps/worker" "$WORK/worker.pid" "$WORK/logs/worker.log" ./node_modules/.bin/tsx src/main.ts)"
 
 for _ in $(seq 1 60); do
   curl -fsS "http://localhost:$PORT/api/health" >/dev/null 2>&1 && grep -q '"worker started"' "$WORK/logs/worker.log" && break
