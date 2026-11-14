@@ -32,3 +32,7 @@ export * from './publishing.js';
 export * from './jobs/publishing.js';
 export * from './settings/publishing.js';
 export * from './hashtag-watch.js';
+export * from './email.js';
+export * from './reviews.js';
+export * from './jobs/email.js';
+export * from './settings/email.js';

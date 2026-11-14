@@ -1,6 +1,8 @@
 import { relations, sql } from 'drizzle-orm';
 import {
+  type AnyPgColumn,
   boolean,
+  date,
   index,
   integer,
   jsonb,
@@ -26,6 +28,7 @@ import type {
 } from '@studio/core';
 import { timestamps } from './schema/common.js';
 import { trendWatches } from './schema/trends.js';
+import { emailCampaigns } from './schema/email.js';
 
 /** State of one extra export file of a version (`edit_versions.variant_exports`). */
 export interface VariantExportState {
@@ -667,8 +670,12 @@ export const emailTemplates = pgTable(
     purpose: text('purpose', { enum: ['follow_up', 'review_request', 'campaign', 'rebooking', 'custom'] }).notNull(),
     subject: text('subject').notNull(),
     bodyMarkdown: text('body_markdown').notNull(),
-    /** Commercial (marketing) messages require consent and an unsubscribe link under the Spam Act. */
+    /** Commercial (marketing) messages require consent and an unsubscribe link under the Spam Act. Kept equal to `message_class != 'transactional_factual'`. */
     isCommercial: boolean('is_commercial').notNull().default(true),
+    /** `transactional_factual`, `review_request` or `campaign` (decides the stream, the linter rules and the consent rules). */
+    messageClass: text('message_class', { enum: ['transactional_factual', 'review_request', 'campaign'] }).notNull().default('campaign'),
+    /** One of the built-in neutral templates (seeded once, editable, never deleted). */
+    builtIn: boolean('built_in').notNull().default(false),
     enabled: boolean('enabled').notNull().default(true),
     ...timestamps,
   },
@@ -683,21 +690,54 @@ export const emailMessages = pgTable(
     bookingId: text('booking_id').references(() => bookings.id, { onDelete: 'set null' }),
     toEmail: text('to_email').notNull(),
     subject: text('subject').notNull(),
+    /** The rendered copy as sent, with personal token links replaced by markers (never a usable token). */
     bodyHtml: text('body_html').notNull(),
     bodyText: text('body_text').notNull(),
+    /** The editable Markdown source (drafts edit this). */
+    bodyMarkdown: text('body_markdown').notNull().default(''),
     purpose: text('purpose').notNull(),
+    messageClass: text('message_class', { enum: ['transactional_factual', 'review_request', 'campaign'] }).notNull().default('campaign'),
+    /** `transactional` or `broadcast`, set when the message is sent. */
+    stream: text('stream'),
+    origin: text('origin', { enum: ['manual', 'automation', 'campaign', 'preview'] }).notNull().default('manual'),
+    campaignId: text('campaign_id').references((): AnyPgColumn => emailCampaigns.id, { onDelete: 'set null' }),
     /** Prevents duplicate sends for the same trigger (e.g. follow_up:bookingId). */
     dedupeKey: text('dedupe_key').notNull(),
-    status: text('status', { enum: ['draft', 'approved', 'queued', 'sent', 'delivered', 'bounced', 'complained', 'failed', 'suppressed'] })
+    status: text('status', { enum: ['draft', 'approved', 'queued', 'sending', 'sent', 'delivered', 'bounced', 'complained', 'failed', 'suppressed', 'cancelled'] })
       .notNull()
       .default('draft'),
+    /** Null with origin `automation` means approved by the owner's automation setting. */
+    approvedBy: text('approved_by').references(() => users.id, { onDelete: 'set null' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    /** The non-repeatable call marker: set by the conditional claim just before the provider call. */
+    submittedAt: timestamp('submitted_at', { withTimezone: true }),
     providerMessageId: text('provider_message_id'),
     error: text('error'),
+    /** Plain message for the owner about the latest outcome. */
+    statusMessage: text('status_message').notNull().default(''),
+    /** `check_before_retry` after an unknown outcome: the owner checks before sending again. */
+    ownerAction: text('owner_action'),
+    /** Consent basis snapshot at send time ({ status, consentEventId?, visits12m?, checkedAt }). */
+    consentBasis: jsonb('consent_basis').$type<Record<string, unknown> | null>(),
+    /** Sent through a Postmark Sandbox server: never delivered to the client. */
+    isSandbox: boolean('is_sandbox').notNull().default(false),
+    /** SHA-256 of the message's permanent unsubscribe token (the token itself is never stored). */
+    unsubscribeTokenHash: text('unsubscribe_token_hash'),
     scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
     sentAt: timestamp('sent_at', { withTimezone: true }),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
     ...timestamps,
   },
-  (t) => [uniqueIndex('email_messages_dedupe_idx').on(t.dedupeKey), index('email_messages_status_idx').on(t.status, t.scheduledFor)],
+  (t) => [
+    uniqueIndex('email_messages_dedupe_idx').on(t.dedupeKey),
+    index('email_messages_status_idx').on(t.status, t.scheduledFor),
+    index('email_messages_campaign_idx').on(t.campaignId, t.status),
+    uniqueIndex('email_messages_unsub_token_idx').on(t.unsubscribeTokenHash).where(sql`${t.unsubscribeTokenHash} IS NOT NULL`),
+    uniqueIndex('email_messages_provider_msg_idx').on(t.providerMessageId).where(sql`${t.providerMessageId} IS NOT NULL`),
+    index('email_messages_customer_idx').on(t.customerId, t.createdAt),
+    index('email_messages_to_idx').on(sql`lower(${t.toEmail})`, t.createdAt),
+    index('email_messages_sent_idx').on(t.origin, t.sentAt),
+  ],
 );
 
 export const reviewRequests = pgTable(
@@ -710,10 +750,29 @@ export const reviewRequests = pgTable(
     emailMessageId: text('email_message_id').references(() => emailMessages.id, { onDelete: 'set null' }),
     status: text('status', { enum: ['pending_approval', 'scheduled', 'sent', 'skipped', 'failed', 'cancelled'] }).notNull(),
     skipReason: text('skip_reason'),
+    /** `manual` (Send a request) or `automation`. */
+    origin: text('origin', { enum: ['manual', 'automation'] }).notNull().default('manual'),
+    /** `payment`, `owner_marked` (from the booking) or `owner_attested` (manual request). */
+    completionEvidence: text('completion_evidence').notNull().default(''),
+    attestedBy: text('attested_by').references(() => users.id, { onDelete: 'set null' }),
+    attestedVisitDate: date('attested_visit_date', { mode: 'string' }),
+    /** Same value as the message's dedupe key (`review:{bookingId}` or `review:manual:{customerId}:{date}`). */
+    dedupeKey: text('dedupe_key'),
+    scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
+    /** SHA-256 of the tracked review-link token (`/r/{token}`); the token itself is never stored. */
+    clickTokenHash: text('click_token_hash'),
+    firstClickedAt: timestamp('first_clicked_at', { withTimezone: true }),
+    clickCount: integer('click_count').notNull().default(0),
     sentAt: timestamp('sent_at', { withTimezone: true }),
     ...timestamps,
   },
-  (t) => [uniqueIndex('review_requests_booking_idx').on(t.bookingId), index('review_requests_status_idx').on(t.status)],
+  (t) => [
+    uniqueIndex('review_requests_booking_idx').on(t.bookingId),
+    index('review_requests_status_idx').on(t.status),
+    uniqueIndex('review_requests_dedupe_idx').on(t.dedupeKey).where(sql`${t.dedupeKey} IS NOT NULL`),
+    uniqueIndex('review_requests_click_token_idx').on(t.clickTokenHash).where(sql`${t.clickTokenHash} IS NOT NULL`),
+    index('review_requests_customer_idx').on(t.customerId, t.createdAt),
+  ],
 );
 
 /** Reviews are only stored when an authorised integration provides them; never typed in by hand. */

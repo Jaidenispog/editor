@@ -257,3 +257,32 @@ Built once so every Stage B/C module integrates the same way and parallel work p
 - **Export-ready hook**: when `render.export` stores a version's file (standard or `no_music`), posts waiting for it get
   `publish.prepare` again. `publish.dispatch` hands due scheduled targets on, turns due manual ones into "Your turn",
   and settles a processing target untouched for an hour (failed with Retry, or `check_before_retry` once submitted).
+
+## Email and review requests (Stage C, WP7)
+
+- **Provider**: Postmark over plain `fetch` behind `EmailProvider` (`apps/worker/src/lib/email/`); `createEmailProvider`
+  returns null unless `EMAIL_PROVIDER=postmark` with a token and `EMAIL_FROM`. Factual messages use the Transactional
+  stream; review requests and campaigns (commercial) use the Broadcast stream with Postmark's one-click unsubscribe plus
+  the app's own permanent `/u/{token}` link. The web app never calls Postmark.
+- **Rules in core** (`packages/core/src/email.ts`, `email-lint.ts`, `reviews.ts`): the Markdown-subset renderer (every
+  value escaped; a fixed sender-identification footer; stored copies carry markers instead of personal token links),
+  the linter (incentive, selective and reminder wording; factual emails without links or promotion), the consent fold
+  (express by default; the "inferred" rule off unless the owner turns it on), the single send gate
+  `evaluateSendPolicy` (block / defer / send with plain reasons), and `reviewEligibility` (no rating, spend, feedback,
+  notes or staff input; pinned by a test).
+- **`email.send` state machine**: only `approved`/`queued` messages; the gate runs on fresh facts immediately before
+  the call; a conditional claim sets `submitted_at` (the non-repeatable call marker), the hashed tokens and the
+  token-free stored copy, then Postmark is called once. Transient errors release the claim and retry; an unknown
+  outcome keeps it and the retry calls `findSent` first (found → sent, else `check_before_retry` for the owner).
+  406 suppresses the address, 412 records "waiting for approval", auth/sender errors stop dispatch until the next
+  successful check.
+- **Automation**: `email.automation.sweep` turns genuinely completed bookings (`isGenuinelyCompleted`, completed after
+  the switch was turned on and within `maxAgeDays`) into one request and message per booking (`ON CONFLICT
+  (dedupe_key) DO NOTHING`), or a skipped request with its reason; cancels pending items whose booking changed; records
+  Square's email opt-out once as a `withdrawn` ledger event. `email.dispatch` hands due approved messages on; daily
+  caps, the send window and one automated email per client per Melbourne day are deferrals in the gate.
+- **Consent and suppressions**: the append-only `consent_events` ledger and the global `email_suppressions` list are
+  the only sources of truth (the `customers` consent columns are a display cache). Webhooks (Basic auth) may only
+  restrict sending or update delivery display; campaigns pause automatically above 0.1% complaints or 5% bounces.
+- **Reviews**: the owner's pasted review link (never built by the app), a tracked `/r/{token}` redirect that never
+  branches, requests tracked separately from reviews, and the Places API rating (latest snapshot only, daily).

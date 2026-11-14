@@ -30,8 +30,9 @@ describe('integration statuses', () => {
     const now = buildIntegrationStatuses(c.env as never, c.facts as never);
     const expected = before.find((b) => b.name === name)?.statuses ?? [];
     // Cards added by Stage B/C modules are new; every Stage A card must still read exactly as before.
-    // Instagram and TikTok were rewritten by the publishing module (WP4, design §5.3: manual-first wording).
-    const replaced = new Set(['instagram', 'tiktok']);
+    // Instagram and TikTok were rewritten by the publishing module (WP4, design §5.3: manual-first wording); the
+    // Resend card was replaced by the email module's Postmark and Google rating cards (WP7, plan §10.1).
+    const replaced = new Set(['instagram', 'tiktok', 'email']);
     const legacy = now.filter((s) => !replaced.has(s.id) && expected.some((e) => e['id'] === s.id)).map(({ state: _s, liveMode: _l, verified: _v, ...rest }) => rest);
     expect(legacy).toEqual(expected.filter((e) => !replaced.has(String(e['id']))));
   });

@@ -1,0 +1,1 @@
+{"RecordType":"Bounce","ID":4323372036854775808,"Type":"SoftBounce","TypeCode":4096,"Name":"Soft bounce","MessageID":"883953f4-6105-42a2-a16a-77a8eac79483","MessageStream":"broadcast","Description":"Mailbox full","Email":"client@example.com","BouncedAt":"2026-11-14T05:31:00Z","Inactive":false,"CanActivate":true}

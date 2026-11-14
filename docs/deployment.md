@@ -350,3 +350,21 @@ not allow it for this app setup, the card says "Not available" and everything el
   `NODE_ENV=test` (the login dialog then stays on `https://www.facebook.com`).
   `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` are not used (no direct TikTok API for a private app).
 - The worker schedules `publish.dispatch` every minute and `social.check` daily at 4:23 am Melbourne time.
+
+## Email and review requests (Stage C, WP7)
+
+- Settings (all optional; nothing is sent until they are set): `EMAIL_PROVIDER=postmark`, `POSTMARK_SERVER_TOKEN`
+  (worker), `EMAIL_FROM` (e.g. `"Your Studio" <hello@yourstudio.com.au>`), `POSTMARK_TRANSACTIONAL_STREAM` (default
+  `outbound`), `POSTMARK_BROADCAST_STREAM` (default `broadcast`), `POSTMARK_WEBHOOK_USERNAME` /
+  `POSTMARK_WEBHOOK_PASSWORD` (web; long random values), `GOOGLE_MAPS_API_KEY` (worker; restricted to Places API (New)).
+  `RESEND_API_KEY` is not used.
+- The public paths `/api/webhooks/postmark`, `/api/public/unsubscribe/…`, `/u/…` and `/r/…` must be reachable over
+  HTTPS at `APP_URL` (unsubscribe links in sent emails must keep working for at least 30 days, so keep `APP_URL`
+  stable). Add the webhook URL `https://<app address>/api/webhooks/postmark` with the Basic credentials to both streams
+  (Delivery, Bounce, Spam complaint, Subscription change; Open and Click off).
+- Outbound HTTPS from the worker to `api.postmarkapp.com` and `places.googleapis.com`, plus DNS look-ups for the
+  advisory DMARC / Return-Path hints.
+- The worker schedules `email.dispatch` every minute, `email.automation.sweep` every 10 minutes, the read-only
+  `email.provider.check` daily at 4:37 am and `reviews.places.sync` daily at 5:41 am Melbourne time. Press "Check
+  connection" (Settings → Integrations) after setting Postmark up; the check never sends.
+- Start with a Postmark **Sandbox** server: everything it sends shows as "Test — not delivered".

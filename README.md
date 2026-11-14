@@ -134,3 +134,16 @@ against a fake (it needs the Anthropic key).
 - **Waiting on account access**: a connected Instagram account and the hashtag search permission on the Meta app.
   Whether Meta allows hashtag search for this kind of app setup is unknown until the first real read; "Not
   available" is then a valid answer.
+
+## Email and review requests (Stage C, WP7)
+
+- **Built**: Emails (to approve, drafts, sent log, campaigns with recipient preview and auto-pause, templates with a
+  live linter, clients with recorded email permission and unsubscribes, the follow-up automation) and Reviews (review
+  link, Google rating from Places, neutral review requests after a genuinely completed appointment or the owner's
+  confirmation, automatic requests). Postmark replaces Resend. Nothing is sent before an appointment (Square sends
+  reminders), and every automation is off until the owner turns it on.
+- **Verified with fakes**: every send path, webhook and route against a fake email provider and a fake Google API on
+  a test database. No real email has been sent and no real Google call made.
+- **Waiting on account access**: a domain with DNS access, Postmark servers, streams, webhooks and account approval;
+  email permission recorded at the counter; the review link; optionally a Google Maps key and Place ID. Square
+  completions drive the automation once Square is connected (WP6).

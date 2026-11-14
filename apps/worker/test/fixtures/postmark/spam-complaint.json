@@ -1,0 +1,1 @@
+{"RecordType":"SpamComplaint","ID":42,"Type":"SpamComplaint","TypeCode":512,"Name":"Spam complaint","Tag":"campaign","MessageID":"883953f4-6105-42a2-a16a-77a8eac79483","ServerID":23,"MessageStream":"broadcast","Email":"client@example.com","From":"hello@studio.example","BouncedAt":"2026-11-14T05:40:00Z","Inactive":true,"CanActivate":false,"Subject":"Test subject"}

@@ -179,3 +179,24 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   Instagram or TikTok post pattern. Graph messages are shown as text.
 - **Media**: uploads stream from private storage to `rupload.facebook.com` (no public URL); owner downloads use
   expiring links. Deleting a project cancels its unsent posts and removes its `publishing/{postId}/` covers.
+
+## Email and review requests (Stage C, WP7)
+
+- **Owner only**: sending, approving, templates, settings, automations, campaigns, suppression lifts, message bodies
+  and history. **Staff**: the client list, recording consent and unsubscribes, and stopping review requests (all
+  fail-safe or evidence capture; turning review requests back on is owner-only).
+- **Public routes** (`/api/webhooks/postmark`, `/api/public/unsubscribe/…`, `/u/…`, `/r/…`) have an in-memory per-IP
+  limit (60/min for links, 300/min for webhooks) and log no addresses. The webhook checks HTTP Basic credentials in
+  constant time (SHA-256 digests, `timingSafeEqual`) before storing anything; Postmark offers no payload signature, so
+  nothing a webhook says can grant consent, lift a suppression or cause a send. The unsubscribe POST is CSRF-exempt by
+  design because it can only reduce sending; viewing the page changes nothing (mail scanners pre-fetch links).
+- **Tokens**: unsubscribe and review-link tokens are random 32 bytes (base64url), stored only as SHA-256, never expire
+  and do not depend on `APP_SECRET`. Stored message bodies hold `[unsubscribe link]` / `[review link]` markers, never a
+  usable token. The unsubscribe page masks the address.
+- **Secrets**: `POSTMARK_SERVER_TOKEN` and `GOOGLE_MAPS_API_KEY` are read by the worker only; the web app needs only the
+  webhook credentials. Logs redact `X-Postmark-Server-Token`, `X-Goog-Api-Key` and hash email addresses; job payloads
+  and audit entries hold ids and reason codes, never addresses or bodies.
+- **Rendering**: a Markdown subset with full escaping; previews in `<iframe sandbox srcdoc>` with no scripts.
+- **Retention**: `email_messages`, `consent_events` and `email_suppressions` are kept at least 24 months and survive a
+  client's soft delete (suppressions must keep working). Processed Postmark webhook payloads are blanked after 90 days
+  (`maintenance.cleanup`); their effects stay.

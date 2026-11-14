@@ -247,6 +247,53 @@ copyright check), `publish.dispatch {}` (every minute, key `every-minute`), `soc
 
 ## Email and reviews (Stage C, WP7)
 
+Owner = `requireOwner`; Staff+ = any signed-in user. Every state-changing session route goes through `handleApi` (CSRF
+guard). Routes never call Postmark or Google: they write rows and queue jobs; `email.send` runs the send gate again
+immediately before every provider call. Errors use the standard envelope; a gate refusal is 422 `UNSUPPORTED` with the
+reasons in `details` (`path` = reason code).
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET / POST | `/api/email/messages` | Owner. GET `?status=a,b&origin&purpose&customerId&campaignId&view=to_approve\|sent` → `{ items: EmailMessageDto[], nextCursor }` (no token data). POST `{ customerId, templateId?, messageClass: transactional_factual\|campaign, subject, bodyMarkdown }` → draft (`dedupe_key = manual:{id}`) |
+| GET / PATCH | `/api/email/messages/[id]` | Owner. GET → `{ message, renderedHtml (markers instead of personal links), timeline, consentBasis, blockers, lint }`. PATCH `{ subject?, bodyMarkdown? }` only while `draft` (409 otherwise) |
+| POST | `/api/email/messages/[id]/approve` | Owner. `{ scheduledFor?: ISO \| null }`; 422 with the blockers when the gate would block; a due message is queued at once (`email.send`, key `email-send:{id}`) |
+| POST | `/api/email/messages/approve-batch` | Owner. `{ ids (≤ 100) }` → `{ approved, blocked: [{ id, reasons }] }` |
+| POST | `/api/email/messages/[id]/cancel` | Owner. 409 once `sending`/`sent` |
+| POST | `/api/email/messages/[id]/send-again` | Owner. `{ confirm: true }`, only for `owner_action = check_before_retry`; audited `email.message.override_retry` |
+| POST | `/api/email/messages/[id]/preview-to-me` | Owner. Same draft, "[Preview]" subject, to the owner's own address only (origin `preview`) |
+| POST | `/api/email/lint` | Owner. `{ messageClass, subject, bodyMarkdown, customerId? }` → `{ errors, warnings, preview: { subject, html, text } }` (no side effects) |
+| GET / POST | `/api/email/templates` | Owner. GET seeds the built-in templates once. POST `{ name, purpose, messageClass, subject, bodyMarkdown }`; 400 on lint errors |
+| PATCH | `/api/email/templates/[id]` | Owner. Partial + `enabled` (archive; never deleted) |
+| PUT | `/api/email/automations/[name]` | Owner. `follow_up` \| `review_request`; `{ enabled, mode, templateId, delayHours, dailyCap }`. Switching on records `enabledAt`; 422 when the review link is missing or Square already sends feedback. Switching off cancels what the automation approved by itself |
+| PUT | `/api/email/settings` | Owner. Partial `{ senderName, replyTo, consentWording, allowInferredConsent, sendWindow, dailyCommercialCap, squareSends, webhooksAttested }` |
+| GET | `/api/email/status` | Staff+. `{ state, liveMode, approved, webhooks, lastCheckedAt, message, missingEnv, pill }` |
+| POST | `/api/email/check` | Owner. Queues the read-only `email.provider.check` (no email is sent) |
+| GET / POST | `/api/email/campaigns` | Owner. POST `{ name, templateId?, subject, bodyMarkdown, audience: { lastVisitWithinDays: 90\|180\|365\|null } }` |
+| GET / PATCH | `/api/email/campaigns/[id]` | Owner. PATCH only while `draft` |
+| POST | `/api/email/campaigns/[id]/audience-preview` | Owner. `{ search? }` → `{ included, excluded, byReason, rows, audienceHash, schedule }` |
+| POST | `/api/email/campaigns/[id]/approve` | Owner. `{ audienceHash, confirmConsent: true }`; 409 when the audience or content changed since the preview; queues `email.campaign.expand` |
+| POST | `/api/email/campaigns/[id]/pause` · `/resume` · `/cancel` | Owner. Cancel stops every unsent message |
+| POST | `/api/email/suppressions/[id]/lift` | Owner. `{ note, confirm }`: bounces need "the address was corrected"; complaints need new express consent after the complaint and "they asked to hear from us again"; unsubscribes are only reversed by new consent (409) |
+| GET / POST | `/api/customers` | GET Staff+ `?q&permission=express\|none\|unsubscribed\|suppressed`. POST Owner `{ givenName, familyName?, email, phone? }` (409 on a duplicate address) |
+| PATCH | `/api/customers/[id]` | Owner. Manual clients only (Square clients: notes only) |
+| GET / POST | `/api/customers/[id]/consent` | Staff+. GET → `{ state, events, suppressions, wording, wordingHash, postmarkReactivated }`. POST `{ method: in_person_device\|verbal_owner_recorded, wordingHash, clientConfirmed: true, note? }` (409 when the wording changed); lifts an active unsubscribe only |
+| POST | `/api/customers/[id]/unsubscribe` | Staff+. `{ method: in_person\|phone\|reply_email\|owner_other, note? }` |
+| POST | `/api/customers/[id]/review-opt-out` | Staff+ may set `true`; only the owner may set `false` |
+| GET / POST | `/api/reviews/requests` | Owner. GET `?status` → `{ items, counts: { sentThisMonth, openedThisMonth } }`. POST `{ customerId, visitDate (today … 7 days ago), attest: true }` → a draft, or a `skipped` request with its reason; 409 for the same visit twice |
+| POST | `/api/reviews/requests/[id]/approve` · `/skip` · `/cancel`, `/api/reviews/requests/approve-batch` | Owner. Skip `{ reason: asked_in_person\|wrong_client_details\|other, note? }` (note required for `other`) |
+| PUT | `/api/reviews/link` | Owner. `{ url }` → validated (`https`, Google hosts only, ≤ 500) into `settings.business.googleReviewLink` |
+| POST | `/api/reviews/link/use-google` | Owner. Copies `writeAReviewUri` from the confirmed Places snapshot |
+| GET / PUT / DELETE | `/api/integrations/google-places` | Owner. GET → `PlacesStateDto`. PUT `{ placeId }` queues `reviews.places.sync` (`connect`). DELETE removes the Place ID and snapshot |
+| POST | `/api/integrations/google-places/confirm` · `/refresh` | Owner. Confirm `{ confirm }` ("No" removes it). Refresh at most every 10 minutes (429) |
+| POST | `/api/webhooks/postmark` | Public, no CSRF. HTTP Basic (`POSTMARK_WEBHOOK_USERNAME`/`PASSWORD`, constant time); 401 bad credentials (nothing stored), 503 not configured. Stored once per `(provider, external_event_id)`; `webhook.process` queued only for new rows |
+| POST | `/api/public/unsubscribe/[token]` | Public, no CSRF (it can only reduce sending). Form post or RFC 8058 `List-Unsubscribe=One-Click`; idempotent; 303 to `/u/[token]?done=1` (`?invalid=1` for an unknown token) |
+| GET | `/u/[token]` | Public page. Viewing changes nothing; masked address; works without JavaScript |
+| GET | `/r/[token]` | Public. Counts a known token's open, then always 302 to the same saved review link (every token, valid or not) |
+
+Jobs: `email.send` (`stately`, key `email-send:{id}`), `email.dispatch` (every minute), `email.automation.sweep` (every
+10 minutes), `email.campaign.expand`, `email.provider.check` (daily 4:37 am Melbourne, read-only), `email.suppression.push`,
+`reviews.places.sync` (daily 5:41 am, read-only); `webhook.process` handles provider `postmark`. Job payloads hold ids only.
+
 ## Website and local search (Stage C, WP8)
 
 ## Google Business Profile (Stage C, WP9)
