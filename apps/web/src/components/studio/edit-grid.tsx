@@ -13,9 +13,45 @@ import { formatBytes, formatSeconds } from '@/lib/format';
 import { cn } from '@/lib/shared/cn';
 import type { EditDto, GenerationDto, VersionDto } from '@/lib/shared/studio-dto';
 import { REVISION_SUGGESTIONS } from '@/lib/shared/studio-schemas';
+import { businessProfileEditCardExtension } from './extensions/business_profile';
+import { emailEditCardExtension } from './extensions/email';
+import { musicEditCardExtension } from './extensions/music';
+import { preferencesEditCardExtension } from './extensions/preferences';
+import { publishingEditCardExtension } from './extensions/publishing';
+import { squareEditCardExtension } from './extensions/square';
+import { trendsEditCardExtension } from './extensions/trends';
+import type { EditCardExtension, EditCardSlotProps, StudioRefresh } from './extensions/types';
+import { websiteEditCardExtension } from './extensions/website';
 import { useStableLink } from './use-studio-status';
 
-type Refresh = (options?: { expectBusy?: boolean }) => void;
+type Refresh = StudioRefresh;
+
+/** Each module's card additions, in a fixed order. Modules edit only their own `./extensions/<module>.tsx`. */
+const EXTENSIONS: readonly EditCardExtension[] = [
+  musicEditCardExtension,
+  preferencesEditCardExtension,
+  trendsEditCardExtension,
+  publishingEditCardExtension,
+  squareEditCardExtension,
+  emailEditCardExtension,
+  websiteEditCardExtension,
+  businessProfileEditCardExtension,
+];
+
+/** Renders one slot of every module that fills it. */
+function ExtensionSlot({ slot, props }: { slot: 'Badges' | 'Banner' | 'MenuItems'; props: EditCardSlotProps }) {
+  return (
+    <>
+      {EXTENSIONS.map((x) => {
+        const Slot = x[slot];
+        return Slot ? <Slot key={x.id} {...props} /> : null;
+      })}
+    </>
+  );
+}
+
+/** True when any module fills the slot (so empty wrappers are not rendered). */
+const hasSlot = (slot: 'Badges' | 'Banner' | 'MenuItems') => EXTENSIONS.some((x) => x[slot]);
 
 const ORIGIN_TEXT: Record<VersionDto['origin'], string> = { initial: 'First cut', revise: 'Revised', regenerate: 'Fresh take' };
 
@@ -114,6 +150,7 @@ export function EditCard({ edit, ttlSeconds, onChanged }: { edit: EditDto; ttlSe
   // Once the server's value arrives, drop the optimistic one.
   useEffect(() => setFavourite(null), [edit.isFavourite]);
   const working = version ? version.status === 'planning' || version.status === 'planned' || version.status === 'rendering_preview' : true;
+  const slotProps: EditCardSlotProps = { edit, version, onChanged };
 
   const toggleFavourite = async () => {
     const next = !isFavourite;
@@ -209,9 +246,15 @@ export function EditCard({ edit, ttlSeconds, onChanged }: { edit: EditDto; ttlSe
             <h3 className="text-base font-semibold text-charcoal-950">{edit.styleName}</h3>
             {version ? <StatusPill status={version.status} className="shrink-0" /> : null}
           </div>
+          {hasSlot('Badges') ? (
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              <ExtensionSlot slot="Badges" props={slotProps} />
+            </div>
+          ) : null}
           <p className="text-sm text-charcoal-600">{edit.styleDescription}</p>
           {version?.previewDurationSec ? <p className="mt-1 text-xs text-charcoal-500">Length {formatSeconds(version.previewDurationSec)}</p> : null}
         </div>
+        {hasSlot('Banner') ? <ExtensionSlot slot="Banner" props={slotProps} /> : null}
         {version?.status === 'failed' || version?.status === 'cancelled' ? <p className="text-sm text-red-600">{version.statusMessage || 'This version could not be made.'}</p> : null}
         {version?.planSource === 'rules' ? (
           <p className="rounded-md bg-charcoal-50 px-3 py-2 text-xs text-charcoal-600">Put together by the built-in editor rather than the AI planner. It follows the same style rules.</p>
@@ -255,6 +298,7 @@ export function EditCard({ edit, ttlSeconds, onChanged }: { edit: EditDto; ttlSe
               </Button>
             )
           ) : null}
+          {hasSlot('MenuItems') ? <ExtensionSlot slot="MenuItems" props={slotProps} /> : null}
         </div>
         {version?.exportStatus === 'failed' ? <p className="text-xs text-red-600">{version.exportMessage || 'The export did not finish. Press Export to try again.'}</p> : null}
         {version?.status === 'preview_ready' && version.exportStatus === 'none' && version.exportMessage ? (

@@ -1,40 +1,63 @@
 import { z } from 'zod';
 import { StyleIdSchema } from './styles.js';
+import { BUSINESS_PROFILE_JOB_PAYLOAD_SCHEMAS, BUSINESS_PROFILE_JOB_TYPES } from './jobs/business_profile.js';
+import { EMAIL_JOB_PAYLOAD_SCHEMAS, EMAIL_JOB_TYPES } from './jobs/email.js';
+import { MUSIC_JOB_PAYLOAD_SCHEMAS, MUSIC_JOB_TYPES } from './jobs/music.js';
+import { PREFERENCES_JOB_PAYLOAD_SCHEMAS, PREFERENCES_JOB_TYPES } from './jobs/preferences.js';
+import { PUBLISHING_JOB_PAYLOAD_SCHEMAS, PUBLISHING_JOB_TYPES } from './jobs/publishing.js';
+import { SHARED_JOB_PAYLOAD_SCHEMAS, SHARED_JOB_TYPES } from './jobs/shared.js';
+import { SQUARE_JOB_PAYLOAD_SCHEMAS, SQUARE_JOB_TYPES } from './jobs/square.js';
+import { STUDIO_JOB_PAYLOAD_SCHEMAS, STUDIO_JOB_TYPES } from './jobs/studio.js';
+import { TRENDS_JOB_PAYLOAD_SCHEMAS, TRENDS_JOB_TYPES } from './jobs/trends.js';
+import { WEBSITE_JOB_PAYLOAD_SCHEMAS, WEBSITE_JOB_TYPES } from './jobs/website.js';
 
+export * from './jobs/types.js';
+export * from './jobs/studio.js';
+export * from './jobs/shared.js';
+
+/**
+ * Every job type name. Aggregated from one file per module (`./jobs/<module>.ts`), so parallel work packages
+ * never edit this file. Module files are spread in a fixed order.
+ */
 export const JOB_TYPES = {
-  INGEST_ASSET: 'ingest.asset',
-  GENERATE_EDITS: 'edits.generate',
-  REVISE_EDIT: 'edits.revise',
-  RENDER_PREVIEW: 'render.preview',
-  RENDER_EXPORT: 'render.export',
-  ANALYSE_MUSIC: 'music.analyse',
-  CLEANUP: 'maintenance.cleanup',
+  ...STUDIO_JOB_TYPES,
+  ...SHARED_JOB_TYPES,
+  ...MUSIC_JOB_TYPES,
+  ...PREFERENCES_JOB_TYPES,
+  ...TRENDS_JOB_TYPES,
+  ...PUBLISHING_JOB_TYPES,
+  ...SQUARE_JOB_TYPES,
+  ...EMAIL_JOB_TYPES,
+  ...WEBSITE_JOB_TYPES,
+  ...BUSINESS_PROFILE_JOB_TYPES,
 } as const;
-export type JobType = (typeof JOB_TYPES)[keyof typeof JOB_TYPES];
-export const ALL_JOB_TYPES: JobType[] = Object.values(JOB_TYPES);
 
-export const IngestAssetPayloadSchema = z.object({ assetId: z.string(), projectId: z.string() });
-export const GenerateEditsPayloadSchema = z.object({ generationId: z.string(), projectId: z.string() });
-export const ReviseEditPayloadSchema = z.object({
-  editId: z.string(),
-  projectId: z.string(),
-  newVersionId: z.string(),
-  mode: z.enum(['revise', 'regenerate']),
-});
-export const RenderPreviewPayloadSchema = z.object({ editVersionId: z.string(), projectId: z.string() });
-export const RenderExportPayloadSchema = z.object({ editVersionId: z.string(), projectId: z.string() });
-export const AnalyseMusicPayloadSchema = z.object({ trackId: z.string() });
-export const CleanupPayloadSchema = z.object({ olderThanHours: z.number().positive().default(24) });
-
+/**
+ * Payload schema of every job type. A later module may replace an earlier entry only with a backwards-compatible
+ * extension of the same payload (for example the music module adding an optional `variant` to `render.export`).
+ */
 export const JOB_PAYLOAD_SCHEMAS = {
-  [JOB_TYPES.INGEST_ASSET]: IngestAssetPayloadSchema,
-  [JOB_TYPES.GENERATE_EDITS]: GenerateEditsPayloadSchema,
-  [JOB_TYPES.REVISE_EDIT]: ReviseEditPayloadSchema,
-  [JOB_TYPES.RENDER_PREVIEW]: RenderPreviewPayloadSchema,
-  [JOB_TYPES.RENDER_EXPORT]: RenderExportPayloadSchema,
-  [JOB_TYPES.ANALYSE_MUSIC]: AnalyseMusicPayloadSchema,
-  [JOB_TYPES.CLEANUP]: CleanupPayloadSchema,
+  ...STUDIO_JOB_PAYLOAD_SCHEMAS,
+  ...SHARED_JOB_PAYLOAD_SCHEMAS,
+  ...MUSIC_JOB_PAYLOAD_SCHEMAS,
+  ...PREFERENCES_JOB_PAYLOAD_SCHEMAS,
+  ...TRENDS_JOB_PAYLOAD_SCHEMAS,
+  ...PUBLISHING_JOB_PAYLOAD_SCHEMAS,
+  ...SQUARE_JOB_PAYLOAD_SCHEMAS,
+  ...EMAIL_JOB_PAYLOAD_SCHEMAS,
+  ...WEBSITE_JOB_PAYLOAD_SCHEMAS,
+  ...BUSINESS_PROFILE_JOB_PAYLOAD_SCHEMAS,
 } as const;
+
+/** A registered job type name such as `render.export`. */
+export type JobType = keyof typeof JOB_PAYLOAD_SCHEMAS & string;
+/** Every registered job type, in registry order. */
+export const ALL_JOB_TYPES: JobType[] = Object.keys(JOB_PAYLOAD_SCHEMAS) as JobType[];
+
+/** True when `type` is a registered job type (used before trusting a type read from the database or a request). */
+export function isJobType(type: string): type is JobType {
+  return Object.prototype.hasOwnProperty.call(JOB_PAYLOAD_SCHEMAS, type);
+}
 
 export type JobPayload<T extends JobType> = z.infer<(typeof JOB_PAYLOAD_SCHEMAS)[T]>;
 

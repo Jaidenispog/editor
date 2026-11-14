@@ -7,6 +7,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AssetAnalysis, EditPlan } from '@studio/core';
 import { runMigrations } from '@studio/db';
+import { dropTestDatabase } from './helpers/test-database';
 
 /**
  * Calls the Video Studio route handlers directly against a throwaway database (TEST_DATABASE_URL) and a temporary
@@ -111,10 +112,7 @@ suite('Video Studio routes (database-backed)', () => {
     const g = globalThis as unknown as { __studioWebDb?: { close(): Promise<void> }; __studioWebQueue?: Promise<{ stop(graceful?: boolean): Promise<void> }> };
     if (g.__studioWebQueue) await (await g.__studioWebQueue).stop(false).catch(() => undefined);
     if (g.__studioWebDb) await g.__studioWebDb.close();
-    const admin = new pg.Client({ connectionString: base });
-    await admin.connect();
-    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    await admin.end();
+    await dropTestDatabase(base ?? '', dbName);
     if (storageRoot) await rm(storageRoot, { recursive: true, force: true });
   }, 60_000);
 

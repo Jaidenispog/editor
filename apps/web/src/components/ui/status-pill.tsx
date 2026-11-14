@@ -1,55 +1,8 @@
 import { cn } from '@/lib/shared/cn';
 import type { BadgeTone } from './badge';
+import { statusLabel, toneForStatus } from './status-words';
 
-/** Maps the status words used across the app (jobs, assets, versions, generations) to a colour. */
-export function toneForStatus(status: string): BadgeTone {
-  switch (status) {
-    case 'ready':
-    case 'succeeded':
-    case 'complete':
-    case 'preview_ready':
-    case 'connected':
-    case 'planned':
-      return 'success';
-    case 'queued':
-    case 'uploaded':
-    case 'draft':
-    case 'none':
-      return 'neutral';
-    case 'running':
-    case 'processing':
-    case 'planning':
-    case 'rendering':
-    case 'rendering_preview':
-    case 'analysing':
-    case 'generating':
-      return 'info';
-    case 'partial':
-    case 'needs_setup':
-    case 'needs_reauth':
-    case 'cancelled':
-      return 'warning';
-    case 'failed':
-    case 'error':
-      return 'danger';
-    default:
-      return 'neutral';
-  }
-}
-
-const LABELS: Record<string, string> = {
-  preview_ready: 'Preview ready',
-  rendering_preview: 'Rendering preview',
-  needs_setup: 'Needs setup',
-  needs_reauth: 'Reconnect needed',
-  succeeded: 'Done',
-  analysing: 'Analysing',
-};
-
-/** Human label for a status word ("rendering_preview" → "Rendering preview"). */
-export function statusLabel(status: string): string {
-  return LABELS[status] ?? status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, ' ');
-}
+export { statusLabel, toneForStatus } from './status-words';
 
 const dot: Record<BadgeTone, string> = {
   neutral: 'bg-charcoal-400',
@@ -70,7 +23,7 @@ const pill: Record<BadgeTone, string> = {
 };
 
 /** Status chip with a coloured dot; animated while work is in progress. */
-export function StatusPill({ status, label, className }: { status: string; label?: string; className?: string }) {
+export function StatusPill({ status, label, className }: { status: string; label?: string | undefined; className?: string }) {
   const tone = toneForStatus(status);
   const busy = tone === 'info';
   return (

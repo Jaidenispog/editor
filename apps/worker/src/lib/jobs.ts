@@ -1,7 +1,9 @@
+import { eq } from 'drizzle-orm';
 import { newId, JOB_PAYLOAD_SCHEMAS, type JobPayload, type JobType } from '@studio/core';
 import { schema } from '@studio/db';
-import { QUEUE_SETTINGS } from '@studio/queue';
+import { QUEUE_SETTINGS, type EnqueueOptions } from '@studio/queue';
 import type { WorkerContext } from '../context.js';
+import { moduleRefIdFor } from '../modules/index.js';
 
 /** The entity a job is "about", used by the UI to attach progress to the right card. */
 export function refIdFor(type: JobType, payload: Record<string, unknown>): string | null {
@@ -18,18 +20,20 @@ export function refIdFor(type: JobType, payload: Record<string, unknown>): strin
       return p['editVersionId'] ?? null;
     case 'music.analyse':
       return p['trackId'] ?? null;
+    case 'webhook.process':
+      return p['webhookEventId'] ?? null;
+    case 'google.disconnect':
+      return p['connectionId'] ?? null;
     default:
-      return null;
+      return moduleRefIdFor(type, payload) ?? null;
   }
 }
 
+/** Options for {@link enqueueTracked}. */
+export type TrackedEnqueueOptions = Pick<EnqueueOptions, 'singletonKey' | 'priority' | 'startAfter' | 'startAfterSeconds'>;
+
 /** Creates the UI tracking row first, then the durable queue job carrying its id (worker-side twin of the web helper). */
-export async function enqueueTracked<T extends JobType>(
-  ctx: WorkerContext,
-  type: T,
-  payload: JobPayload<T>,
-  options: { singletonKey?: string; priority?: number } = {},
-): Promise<string> {
+export async function enqueueTracked<T extends JobType>(ctx: WorkerContext, type: T, payload: JobPayload<T>, options: TrackedEnqueueOptions = {}): Promise<string> {
   const data = JOB_PAYLOAD_SCHEMAS[type].parse(payload) as JobPayload<T> & { projectId?: string };
   const id = newId();
   await ctx.db.insert(schema.jobs).values({
@@ -43,8 +47,13 @@ export async function enqueueTracked<T extends JobType>(
   });
   const bossJobId = await ctx.queue.enqueue(type, data, { ...options, trackingJobId: id });
   if (bossJobId) {
-    const { eq } = await import('drizzle-orm');
     await ctx.db.update(schema.jobs).set({ bossJobId }).where(eq(schema.jobs.id, id));
+  } else {
+    // pg-boss refused it as a duplicate of a job with the same singleton key; do not leave a row "queued" for ever.
+    await ctx.db
+      .update(schema.jobs)
+      .set({ status: 'cancelled', message: 'An identical job is already waiting', finishedAt: new Date(), updatedAt: new Date() })
+      .where(eq(schema.jobs.id, id));
   }
   return id;
 }

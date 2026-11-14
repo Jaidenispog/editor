@@ -14,3 +14,6 @@ export * from './music.js';
 export * from './settings.js';
 export * from './style-support.js';
 export * from './manual-labels.js';
+export * from './completion.js';
+export * from './plan-facts.js';
+export * from './integrations.js';

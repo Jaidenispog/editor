@@ -8,6 +8,7 @@ import type { WorkerContext } from '../context.js';
 import { INTERRUPTED_MESSAGE, friendlyFailure, stopOutcome, type TrackedRun } from '../lib/job-tracker.js';
 import { createJobTempDir, removeTempDir } from '../lib/temp.js';
 import { loadSettings } from '../lib/plan-context.js';
+import { runExportReadyHooks } from '../modules/index.js';
 
 /**
  * Renders one edit version. Previews use the small SDR proxies (fast); exports use the originals at 1080×1920.
@@ -94,6 +95,7 @@ export async function handleRender(ctx: WorkerContext, run: TrackedRun, payload:
       await refreshGenerationStatus(ctx, edit.generationId, payload.projectId);
     } else {
       await setVersion({ exportStatus: 'ready', exportMessage: 'Ready to download', exportKey: key, exportByteSize: result.byteSize });
+      await runExportReadyHooks(ctx, { editVersionId: version.id, editId: edit.id, projectId: payload.projectId, variant: 'standard', storageKey: key, byteSize: result.byteSize });
     }
     await run.progress(1, quality === 'preview' ? 'Preview ready' : 'Export ready');
   } catch (err) {

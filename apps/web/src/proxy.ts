@@ -1,13 +1,9 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { isPublicPath } from './lib/public-routes';
 import { SESSION_COOKIE_NAME, sessionCookieAttributes, shouldUseSecureCookies } from './lib/shared/session-cookie';
 
-/** Paths reachable without a session cookie. */
-const PUBLIC_PREFIXES = ['/api/auth/', '/api/media/', '/_next/'];
-const PUBLIC_EXACT = new Set(['/login', '/setup', '/api/setup', '/api/health', '/favicon.ico', '/robots.txt']);
-
-function isPublic(pathname: string): boolean {
-  return PUBLIC_EXACT.has(pathname) || PUBLIC_PREFIXES.some((p) => pathname.startsWith(p));
-}
+/** Paths reachable without a session cookie (the list lives in lib/public-routes.ts). */
+const isPublic = isPublicPath;
 
 /**
  * Request interception (Next 16 "proxy"). Only checks whether the session cookie is present — the real

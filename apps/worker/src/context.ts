@@ -22,6 +22,11 @@ export interface WorkerContext {
   fontsDir: string;
   /** Absolute root for per-job temporary directories. */
   tmpRoot: string;
+  /**
+   * HTTP client for external APIs. Defaults to the global `fetch`; tests inject a fake or point it at a local
+   * fake server. Always called through `lib/http.ts`, which adds the run's AbortSignal, a timeout and redaction.
+   */
+  fetch?: typeof fetch;
 }
 
 /** Repository root resolved from this file (apps/worker/src → ../../..). */
