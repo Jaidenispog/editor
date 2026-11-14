@@ -256,8 +256,11 @@ your data), so `git pull` does not refuse to update; once your copy no longer tr
 - **Mac:** checked line by line against Homebrew's own package definitions and the Node, pnpm and macOS tool
   sources, which is how the `ffmpeg-full` requirement was found. It has not been run on a Mac yet.
 - **Later changes (also 14 November 2026, on Linux):** the website now answers only on this computer unless
-  `WEB_HOST` is set. That was checked by opening it from this computer and from the computer's own network address
-  (refused without `WEB_HOST`, working with `WEB_HOST=0.0.0.0`), not from a real phone or through WSL. The
-  section 6 lines were run on a copy that still tracked the rewritten file and again after the change.
+  `WEB_HOST` is set. Without `WEB_HOST`, the computer's own network address refused the connection and the app
+  worked as before at `localhost`. With `WEB_HOST=0.0.0.0`, the app was opened in a browser (headless Chrome) at
+  the computer's numeric network address: the page loaded and became interactive, the setup form created the owner
+  account and the sign-in form signed in. It has not been tried from a real phone, through WSL, or by a name such
+  as `my-laptop.local` (`WEB_DEV_ORIGINS`). The section 6 lines were run on a copy that still tracked the rewritten
+  file and again after the change.
 
 If a step fails for you, copy the message and send it to me.

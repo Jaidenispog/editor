@@ -34,7 +34,9 @@ export async function getSettings(): Promise<AppSettings> {
 }
 
 /**
- * The only way the web app writes the settings row. Reads it under a row lock, applies `change` and stores the
+ * The only web-app helper that writes the whole settings object; the other web writes are a single-path jsonb_set
+ * (`savePublishingSettings` in publishing.ts) or `resetLearning`'s own locked transaction (preferences.ts), which
+ * deliberately overwrites `learned`. Reads the row under a row lock, applies `change` and stores the
  * result, keeping the server-owned preference subtrees (`learned`, `styleAffinity`) exactly as the database has them.
  * The worker's preferences.recompute job writes those subtrees with jsonb_set in a single UPDATE, which waits for
  * this lock (and this read waits for its UPDATE), so no save here can put back a stale copy of what it learned.
