@@ -187,6 +187,18 @@ async function ffprobeJson(file) {
   return JSON.parse(stdout);
 }
 
+/** Scrolls so the element sits just below the sticky top bar (the screenshots show whole sections). */
+async function scrollToSection(page, selector) {
+  await page.locator(selector).waitFor();
+  await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    const header = document.querySelector('header');
+    const offset = (header ? header.getBoundingClientRect().height : 0) + 16;
+    window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - offset, behavior: 'instant' });
+  }, selector);
+  await page.waitForTimeout(300);
+}
+
 function editCards(page) {
   return page.locator('section[aria-labelledby="previews-heading"] > ul > li');
 }
@@ -334,8 +346,7 @@ async function main() {
         `readyState ${info.readyState}, ${Number(info.duration).toFixed(2)} s, ${info.width}x${info.height}, error ${info.error}`,
       );
     }
-    await page.locator('#previews-heading').scrollIntoViewIfNeeded();
-    await page.evaluate(() => window.scrollBy(0, -80));
+    await scrollToSection(page, 'section[aria-labelledby="previews-heading"]');
     await keyScreenshot(page, 'five-previews');
 
     // ---- 4. Favourite one. -----------------------------------------------------------------------------------
@@ -483,13 +494,13 @@ async function main() {
     const phone = await browser.newContext({ viewport: PHONE, deviceScaleFactor: 2, isMobile: true, hasTouch: true, storageState: await context.storageState() });
     const phonePage = await phone.newPage();
     watch(phonePage);
-    for (const target of [`/studio/${projectId}`, '/studio', '/']) {
+    for (const target of [`/studio/${projectId}`, '/studio', '/', '/library', '/settings']) {
       await phonePage.goto(`${BASE_URL}${target}`);
       await phonePage.waitForLoadState('networkidle').catch(() => undefined);
       const widths = await phonePage.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth, body: document.body.scrollWidth }));
       check(widths.scroll <= widths.client && widths.body <= widths.client, `no horizontal scroll on ${target} at 390 px`, `scrollWidth ${widths.scroll}, body ${widths.body}, clientWidth ${widths.client}`);
       if (target === `/studio/${projectId}`) {
-        await phonePage.locator('#previews-heading').scrollIntoViewIfNeeded();
+        await scrollToSection(phonePage, 'section[aria-labelledby="previews-heading"]');
         await keyScreenshot(phonePage, 'mobile-previews');
         await phonePage.evaluate(() => window.scrollTo(0, 0));
         await keyScreenshot(phonePage, 'mobile-studio');

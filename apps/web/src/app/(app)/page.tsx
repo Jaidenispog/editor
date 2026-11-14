@@ -39,7 +39,7 @@ export default async function DashboardPage() {
     <>
       <PageHeader eyebrow="Dashboard" title={firstName ? `G’day, ${firstName}` : 'Dashboard'} description="Pick up where you left off, or start a new project from today’s cuts." actions={<NewProjectButton />} />
 
-      <div className="grid gap-6 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <section aria-labelledby="recent-projects" className="xl:col-span-2">
           <div className="mb-4 flex items-center justify-between">
             <h2 id="recent-projects" className="text-lg font-semibold">

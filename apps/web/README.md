@@ -215,6 +215,48 @@ generate → generation, five edits in slot order, v1 rows, `edits.generate` job
 version switching; favourite; export idempotency; download names; cross-site requests refused; clip removal
 deletes its files.
 
+### End-to-end browser test (Stage A)
+
+`e2e/stage-a.e2e.mjs` drives the real app in headless Chromium (plain Node + Playwright, no test runner) the
+way the owner would, on the synthetic footage in `data/samples`:
+
+1. `/setup` creates the owner; a fresh browser signs in at `/login`.
+2. Creates the project "E2E synthetic test" and **drops** `sample_a_portrait_sdr.mp4`,
+   `sample_b_rotated_hevc_hlg.mov` and `sample_c_noaudio_scenes.mp4` on the upload zone (a real `drop` event
+   with a `DataTransfer`), waits for all three clips to be ready and checks the HDR, Rotated and No sound badges.
+3. Tags them Cutting / Before / Result, sets the length to 12 s and clicks "Generate 5 edits".
+4. Waits for five previews; each `<video>` must load (readyState ≥ 2), be vertical and last about 12 s.
+5. Favourites one; revises another with the "Make this 15 seconds" chip and checks that v2 is about 15 s, v1
+   stays in the version switcher and still plays, and the other four edits are unchanged.
+6. Exports one, clicks Download, saves the file and checks it with ffprobe: 1080x1920, H.264 yuv420p, BT.709,
+   AAC 48 kHz stereo when there is audio, and the same length as the preview.
+7. Starts another export, cancels it from "Working on it" while it is running, checks the card says "Export
+   cancelled", then exports again until Download appears.
+8. In a second project, reloads the page after the first 8 MiB part of an upload has arrived (later parts are
+   held back), drops the same file again and checks that the part already received is not sent again and the
+   clip is analysed.
+9. Checks the phone layout (390x844) of the project, the studio list, the dashboard, the library and settings
+   for horizontal scrolling, and that no page errors or console errors appeared.
+
+It exits 0 only when every check passed and prints a list of the failed ones otherwise.
+
+Run everything (fresh database, build, `next start` on port 3100, the worker, the test, then teardown):
+
+```bash
+bash apps/web/e2e/run-stage-a.sh
+# refresh the screenshots in docs/screenshots (PNG at 2x, re-encoded with a palette when over 600 KB):
+E2E_SCREENSHOT_DIR="$PWD/docs/screenshots" bash apps/web/e2e/run-stage-a.sh
+```
+
+The wrapper uses `postgres://postgres@127.0.0.1:55432/postgres` to create and drop the database `studio_e2e`
+(`E2E_PG_URL`, `E2E_DB`), a new temporary folder for storage, worker temp files and logs (`E2E_WORK_DIR`; kept
+when the run fails or with `E2E_KEEP=1`), `AI_PROVIDER=none` and `TRANSCRIPTION_PROVIDER=none`.
+`E2E_SKIP_BUILD=1` reuses the last `next build`. To run only the browser part against a stack you started
+yourself: `E2E_BASE_URL=http://localhost:3100 node apps/web/e2e/stage-a.e2e.mjs` (the web app and the worker
+must share the database and the storage folder). Requires ffmpeg/ffprobe, psql and Playwright with Chromium
+(`require('playwright')` must resolve; the script prints how to install it otherwise). A full run takes about
+two minutes on the synthetic clips.
+
 ## Known limitations
 
 - Next 16 removes `Content-Length` from route-handler responses, so local-driver media is sent with chunked
