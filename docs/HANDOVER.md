@@ -70,7 +70,7 @@ test before Stages B/C. Never present simulated data as real; show honest "needs
 | `packages/ai` | **NOT STARTED** (agent never got a slot) | spec in `docs/handover/phase1-implementation-workflow.js` → `AI` prompt |
 | `apps/web` | **NOT STARTED** beyond `package.json` | spec in the same file → `WEB_FOUNDATION` prompt; API contract in `docs/api.md` |
 | Dev-ops/docs (`docker-compose.yml`, Dockerfiles, `.env.example`, `scripts/local-postgres.sh`, `docs/deployment.md`, `docs/operating-costs.md`, `docs/testing.md`, `docs/security.md`, `README.md`) | **NOT STARTED** | spec → `DEVOPS_DOCS` prompt |
-| Research | 9 of 12 topics done (spotify, tiktok, instagram, square, google, supabase, music, email, safe zones/export specs); critique/synthesis not run | `docs/research/decisions-summary.md`, `platform-constraints-raw.md`, `raw-findings.json` |
+| Research | **Complete** (12 topics, critique, 8 follow-ups). Read `docs/research/platform-constraints.md` (supersedes `decisions-summary.md` where they differ) | memo + raw findings in `docs/research/` |
 | CI | `.github/workflows/ci.yml` written (untested in GitHub) | |
 
 ## 3. Background agents that were running when the session ended
@@ -175,6 +175,23 @@ STORAGE_DRIVER=local, STORAGE_LOCAL_ROOT=./data/storage, WORKER_TMP_DIR=./tmp/wo
    never audio or AI input; Square = tiered capabilities gated at runtime; Google = link-based review requests first;
    Supabase Pro Sydney with S3 protocol storage; music = owner-uploaded "licence passport" + optional provider adapters).
    Finish the missing research topics first (transcription, trend sources, Anthropic vision limits).
+
+### Research-driven changes still to apply (after the current agent run finishes)
+
+1. **Safe zone.** `packages/core/src/safe-zones.ts` (top 250, bottom 450, left 70, right 150) is less conservative
+   than the researched union of Meta and TikTok guidance: text only in x 120–780, y 270–1248, with a wider
+   "head" region x 120–960 for boxes ending at y ≤ 840; subtitles centred, ≤ 480 px wide, ≥ 56 px type, bottom
+   ≤ 1248. Needs a two-region SafeZone in core and matching changes in `packages/media/src/render/ass.ts` and its
+   pixel-diff test. Deferred so the in-flight integration tests are not disturbed.
+2. **Transcription.** OpenAI `whisper-1` is scheduled to shut down on 26 Feb 2027 and newer OpenAI models give no
+   documented timestamps. Default to a Deepgram Nova-3 adapter (VAD-gated); keep whisper-1 as optional.
+3. **Vision requests.** At most 20 images per Claude request; frames at 768 px; no person identification.
+4. **Export preset.** Level 4.1 at ≤ 30 fps (4.2 only for 60 fps), constant 30 fps unless every source is ≥ 50 fps,
+   closed 2 s GOP, 180 s cap, ffprobe check after every export (the renderer currently uses level 4.2 always).
+5. **Stage B/C approaches changed by the follow-ups:** Spotify links/embeds only (no Web API); TikTok export +
+   manual post, optional Zernio provider later; Instagram direct publishing only after a live smoke test; Meta
+   Sound Collection tracks locked to Instagram/Facebook renders; Square writes gated on plan, fee-free services and
+   a self-test; Postmark (transactional + broadcast streams) for email with a consent ledger.
 
 ## 8. Decisions already made (do not re-litigate without reason)
 

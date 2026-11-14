@@ -1,5 +1,7 @@
 # Research decisions (summary for implementation)
 
+> **Superseded where they differ by `platform-constraints.md`**, which incorporates the critique and follow-up research (Spotify, TikTok, Instagram, Meta Sound Collection, Square and provider choices changed).
+
 Full evidence: platform-constraints-raw.md. Completed topics: spotify, tiktok, instagram, square, google, supabase, music, email, safe zones/export specs. Missing: transcription, trend sources, Anthropic vision limits. Confidence levels are the research agents' own; re-confirm against official docs before go-live.
 
 ## TikTok Content Posting API for a private, single-business app (Studio Assistant, Ivanhoe VIC): Login Kit + Content Posting API requirements, Direct Post vs Upload-to-inbox, audit gate and unaudited limits, media transfer rules, sandbox, developer-account eligibility, music rules, 9:16 specs, and third-party provider routes (Ayrshare, Late/Zernio, Buffer, Zapier).
