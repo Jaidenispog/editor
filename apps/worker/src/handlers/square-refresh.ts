@@ -5,6 +5,7 @@ import { scrubSquareCustomer } from '@studio/db/square-purge';
 import type { WorkerContext } from '../context.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
+import { isMalformedBooking } from '../square/api.js';
 import { failSquareJob, openSquare } from '../square/client.js';
 import { SquareConnectionChangedError, upsertBooking, upsertCustomer } from '../square/map.js';
 import { markBookingMissing } from '../square/sync.js';
@@ -28,6 +29,12 @@ export async function handleSquareRefresh(ctx: WorkerContext, run: TrackedRun, p
     }
     if (payload.entity === 'booking') {
       const b = await s.api.getBooking(payload.squareId);
+      if (isMalformedBooking(b)) {
+        // Square still has it but sent a time we can't read: the stored copy stays exactly as it is.
+        ctx.logger.warn({ squareBookingId: b.id, reason: b.reason }, 'left a Square booking as stored: its copy from Square could not be read');
+        await run.progress(1, "Square sent this booking with a time we couldn't read, so it was left as it was.");
+        return;
+      }
       if (!b) {
         const row = await ctx.db.query.bookings.findFirst({ where: eq(schema.bookings.squareBookingId, payload.squareId), columns: { id: true } });
         if (row) await markBookingMissing(ctx, row.id);

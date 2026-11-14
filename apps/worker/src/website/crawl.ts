@@ -38,6 +38,9 @@ export const MAX_IMAGES_TOTAL = 150;
 export const MAX_EXTERNAL_LINKS = 25;
 /** A check may spend at most this long waiting between requests because of `Crawl-delay` (enforced by the fetcher). */
 export const MAX_POLITE_WAIT_SECONDS = MAX_POLITE_WAIT_MS / 1000;
+
+const HOME_FORWARDS_TO_DISALLOWED_REASON = "Your home page forwards to an address your robots.txt asks automated tools not to read, so we didn't check your pages.";
+const HOME_SLOW_CRAWL_REASON = "Your robots.txt asks for a very slow crawl (Crawl-delay), so we couldn't read your home page within the check's 12-minute limit.";
 const SKIP_EXTENSIONS = /\.(pdf|jpe?g|png|gif|webp|avif|svg|ico|bmp|tiff?|mp4|mov|m4v|webm|avi|mp3|m4a|wav|ogg|zip|gz|tgz|rar|7z|docx?|xlsx?|pptx?|css|js|json|xml|txt)$/i;
 
 /** What a crawl needs. */
@@ -198,6 +201,12 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
   fetcher.setCrawlDelay(crawlDelay);
   /** robots.txt applies per host: the www./bare twin has its own (read below, before any page on it). */
   let twinRobots: ParsedRobots = ROBOTS_DISALLOW_ALL;
+  /**
+   * Why `twinRobots` is what it is: not read yet or skipped to keep the polite-wait budget for the home page
+   * ('skipped_for_crawl_delay', read nothing there), no answer or a server error ('unreadable', read nothing there), or
+   * read ('read'). Picks the right words when the home page forwards to the twin and can't be read.
+   */
+  let twinRobotsState: 'skipped_for_crawl_delay' | 'unreadable' | 'read' = 'skipped_for_crawl_delay';
   const robotsForUrl = (u: string): ParsedRobots => {
     try {
       return new URL(u).hostname.toLowerCase() === scope.twinHost && scope.twinHost !== scope.host ? twinRobots : robots;
@@ -310,6 +319,7 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
       const twinOutcome = twinRes.final.error ? 'disallow_all' : robotsOutcomeForStatus(twinRes.final.status);
       // Unreadable (no answer, 5xx): read nothing on that host, as for the main one.
       twinRobots = twinOutcome === 'parse' ? parseRobots((twinRes.final.body ?? Buffer.alloc(0)).toString('utf8')) : twinOutcome === 'allow_all' ? ROBOTS_ALLOW_ALL : ROBOTS_DISALLOW_ALL;
+      twinRobotsState = twinOutcome === 'disallow_all' ? 'unreadable' : 'read';
       const twinDelay = crawlDelayFor(twinRobots, AUDIT_PRODUCT_TOKEN);
       if (twinDelay !== null && (crawlDelay === null || twinDelay > crawlDelay)) crawlDelay = twinDelay;
       fetcher.setCrawlDelay(crawlDelay);
@@ -421,6 +431,8 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
   };
 
   // 4. Pages, breadth-first.
+  /** Page address → the address it forwards to that robots.txt keeps us out of (for the home page's reason). */
+  const robotsBlockedTarget = new Map<string, string>();
   const fetchPage = async (url: string, depth: number) => {
     fetched.add(url);
     if (!allowedForUs(url)) {
@@ -443,6 +455,7 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
       const target = normaliseUrl(res.leftScope) ?? res.leftScope;
       if (robotsFacts.blockedForUs.length < 50 && !robotsFacts.blockedForUs.includes(target.slice(0, 500))) robotsFacts.blockedForUs.push(target.slice(0, 500));
       if (skippedPages.length < 15) skippedPages.push(emptyPage(url, { skipped: 'robots', status: f.status, redirectChain: chain }));
+      robotsBlockedTarget.set(url, target);
       return;
     }
     if (res.leftScope) {
@@ -544,17 +557,30 @@ export async function crawlSite(input: CrawlInput): Promise<CrawlOutput> {
     }
   };
 
+  /** Why a home page that forwards to an address we may not read wasn't checked, by why that host's rules say so. */
+  const homeForwardReason = (target: string | undefined): string => {
+    let onTwin = false;
+    try {
+      onTwin = target !== undefined && scope.twinHost !== scope.host && new URL(target).hostname.toLowerCase() === scope.twinHost;
+    } catch {
+      onTwin = false;
+    }
+    // Partial reasons are kept to 300 characters: the host is shortened if it is unusually long.
+    const twin = scope.twinHost.length > 60 ? `${scope.twinHost.slice(0, 57)}...` : scope.twinHost;
+    if (onTwin && twinRobotsState === 'skipped_for_crawl_delay')
+      return `Your home page forwards to ${twin}. Your robots.txt asks for a very slow crawl (Crawl-delay), so we couldn't read the robots.txt there in time and didn't check your pages.`;
+    if (onTwin && twinRobotsState === 'unreadable')
+      return `Your home page forwards to ${twin}, whose robots.txt couldn't be read (no answer or a server error), so we didn't check your pages.`;
+    return HOME_FORWARDS_TO_DISALLOWED_REASON;
+  };
+
   try {
     // Guarded like every other owner-site request: a polite-wait budget that runs out here ends the check as partial.
     await guarded(() => fetchPage(normaliseUrl(rootUrl) ?? rootUrl, 0), undefined);
     queued.add(normaliseUrl(rootUrl) ?? rootUrl);
     const homeSkip = pages.length === 0 ? skippedPages.find((p) => p.skipped === 'robots') : undefined;
     if (pages.length === 0 && (politeBudgetHit || budgetHit || homeSkip)) {
-      partialReasons.push(
-        homeSkip
-          ? "Your home page forwards to an address your robots.txt asks automated tools not to read, so we didn't check your pages."
-          : "Your robots.txt asks for a very slow crawl (Crawl-delay), so we couldn't read your home page within the check's 12-minute limit.",
-      );
+      partialReasons.push(homeSkip ? homeForwardReason(robotsBlockedTarget.get(homeSkip.url)) : HOME_SLOW_CRAWL_REASON);
       const facts = baseFacts([homeSkip ?? emptyPage(rootUrl, { skipped: 'page_limit' })], 'unknown');
       facts.hostVariants = variants;
       return {

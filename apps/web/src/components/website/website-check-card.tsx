@@ -8,7 +8,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
-import { CheckHistory, countsLine } from './check-history';
+import { CheckHistory } from './check-history';
+import { PAGES_NOT_READ, countsLine } from './check-words';
 import { FindingsByCategory } from './findings-by-category';
 import { PriorityList } from './priority-list';
 import type { WebsiteOverviewDto } from './types';
@@ -59,6 +60,8 @@ export function WebsiteCheckCard({
   };
   const blocked = overview.checkBlockedReason;
   const running = a && (a.status === 'queued' || a.status === 'running');
+  // The newest check finished with a result, so its reasons are already shown above the findings (no repeat below).
+  const latestShown = Boolean(a && (a.status === 'complete' || a.status === 'partial'));
   return (
     <Card>
       <CardHeader
@@ -78,11 +81,17 @@ export function WebsiteCheckCard({
         {a && a.status === 'cancelled' ? <Alert tone="info">Check cancelled. Nothing was changed.</Alert> : null}
         {a && (a.status === 'complete' || a.status === 'partial') ? (
           <div className="space-y-2">
-            <p className="text-sm text-charcoal-800">
-              Checked {a.summary.pagesChecked} page
-              {a.summary.pagesChecked === 1 ? '' : 's'} on {formatDateTime(a.finishedAt ?? a.createdAt)}
-              {took(a.startedAt, a.finishedAt)}. {countsLine(a.summary)}.
-            </p>
+            {a.summary.pagesChecked > 0 ? (
+              <p className="text-sm text-charcoal-800">
+                Checked {a.summary.pagesChecked} page
+                {a.summary.pagesChecked === 1 ? '' : 's'} on {formatDateTime(a.finishedAt ?? a.createdAt)}
+                {took(a.startedAt, a.finishedAt)}. {countsLine(a.summary)}.
+              </p>
+            ) : (
+              <p className="text-sm text-charcoal-800">
+                {PAGES_NOT_READ} (Check of {formatDateTime(a.finishedAt ?? a.createdAt)}.)
+              </p>
+            )}
             {a.summary.partialReasons.map((r) => (
               <Alert key={r} tone="warning">
                 {r}
@@ -106,7 +115,7 @@ export function WebsiteCheckCard({
             <h3 id="all-findings" className="text-sm font-semibold text-charcoal-900">
               Everything we found
             </h3>
-            <FindingsByCategory findings={findings} changeKeys={changeKeys} onShowChange={onShowChanges} altImages={altImages} />
+            <FindingsByCategory findings={findings} notRead={overview.pagesNotRead && latestShown ? { reasons: [] } : overview.pagesNotRead} changeKeys={changeKeys} onShowChange={onShowChanges} altImages={altImages} />
           </section>
         ) : null}
         <CheckHistory refreshKey={a?.id ?? 'none'} />

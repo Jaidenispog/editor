@@ -49,8 +49,8 @@ try {
   };
   const locationId = effectiveLocationId({ ...s.config, snapshot: { fetchedAt: '', merchantName, locations: locations.map((l) => ({ ...l, bookingSiteUrl: null })), businessProfile, teamMembers: [], services } });
   const start = new Date();
-  const bookings = await s.api.listBookings({ locationId, startAtMin: start.toISOString(), startAtMax: new Date(start.getTime() + 31 * 24 * 3600_000).toISOString() });
-  out['bookings'] = { count: bookings.length, statuses: [...new Set(bookings.map((b) => b.status))] };
+  const { bookings, skippedIds } = await s.api.listBookings({ locationId, startAtMin: start.toISOString(), startAtMax: new Date(start.getTime() + 31 * 24 * 3600_000).toISOString() });
+  out['bookings'] = { count: bookings.length, unreadable: skippedIds.length, statuses: [...new Set(bookings.map((b) => b.status))] };
   // listCustomers reads every page (100 a page), as the sync does.
   out['customers'] = { allPages: (await s.api.listCustomers()).length };
   const service = services.find((v) => v.availableForBooking && !v.archived);

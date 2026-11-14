@@ -11,6 +11,7 @@ import { getIntegrationStatuses } from '@/lib/integrations';
 import { getPlacesState, listReviewRequests } from '@/lib/reviews';
 import { getCurrentUser } from '@/lib/session';
 import { getSettings } from '@/lib/settings';
+import { reviewAutomationNotice } from '@/lib/shared/review-automation';
 
 export const metadata: Metadata = { title: 'Reviews' };
 export const dynamic = 'force-dynamic';
@@ -47,12 +48,11 @@ export default async function ReviewsPage() {
       counts: requests.counts,
       clients: clients.items,
       templates: templates.items,
-      automationBlocked:
-        settings.email.squareSends.feedbackOrReviews === true
-          ? 'Square is already asking your clients for feedback; turn that off in Square first to avoid asking twice.'
-          : !validateReviewLink(link).valid
-            ? 'Add your Google review link above before switching this on.'
-            : null,
+      automationBlocked: reviewAutomationNotice({
+        squareAsksForFeedback: settings.email.squareSends.feedbackOrReviews === true,
+        automationEnabled: settings.reviews.automation.enabled,
+        reviewLinkValid: validateReviewLink(link).valid,
+      }),
     };
   }
   return (

@@ -113,7 +113,7 @@ export async function openSquare(ctx: WorkerContext, run: Pick<TrackedRun, 'sign
     baseUrl: testOnlyBaseUrl(env, env.SQUARE_API_BASE_URL),
     signal: run.signal,
     fetch: ctx.fetch,
-    onSkip: (objectId, reason) => ctx.logger.warn({ squareObjectId: objectId, reason }, 'skipped a Square object with a malformed time'),
+    onSkip: (objectId, reason) => ctx.logger.warn({ squareObjectId: objectId, reason }, 'skipped a Square object we could not read (malformed time or missing fields)'),
   });
   return { api, conn, config: parseSquareConfig(conn.config), environment: config.environment, merchantId: conn.externalAccountId ?? first.externalAccountId };
 }

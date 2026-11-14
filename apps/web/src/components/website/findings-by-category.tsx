@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { CATEGORIES, CATEGORY_LABELS, prioritiseFindings, type Finding, type FindingCategory } from '@studio/core';
 import { cn } from '@/lib/shared/cn';
+import { findingsNote } from './check-words';
 import { FindingCard, type AltImage } from './finding-card';
 
 /** All findings grouped by category, with filter chips (design §4.2 step 3). */
@@ -11,8 +12,11 @@ export function FindingsByCategory({
   changeKeys,
   onShowChange,
   altImages,
+  notRead = null,
 }: {
   findings: Finding[];
+  /** Set when the check read no page: an empty list is then not a clean bill of health. */
+  notRead?: { reasons: string[] } | null;
   changeKeys: Set<string>;
   onShowChange: () => void;
   altImages?: AltImage[];
@@ -20,9 +24,11 @@ export function FindingsByCategory({
   const [filter, setFilter] = useState<FindingCategory | 'all'>('all');
   const present = CATEGORIES.filter((c) => findings.some((f) => f.category === c));
   const shown = prioritiseFindings(findings.filter((f) => filter === 'all' || f.category === filter));
-  if (findings.length === 0) return <p className="text-sm text-charcoal-600">The check found nothing to fix. Nice work.</p>;
+  const note = findingsNote(findings.length, notRead);
+  if (findings.length === 0) return <p className="text-sm text-charcoal-600">{note}</p>;
   return (
     <div className="space-y-3">
+      {note ? <p className="text-sm text-charcoal-600">{note}</p> : null}
       <div className="flex flex-wrap gap-2" role="group" aria-label="Filter findings">
         {(['all', ...present] as const).map((c) => (
           <button
