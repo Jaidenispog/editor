@@ -328,3 +328,16 @@ Optional: `YOUTUBE_API_KEY` turns on the YouTube AU popular chart in Settings â†
 project with "YouTube Data API v3" enabled, restrict it to that API, and give it to the worker and the web app (the web
 app only checks that it is set). One read a day plus manual refreshes uses about 1â€“5 of the default 10,000 daily
 quota units. Without it the chart shows "Optional, not configured" and everything else works.
+
+## Publishing (Stage B, WP4)
+
+- Manual posting needs nothing. Instagram direct publishing needs `META_APP_ID`, `META_APP_SECRET` and
+  `META_LOGIN_CONFIG_ID` (one Facebook Login for Business configuration with a System-user token and
+  `instagram_basic` + `instagram_content_publish`), optionally `META_GRAPH_VERSION` (default `v26.0`), an HTTPS
+  `APP_URL`, and outbound HTTPS from the worker to `graph.facebook.com` and `rupload.facebook.com` (the web app calls
+  `graph.facebook.com` once per connect for the code exchange).
+- Register `https://<app address>/api/integrations/instagram/callback` in the configuration and under Valid OAuth
+  Redirect URIs, and the published `/privacy` and `/data-deletion` pages in the Meta app settings.
+- `META_GRAPH_BASE_URL` / `META_RUPLOAD_BASE_URL` are for tests only and are ignored unless `NODE_ENV=test`.
+  `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` are not used (no direct TikTok API for a private app).
+- The worker schedules `publish.dispatch` every minute and `social.check` daily at 4:23 am Melbourne time.

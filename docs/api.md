@@ -184,6 +184,50 @@ fetched over 7 days ago and turned-off watches last queried over 7 days ago.
 
 ## Publishing (Stage B, WP4 and WP10)
 
+Manual posting ("Post it yourself") always works; Instagram direct publishing (Meta Unified Login, system-user token,
+Development mode) is optional and switched on only after a first verification post the owner confirms. TikTok is
+manual only until WP10. Nothing is ever posted to test a connection. Times are entered in Melbourne time and stored in
+UTC. Staff see and draft posts of their own projects; approval, cancel, retry, resolve and every integration control
+are owner only.
+
+| Method | Route | Notes |
+| --- | --- | --- |
+| GET | `/api/publishing/eligibility?versions=a,b` | Session. Per version (1–5, preview ready): `eligibility` (`PlatformEligibility[]`: `allowedVariants`, `automationAllowedForStandard`, `reasons`, `manualStepHint`, `downloadLabel`), `methods` (`MethodOption[]` per platform; `manual` always available, `instagram_api` only with a connected account: `isVerification` until verified, unavailable while the switch is off), `captionSuffix` (CC BY credit), `defaultCoverTimeSec`, `priorTargets`; plus `quota.instagram`, `captionFooter`, `canApprove` |
+| GET | `/api/publishing/candidates` | Session. Recent preview-ready versions for the composer's picker (nothing ticked) |
+| GET | `/api/publishing/connections` | Session. Instagram connection facts (never the token): `configured`, `missingEnv`, `connectionStatus`, `lastError`, `tokenExpiresAt` (null = never), `tokenExpiringSoon` (7 days), `discoveryEmpty`, `accounts` (verified, `directPublishEnabled`, quota), handles, `captionFooter`, `canManage` |
+| GET | `/api/publishing/badges?versions=a,b` | Session. `{ badges: [{ versionId, platform, status, label }] }` for Studio and Library cards ("Instagram · Posted", "TikTok · Your turn", "… · Scheduled 15 Nov") |
+| PUT | `/api/publishing/settings` | Owner. `{ captionFooter ≤ 500 }` (stored in `settings.publishing` with `jsonb_set`) |
+| POST | `/api/publish-posts` | Session. `{ items: [{ editVersionId, caption, coverTimeSec, mode: now\|scheduled\|draft_handoff, schedule?: { date: YYYY-MM-DD, time: HH:mm }, targets: [{ platform, method, delivery?, variant }] (1–2, one per platform) }] (1–5), allowRepeat? }` → `{ posts: PublishPostDto[] }` (status `draft`). 400 for a caption over 2,200 graphemes (credit line included), a Melbourne time that does not exist ("That time doesn't exist in Melbourne…"), less than 10 minutes or more than 90 days ahead, a file the music rule refuses (e.g. Meta Sound Collection music to TikTok), or a method not on offer; 422 `UNSUPPORTED` for Zernio; 409 when the version already has a published, processing or submitted target on that platform unless `allowRepeat` |
+| POST | `/api/publish-posts/approve` | Owner. `{ postIds, consent?: { tiktokPublic } }`. Re-runs the music rule (400 when the licence changed), stores `music_check` with the licence snapshot, sets `approved_by/at`, audits `publish.approved`, queues `publish.prepare`. Idempotent. A Zernio target needs `consent.tiktokPublic` (400). Writes no feedback event and no `music_usage` row |
+| GET | `/api/publish-posts?view=queue\|history&cursor=` | Session. Queue = draft/approved/in progress or any destination waiting for the owner; history = the rest. Newest first |
+| GET / PATCH / DELETE | `/api/publish-posts/[id]` | GET adds `history` (audit entries). PATCH `{ caption?, coverTimeSec?, schedule?, targets? }`: a time change keeps the approval; anything else returns an approved post to `draft` (owner); 409 once a destination has started going out. DELETE: drafts only (409 otherwise), cover removed |
+| POST | `/api/publish-posts/[id]/cancel` | Owner. Destinations without `submitted_at` become `cancelled`; published ones stay. 409 for a draft (delete it instead) |
+| GET | `/api/publish-targets/[id]/media` | Session. `{ videoUrl, videoFilename, byteSize, coverUrl (Instagram), caption, label }` with expiring links to the exact file the music rule picked. 409 until the file is prepared |
+| POST | `/api/publish-targets/[id]/confirm-posted` | Session (owner for `check_before_retry`). `{ url? }`: only `https://www.instagram.com/(reel\|p)/…`, `https://www.tiktok.com/@…/video/…` or `https://vm.tiktok.com/…` (400 otherwise; lookalike hosts refused). → `published` with `confirmed_by/at`; writes the `publish` feedback event (once per version and platform) and the `music_usage` row (standard file with music, `purpose 'publish'`, the platform). On a published target without a link it only adds the link |
+| POST | `/api/publish-targets/[id]/undo-confirm` | Session. Manual confirmations only → back to the owner's turn (feedback is kept) |
+| POST | `/api/publish-targets/[id]/retry` | Owner. `failed` and retryable only → `queued` with the same idempotency key; queues `publish.target` (or `publish.prepare` when the file is missing) |
+| POST | `/api/publish-targets/[id]/resolve` | Owner. `{ action: post_without_music \| post_manually \| retry_anyway \| mark_posted }`. `post_without_music` (after a copyright match or a licence change): variant `no_music`, container cleared, prepared again. `post_manually`: method `manual` (variant switched to one the licence allows). `retry_anyway` (`check_before_retry` only): clears `submitted_at`, audited `publish.target.override_retry`; the worker reads the platform's status first |
+| POST | `/api/social-accounts/[id]/verification` | Owner. `{ result: seen\|not_seen, targetId }` for a published first verification post; `seen` sets `capabilities.verifiedDirectAt` |
+| PATCH | `/api/social-accounts/[id]` | Owner. `{ directPublishEnabled }`; 409 until the verification is recorded |
+| GET | `/api/integrations/instagram/connect` | Owner. 302 to `https://www.facebook.com/{v}/dialog/oauth?client_id&redirect_uri&config_id&response_type=code&override_default_response_type=true&state` (no `scope`); state in the 10-minute `sa_oauth_meta` cookie (path `/api/integrations/instagram`). 422 without `META_APP_ID`, `META_APP_SECRET`, `META_LOGIN_CONFIG_ID` |
+| GET | `/api/integrations/instagram/callback` | Owner, same session. One code exchange (`GET /{v}/oauth/access_token`, 10 s, no retry), token encrypted on the `meta` connection, audit `integration.meta.connected`, queues `social.check` (reason `connect`), back to `/settings?tab=integrations&instagram=checking` (or `instagram_error=…`) |
+| POST | `/api/integrations/instagram/account` | Owner. `{ igUserId: 5–30 digits }` when discovery is empty → stored as `config.pendingIgUserId`, read-only check queued |
+| DELETE | `/api/integrations/meta` | Owner. Token wiped, connection `disconnected`, accounts `disconnected` with the switch off, unsent automated Instagram targets → "reconnect" |
+| POST | `/api/integrations/[provider]/check` | Owner. `meta` (or `instagram`) → `{ jobId }` of a read-only `social.check`; other providers 404 |
+
+`PublishPostDto` = `{ id, versionId, projectId, projectTitle, styleName, versionNo, previewThumbUrl, caption, coverUrl,
+coverTimeSec, mode, scheduledFor, scheduledForLabel, status, statusMessage, approvedAt, createdAt, targets }`;
+`TargetDto` = `{ id, platform, method, delivery, handle, variant, status, manualStep, statusMessage, publishedUrl,
+publishedAt, confirmedByName, attempts, isVerification, accountId, awaitingVerificationAnswer, actions }` (types in
+`apps/web/src/lib/shared/publishing-dto.ts`; `actions` from `targetActionsFor` in core).
+
+Jobs (worker): `publish.prepare { postId, projectId }` (file exists? else queue `render.export` with the variant;
+ffprobe check against the platform's limits; cover JPEG cut from the export; manual targets become the owner's turn
+when due, automated ones get `publish.target`), `publish.target { targetId, postId, projectId }` (claim → Instagram
+state machine), `publish.poll { …, pollNo }` (container status every 60 s ×5, then every 5 min up to 24 h, then the
+copyright check), `publish.dispatch {}` (every minute, key `every-minute`), `social.check { connectionId, reason }`
+(read-only; daily at 4:23 am Melbourne, key `daily`). The three per-target queues are pg-boss `stately`.
+
 ## Square appointments (Stage C, WP6 and WP6b)
 
 ## Email and reviews (Stage C, WP7)

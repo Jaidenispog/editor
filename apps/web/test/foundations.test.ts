@@ -30,8 +30,10 @@ describe('integration statuses', () => {
     const now = buildIntegrationStatuses(c.env as never, c.facts as never);
     const expected = before.find((b) => b.name === name)?.statuses ?? [];
     // Cards added by Stage B/C modules are new; every Stage A card must still read exactly as before.
-    const legacy = now.filter((s) => expected.some((e) => e['id'] === s.id)).map(({ state: _s, liveMode: _l, verified: _v, ...rest }) => rest);
-    expect(legacy).toEqual(expected);
+    // Instagram and TikTok were rewritten by the publishing module (WP4, design §5.3: manual-first wording).
+    const replaced = new Set(['instagram', 'tiktok']);
+    const legacy = now.filter((s) => !replaced.has(s.id) && expected.some((e) => e['id'] === s.id)).map(({ state: _s, liveMode: _l, verified: _v, ...rest }) => rest);
+    expect(legacy).toEqual(expected.filter((e) => !replaced.has(String(e['id']))));
   });
 
   it('adds the shared state, live mode and verification fields', () => {

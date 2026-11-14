@@ -106,3 +106,14 @@ appear as an end card and/or a corner mark inside the area both apps keep clear,
 preview's branding. Not yet checked with real use: whether learned defaults feel right after a few weeks, logo
 legibility on the real logo, and the estimates on real reference videos. The on-screen text estimate has only run
 against a fake (it needs the Anthropic key).
+
+## Publishing (Stage B, WP4)
+
+- **Built**: composer (only the edits you chose, platforms off by default, caption with a 2,200-character counter and
+  locked credit line, cover picker, Melbourne scheduling with daylight saving), "Post it yourself" with download, share,
+  copy caption and "I've posted it", Instagram direct publishing through Meta's Unified Login with a first verification
+  post, Publishing page (Your turn, upcoming, history), Content Library badges and multi-select, Studio "Publish…".
+- **Verified on synthetic footage with fakes**: the whole Instagram flow against a local fake of Meta's API (no real
+  post was made), the music rule, duplicate protection and restart recovery.
+- **Waiting on account access**: a Meta business app, configuration and the first real verification post (see the
+  owner checklist in `docs/design/stage-bc-plan.md` §7). TikTok stays manual until the optional Zernio route (WP10).

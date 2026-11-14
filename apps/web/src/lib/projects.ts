@@ -11,6 +11,7 @@ import { cancelProjectJobs } from './jobs.js';
 import { getLogger } from './logger.js';
 import { getBlobStore } from './storage.js';
 import { getAccessibleProject, projectVisibilityFilter } from './studio-access.js';
+import { cleanUpProjectPosts } from './publishing.js';
 
 /** Body for POST /api/projects. */
 export const CreateProjectSchema = z.object({
@@ -144,8 +145,8 @@ export async function updateProject(id: string, user: SessionUser, input: z.infe
 }
 
 /**
- * Permanently deletes a project: hides it immediately (soft delete), cancels its running jobs, removes every
- * stored file under its storage prefix (and its project-scoped music), then hard-deletes the rows (cascades
+ * Permanently deletes a project: hides it immediately (soft delete), cancels its running jobs and its unsent posts,
+ * removes every stored file under its storage prefix (plus its publishing covers and project-scoped music), then hard-deletes the rows (cascades
  * remove clips, generations, edits, versions and job rows). This cannot be undone. Staff can only delete
  * projects they created; the owner can delete any project.
  */
@@ -162,6 +163,8 @@ export async function deleteProjectPermanently(id: string, user: Pick<SessionUse
   const store = getBlobStore();
   let filesRemoved = 0;
   try {
+    // Publishing covers live outside the project prefix; unsent posts of this project are cancelled first.
+    filesRemoved += await cleanUpProjectPosts(id);
     filesRemoved += await store.deletePrefix(storageKeys.projectPrefix(id));
     const tracks = await db.select({ id: schema.musicTracks.id, storageKey: schema.musicTracks.storageKey }).from(schema.musicTracks).where(eq(schema.musicTracks.projectId, id));
     for (const t of tracks) filesRemoved += await store.deletePrefix(storageKeys.musicPrefix(t.id));

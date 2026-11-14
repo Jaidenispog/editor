@@ -19,6 +19,7 @@ import type {
   GenerationSettings,
   MusicLicence,
   PlanIssue,
+  PlatformEligibility,
   ReferenceStyleProfile,
   RenderBrandSnapshot,
   StyleSupport,
@@ -427,17 +428,40 @@ export const socialAccounts = pgTable(
     externalId: text('external_id').notNull(),
     username: text('username').notNull(),
     displayName: text('display_name').notNull().default(''),
-    /** Encrypted at rest (AES-256-GCM, packages/db/src/crypto.ts). */
-    accessTokenEncrypted: text('access_token_encrypted').notNull(),
+    /**
+     * Legacy per-account token column, kept null: publishing credentials live encrypted in `integration_connections`
+     * (provider `meta` or `zernio`), found through `connection_id`.
+     */
+    accessTokenEncrypted: text('access_token_encrypted'),
     refreshTokenEncrypted: text('refresh_token_encrypted'),
     tokenExpiresAt: timestamp('token_expires_at', { withTimezone: true }),
     scopes: jsonb('scopes').$type<string[]>().notNull().default([]),
-    capabilities: jsonb('capabilities').$type<Record<string, boolean>>().notNull().default({}),
-    status: text('status', { enum: ['connected', 'needs_reauth', 'disconnected'] }).notNull().default('connected'),
+    /**
+     * Read-only check results and owner verification markers: `contentPublish`, `resumableMaxBytes`, `quotaUsage`,
+     * `quotaTotal`, `quotaCheckedAt`, `graphVersion`, `tokenExpiresAt`, `verifiedDirectAt`, `verifiedDraftAt`, ….
+     */
+    capabilities: jsonb('capabilities').$type<Record<string, boolean | string | number | null>>().notNull().default({}),
+    status: text('status', { enum: ['connected', 'needs_reauth', 'disconnected', 'error'] }).notNull().default('connected'),
+    /** Which adapter serves the account. */
+    provider: text('provider', { enum: ['meta_graph', 'zernio'] }).notNull().default('meta_graph'),
+    connectionId: text('connection_id').references(() => integrationConnections.id, { onDelete: 'set null' }),
+    /** The owner's switch; can only be turned on once `capabilities.verifiedDirectAt` is set (enforced by the API). */
+    directPublishEnabled: boolean('direct_publish_enabled').notNull().default(false),
+    lastCheckedAt: timestamp('last_checked_at', { withTimezone: true }),
+    lastError: text('last_error'),
     ...timestamps,
   },
-  (t) => [uniqueIndex('social_accounts_platform_ext_idx').on(t.platform, t.externalId)],
+  (t) => [uniqueIndex('social_accounts_platform_ext_idx').on(t.platform, t.externalId), index('social_accounts_connection_idx').on(t.connectionId)],
 );
+
+/** Eligibility result and licence snapshot stored on approval (`publish_posts.music_check`). */
+export interface PublishMusicCheck {
+  ok: boolean;
+  reasons: string[];
+  perPlatform?: PlatformEligibility[];
+  licenceSnapshot?: MusicLicence | null;
+  checkedAt?: string;
+}
 
 export const publishPosts = pgTable(
   'publish_posts',
@@ -448,19 +472,41 @@ export const publishPosts = pgTable(
     createdBy: text('created_by')
       .notNull()
       .references(() => users.id),
+    /** The final caption, credit line included. */
     caption: text('caption').notNull().default(''),
     coverTimeSec: real('cover_time_sec'),
     coverKey: text('cover_key'),
     mode: text('mode', { enum: ['now', 'scheduled', 'draft_handoff'] }).notNull(),
+    /** UTC; entered in Melbourne time. */
     scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
-    musicCheck: jsonb('music_check').$type<{ ok: boolean; reasons: string[] } | null>(),
+    musicCheck: jsonb('music_check').$type<PublishMusicCheck | null>(),
+    /** Derived from the targets by the worker and the API after every transition. */
     status: text('status', { enum: ['draft', 'approved', 'in_progress', 'complete', 'partial', 'failed', 'cancelled'] })
       .notNull()
       .default('draft'),
+    approvedBy: text('approved_by').references(() => users.id, { onDelete: 'set null' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    statusMessage: text('status_message').notNull().default(''),
     ...timestamps,
   },
-  (t) => [index('publish_posts_status_idx').on(t.status, t.scheduledFor)],
+  (t) => [
+    index('publish_posts_status_idx').on(t.status, t.scheduledFor),
+    index('publish_posts_version_idx').on(t.editVersionId),
+    index('publish_posts_project_idx').on(t.projectId, t.createdAt),
+  ],
 );
+
+/** Adapter state of one target. Never contains tokens. */
+export interface PublishProviderState {
+  uploadDone?: boolean;
+  statusCode?: string;
+  copyright?: { status: string; matchesFound: boolean | null };
+  quota?: { usage: number; total: number };
+  graphErrors?: Array<{ code: number | null; subcode: number | null; message: string; at: string }>;
+  /** False when the platform said the failure is permanent (no Retry button). */
+  retryable?: boolean;
+  [key: string]: unknown;
+}
 
 export const publishTargets = pgTable(
   'publish_targets',
@@ -469,24 +515,47 @@ export const publishTargets = pgTable(
     postId: text('post_id')
       .notNull()
       .references(() => publishPosts.id, { onDelete: 'cascade' }),
-    accountId: text('account_id')
-      .notNull()
-      .references(() => socialAccounts.id),
+    /** The discovered account for automated methods; null for "Post it yourself". */
+    accountId: text('account_id').references(() => socialAccounts.id),
     platform: text('platform', { enum: ['instagram', 'tiktok'] }).notNull(),
-    /** Key used to make retries idempotent against the platform (e.g. container id / publish id). */
+    /** `pt_<targetId>`, set at insert; unique. */
     idempotencyKey: text('idempotency_key').notNull(),
     status: text('status', { enum: ['queued', 'processing', 'published', 'failed', 'manual_step_required', 'cancelled'] })
       .notNull()
       .default('queued'),
     externalContainerId: text('external_container_id'),
     externalPostId: text('external_post_id'),
+    /** Only from a platform read-back or a link the owner pasted. */
     publishedUrl: text('published_url'),
     error: text('error'),
     attempts: integer('attempts').notNull().default(0),
     lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
+    method: text('method', { enum: ['manual', 'instagram_api', 'zernio'] }).notNull().default('manual'),
+    delivery: text('delivery', { enum: ['publish', 'draft'] }).notNull().default('publish'),
+    mediaVariant: text('media_variant', { enum: ['standard', 'no_music'] }).notNull().default('standard'),
+    /** The exact file this target posts (filled by `publish.prepare`). */
+    mediaKey: text('media_key'),
+    manualStep: text('manual_step', {
+      enum: ['post_in_app', 'finish_in_tiktok_app', 'review_copyright_match', 'check_before_retry', 'music_licence_changed', 'reconnect_account', 'file_too_large_for_upload'],
+    }),
+    statusMessage: text('status_message').notNull().default(''),
+    /** The first live post for a method (the owner then confirms they can see it). */
+    isVerification: boolean('is_verification').notNull().default(false),
+    /** Set by a conditional update just before the one non-repeatable call (`media_publish`). */
+    submittedAt: timestamp('submitted_at', { withTimezone: true }),
+    publishedAt: timestamp('published_at', { withTimezone: true }),
+    confirmedBy: text('confirmed_by').references(() => users.id, { onDelete: 'set null' }),
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    providerState: jsonb('provider_state').$type<PublishProviderState>().notNull().default({}),
     ...timestamps,
   },
-  (t) => [uniqueIndex('publish_targets_post_account_idx').on(t.postId, t.accountId), index('publish_targets_status_idx').on(t.status)],
+  (t) => [
+    uniqueIndex('publish_targets_post_account_idx').on(t.postId, t.accountId),
+    index('publish_targets_status_idx').on(t.status),
+    uniqueIndex('publish_targets_post_platform_idx').on(t.postId, t.platform),
+    uniqueIndex('publish_targets_idempotency_idx').on(t.idempotencyKey),
+    index('publish_targets_external_post_idx').on(t.platform, t.externalPostId),
+  ],
 );
 
 // ---------------------------------------------------------------------------------------------

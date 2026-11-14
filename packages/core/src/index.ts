@@ -28,3 +28,6 @@ export * from './jobs/trends.js';
 export * from './preference-learning.js';
 export * from './reference.js';
 export * from './jobs/preferences.js';
+export * from './publishing.js';
+export * from './jobs/publishing.js';
+export * from './settings/publishing.js';
