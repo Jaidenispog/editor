@@ -1,0 +1,103 @@
+# Studio Assistant on one machine: PostgreSQL 16, the web app and the background worker.
+#
+#   cp .env.example .env              # then set APP_SECRET, POSTGRES_PASSWORD and APP_URL (see docs/deployment.md)
+#   docker compose build
+#   docker compose --profile migrate run --rm migrate     # create/upgrade the database tables (every deploy)
+#   docker compose up -d
+#   open http://localhost:3000/setup                      # create the owner account
+#
+# Media files live in ./data on the host (local storage driver); the database lives in the "pgdata" volume.
+# The web port is published on 127.0.0.1 only; put a TLS reverse proxy such as Caddy in front for real use.
+name: studio-assistant
+
+x-app-environment: &app-environment
+  # Overrides DATABASE_URL from .env so the containers always reach the bundled database.
+  DATABASE_URL: postgres://studio:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/studio_assistant
+  NODE_ENV: production
+  STORAGE_LOCAL_ROOT: /app/data/storage
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: studio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: studio_assistant
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studio -d studio_assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # No published port: only the web and worker containers can reach the database.
+
+  # One-shot: applies database migrations, then exits. Run before `up` on every deploy (it is safe to repeat).
+  migrate:
+    profiles: ["migrate"]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args:
+        APP_UID: ${APP_UID:-1001}
+    image: studio-assistant-worker:local
+    env_file: .env
+    environment:
+      <<: *app-environment
+    command: ["node", "--import", "tsx", "/app/packages/db/src/migrate.ts"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        APP_UID: ${APP_UID:-1001}
+    image: studio-assistant-web:local
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      <<: *app-environment
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+    volumes:
+      # Local storage driver: uploads, proxies, previews and exports. Must be the same folder as the worker's.
+      - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args:
+        APP_UID: ${APP_UID:-1001}
+    image: studio-assistant-worker:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      <<: *app-environment
+      WORKER_TMP_DIR: /app/tmp/worker
+    volumes:
+      - ./data:/app/data
+      # Scratch space for renders (several GB during an export); emptied by the worker's hourly cleanup.
+      - worker-tmp:/app/tmp
+    # pg-boss waits up to 30 s for running jobs, interrupted jobs get 10 s more to record their state, and the
+    # worker forces an exit at 45 s. Give it longer than that before Docker sends SIGKILL.
+    stop_grace_period: 60s
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  worker-tmp:
