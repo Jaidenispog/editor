@@ -1,13 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import type Anthropic from '@anthropic-ai/sdk';
-import { AppError, CancelledError, type SegmentLabel } from '@studio/core';
+import { AppError, CancelledError, SEGMENT_LABELS, type SegmentLabel } from '@studio/core';
 import type { Logger } from 'pino';
 import { DEFAULT_MODEL_RATES, type RateTable } from '../pricing.js';
 import type { AiCallOptions, FrameForLabelling, LabelShotsInput, LabelShotsResult, ShotLabelResult, VisionLabeler } from '../types.js';
 import { mapAnthropicError, usageFrom, type AnthropicMessagesClient, type StructuredResponse } from './client.js';
 import { LABELER_SYSTEM_PROMPT, buildLabelerIntro } from './prompts.js';
-import { LabelWireSchema, type LabelWire } from './schemas.js';
+import { FRAMING_VALUES, LabelWireSchema, type LabelWire } from './schemas.js';
+import type { ShotFraming } from '../types.js';
 
 /** Frames per request (well inside the API's image limits and cheap to retry). */
 export const MAX_FRAMES_PER_REQUEST = 16;
@@ -122,7 +123,7 @@ export function normaliseLabels(wire: LabelWire, allowedShotIds: ReadonlySet<str
   for (const f of wire.frames) {
     if (!allowedShotIds.has(f.shotId)) continue;
     const confidence = clamp01(f.confidence);
-    let label: SegmentLabel = f.label;
+    let label: SegmentLabel = (SEGMENT_LABELS as readonly string[]).includes(f.label) ? (f.label as SegmentLabel) : 'unknown';
     if (confidence < MIN_CONFIDENCE) label = 'unknown';
     if (SENSITIVE_LABELS.includes(label) && confidence < SENSITIVE_MIN_CONFIDENCE) label = 'unknown';
     const words = f.description.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
@@ -132,7 +133,7 @@ export function normaliseLabels(wire: LabelWire, allowedShotIds: ReadonlySet<str
       label,
       confidence: label === 'unknown' ? 0 : Math.round(confidence * 1000) / 1000,
       description,
-      framing: f.framing,
+      framing: (FRAMING_VALUES as readonly string[]).includes(f.framing) ? (f.framing as ShotFraming) : 'unknown',
       focus: f.focus ? { x: clamp01(f.focus.x), y: clamp01(f.focus.y) } : null,
       issues: f.issues.map((s) => s.trim().slice(0, 120)).filter(Boolean).slice(0, 6),
     });
