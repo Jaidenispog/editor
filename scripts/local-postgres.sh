@@ -69,7 +69,8 @@ BIN="$(find_pg_bin)"
 
 check_version() {
   local version major
-  version="$("$BIN/initdb" --version | awk '{print $NF}')"
+  # First version-shaped word: "initdb (PostgreSQL) 16.4" on Linux, "initdb (PostgreSQL) 17.11 (Homebrew)" on macOS.
+  version="$("$BIN/initdb" --version | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1)"
   major="${version%%.*}"
   [[ "$major" =~ ^[0-9]+$ ]] || fail "Could not read the PostgreSQL version from: $("$BIN/initdb" --version)"
   (( major >= MIN_MAJOR )) || fail "PostgreSQL $version found in $BIN, but version $MIN_MAJOR or newer is required."
