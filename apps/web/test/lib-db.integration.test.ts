@@ -82,8 +82,9 @@ suite('database-backed helpers', () => {
     const settings = await getSettings();
     expect(settings.brand.accentColour).toBe('#C8A24A');
     const trends = await listTrends();
-    expect(trends).toHaveLength(8);
-    expect(trends.every((t) => t.sourceKind === 'curated' && t.sourceName === 'Studio Assistant curated reference')).toBe(true);
+    // Fresh install: the re-sourced curated list (research memo §11), labelled by trendLabel.
+    expect(trends).toHaveLength(11);
+    expect(trends.every((t) => t.kind === 'curated' && !/trending|viral/i.test(t.label))).toBe(true);
 
     const updated = await updateSettings({ brand: { accentColour: '#336699' }, preferences: { pacing: 'fast' } }, null);
     expect(updated.brand.accentColour).toBe('#336699');

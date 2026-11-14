@@ -17,3 +17,5 @@ export * from './manual-labels.js';
 export * from './completion.js';
 export * from './plan-facts.js';
 export * from './integrations.js';
+export * from './trend-label.js';
+export * from './jobs/trends.js';

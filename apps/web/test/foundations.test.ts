@@ -29,7 +29,8 @@ describe('integration statuses', () => {
   it.each(WORDING_CASES.map((c) => [c.name, c] as const))('keeps the Stage A wording for existing entries: %s', (name, c) => {
     const now = buildIntegrationStatuses(c.env as never, c.facts as never);
     const expected = before.find((b) => b.name === name)?.statuses ?? [];
-    const legacy = now.map(({ state: _s, liveMode: _l, verified: _v, ...rest }) => rest);
+    // Cards added by Stage B/C modules are new; every Stage A card must still read exactly as before.
+    const legacy = now.filter((s) => expected.some((e) => e['id'] === s.id)).map(({ state: _s, liveMode: _l, verified: _v, ...rest }) => rest);
     expect(legacy).toEqual(expected);
   });
 

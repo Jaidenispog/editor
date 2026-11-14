@@ -22,6 +22,7 @@ import type {
   StyleSupport,
 } from '@studio/core';
 import { timestamps } from './schema/common.js';
+import { trendWatches } from './schema/trends.js';
 
 // New Stage B/C tables live in one file per module (./schema/<module>.ts) and are re-exported here, so the app,
 // the worker and drizzle-kit all see them while parallel work packages edit only their own file.
@@ -363,13 +364,32 @@ export const trendReferences = pgTable(
     category: text('category', { enum: ['format', 'sound', 'hook', 'text_style', 'pacing', 'other'] }).notNull().default('format'),
     sourceName: text('source_name').notNull(),
     sourceUrl: text('source_url').notNull().default(''),
-    /** 'curated' = hand-maintained reference; 'live' = pulled from an authorised data source. */
-    sourceKind: text('source_kind', { enum: ['curated', 'live'] }).notNull().default('curated'),
+    /**
+     * 'curated' = hand-maintained reference; 'live' = fetched from an official API by a trend watch; 'noted' = something
+     * a staff member saw themselves ("Note a trend"). The three are never mixed in one list.
+     */
+    sourceKind: text('source_kind', { enum: ['curated', 'live', 'noted'] }).notNull().default('curated'),
     lastVerifiedAt: timestamp('last_verified_at', { withTimezone: true }).notNull(),
     enabled: boolean('enabled').notNull().default(true),
+    /** Live items: the watch that fetched them (deleted with it). */
+    watchId: text('watch_id').references(() => trendWatches.id, { onDelete: 'cascade' }),
+    /** Live items: the YouTube video id (or Instagram media id). */
+    externalId: text('external_id'),
+    /** Live items: when this item was fetched (shown as "fetched <date>"). */
+    fetchedAt: timestamp('fetched_at', { withTimezone: true }),
+    /** Live items: after this the item shows "Out of date". */
+    staleAfter: timestamp('stale_after', { withTimezone: true }),
+    /** Live item fields, a noted trend's platform and date, or a curated reference's list of sources. */
+    data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
+    /** Noted trends: who noted it. */
+    notedBy: text('noted_by').references(() => users.id, { onDelete: 'set null' }),
     ...timestamps,
   },
-  (t) => [index('trend_references_enabled_idx').on(t.enabled, t.category)],
+  (t) => [
+    index('trend_references_enabled_idx').on(t.enabled, t.category),
+    // Idempotent refreshes: one row per item per watch.
+    uniqueIndex('trend_references_watch_ext_idx').on(t.watchId, t.externalId).where(sql`${t.externalId} is not null`),
+  ],
 );
 
 // ---------------------------------------------------------------------------------------------

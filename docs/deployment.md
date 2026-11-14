@@ -321,3 +321,10 @@ On Fly.io this can be a `release_command` for the worker app. Migrations are tra
       (see the acceptance checklist in `docs/testing.md`).
 - [ ] Nightly database backup runs and a restore has been tested.
 - [ ] Disk or bucket usage is being watched against `docs/operating-costs.md`.
+
+## Trends (Stage B, WP3)
+
+Optional: `YOUTUBE_API_KEY` turns on the YouTube AU popular chart in Settings → Trends. Create it in a Google Cloud
+project with "YouTube Data API v3" enabled, restrict it to that API, and give it to the worker and the web app (the web
+app only checks that it is set). One read a day plus manual refreshes uses about 1–5 of the default 10,000 daily
+quota units. Without it the chart shows "Optional, not configured" and everything else works.

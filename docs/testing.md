@@ -141,3 +141,22 @@ seeing it work.
 Record the phone model, iOS version, camera settings (resolution, frame rate, HDR on or off), clip lengths and
 any problems seen. Synthetic-footage results go in the "Verified with synthetic footage" column of the README.
 This checklist is the only evidence for "Verified with real footage".
+
+## Trends (Stage B, WP3)
+
+No real YouTube call is made by any test (an injected fake `fetch`):
+
+- `packages/core/test/trend-label.test.ts`: exact labels in Melbourne time (both sides of daylight saving), no label
+  ever matches `/trending|viral/i` (including typed text that does), stale/review/refresh timing rules.
+- `packages/core/test/trend-claims.test.ts`: `TEXT_UNSUPPORTED_CLAIM` for claim text in overlays, plain text accepted.
+- `apps/worker/test/trends.test.ts`: the YouTube client's error mapping and parsing; with `TEST_DATABASE_URL`,
+  `trends.refresh` for a 200 chart (upsert and removal of missing items), `quotaExceeded`, `keyInvalid` /
+  `API_KEY_INVALID`, `accessNotConfigured`, a 503 retried then failed, the daily fan-out, cleanup after 7 days, the
+  key never appearing in logs, and no trend text in `buildPlannerInput` (plus a source scan of the worker and
+  `packages/ai`).
+- `apps/web/test/trends.test.ts` (status builder states, item labels, schemas) and
+  `apps/web/test/trends-routes.integration.test.ts` (staff can note and delete only their own notes, only the owner
+  adds/refreshes/removes watches, the 6-hour limit, the curated re-sourcing touching only original seed rows).
+
+The first real fetch needs `YOUTUBE_API_KEY` (1 quota unit): Settings → Trends → **Show the chart** is that smoke test.
+Record its result and date in `docs/HANDOVER.md`.

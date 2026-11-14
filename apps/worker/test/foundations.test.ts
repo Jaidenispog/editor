@@ -24,14 +24,14 @@ describe('handler registry', () => {
   it('refuses to start when a registered type has no handler', () => {
     const withoutCleanup = coreHandlers(1).filter((h) => h.type !== 'maintenance.cleanup');
     expect(() => assertHandlersCoverJobTypes(withoutCleanup)).toThrow(/No handler registered for: maintenance.cleanup/);
-    expect(() => assertHandlersCoverJobTypes(coreHandlers(1), [...ALL_JOB_TYPES, 'square.sync'])).toThrow(/No handler registered for: square.sync/);
+    expect(() => assertHandlersCoverJobTypes(allHandlers(1), [...ALL_JOB_TYPES, 'square.sync'])).toThrow(/No handler registered for: square.sync/);
   });
 
   it('refuses duplicate handlers and handlers for unknown types', () => {
     const dup: WorkerModule = { name: 'dup', handlers: [defineHandler('render.export', noop)] };
-    expect(() => assertHandlersCoverJobTypes(allHandlers(1, [dup]))).toThrow(/More than one handler registered for: render.export/);
+    expect(() => assertHandlersCoverJobTypes(allHandlers(1, [...WORKER_MODULES, dup]))).toThrow(/More than one handler registered for: render.export/);
     const stray = { type: 'nope.never', handler: noop } as unknown as ReturnType<typeof defineHandler>;
-    expect(() => assertHandlersCoverJobTypes([...coreHandlers(1), stray])).toThrow(/unknown job types: nope.never/);
+    expect(() => assertHandlersCoverJobTypes([...allHandlers(1), stray])).toThrow(/unknown job types: nope.never/);
     expect(() => moduleHandlers([dup, { ...dup, name: 'dup2' }])).toThrow(/both the dup and dup2 modules/);
   });
 

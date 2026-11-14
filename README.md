@@ -24,6 +24,7 @@ Australian English, AUD, `Australia/Melbourne`.
 | Speech captions (transcription) | Yes (OpenAI adapter) | Not run | OpenAI key |
 | Docker images, Compose, deployment docs | Written | `docker compose config` validated; install and run steps run by hand; images not built (no Docker daemon in the build sandbox) | Hosting account |
 | Instagram, TikTok, Square, email, Google reviews | "Needs setup" screens only | — | Meta, TikTok, Square, Resend, Google accounts |
+| Trends: curated (sourced, dated), noted by staff, YouTube AU chart; no "trending" claims | Yes (WP3) | Unit and database tests with a fake YouTube API | `YOUTUBE_API_KEY` for the chart (optional) |
 
 **Not yet done:**
 
