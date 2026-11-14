@@ -4,16 +4,27 @@
 import { ImageUp, Trash2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useRef, useState, type CSSProperties, type FormEvent } from 'react';
-import type { BrandConfig } from '@studio/core';
+import { isBundledFont, type BrandConfig } from '@studio/core';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { Input, Select } from '@/components/ui/field';
 import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
 import { accentCssVariables } from '@/lib/shared/accent';
+import { LogoPlacementControl } from './logo-placement';
 import { useSaveSettings } from './use-save-settings';
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * Font choices: only fonts that ship with the video renderer. A font saved before (DejaVu Sans, Liberation Sans) stays
+ * selectable and says plainly that videos use Inter instead.
+ */
+function fontOptions(bundled: string[], current: string): Array<{ value: string; label: string }> {
+  const options = bundled.map((f) => ({ value: f, label: f }));
+  if (!isBundledFont(current)) options.push({ value: current, label: `Inter (${current} is not installed on the video server)` });
+  return options;
+}
 
 /** Branding: names, accent colour (with live preview), logo, fonts, in-video text style and social handle. */
 export function BrandingTab({ brand, logoUrl, disabled }: { brand: BrandConfig; logoUrl: string | null; disabled: boolean }) {
@@ -30,6 +41,9 @@ export function BrandingTab({ brand, logoUrl, disabled }: { brand: BrandConfig; 
     fontBody: brand.fontBody,
     videoTextStyle: brand.videoTextStyle,
     socialHandle: brand.socialHandle,
+    logoPlacement: brand.logoPlacement,
+    logoCorner: brand.logoCorner,
+    logoOpacity: brand.logoOpacity,
   });
   const [uploading, setUploading] = useState(false);
   const set = <K extends keyof typeof values>(k: K, v: (typeof values)[K]) => setValues((s) => ({ ...s, [k]: v }));
@@ -111,14 +125,14 @@ export function BrandingTab({ brand, logoUrl, disabled }: { brand: BrandConfig; 
               value={values.fontHeadline}
               onChange={(e) => set('fontHeadline', e.target.value as BrandConfig['fontHeadline'])}
               disabled={disabled}
-              options={['Inter Display', 'Inter', 'DejaVu Sans', 'Liberation Sans'].map((f) => ({ value: f, label: f }))}
+              options={fontOptions(['Inter Display', 'Inter'], values.fontHeadline)}
             />
             <Select
               label="Body font"
               value={values.fontBody}
               onChange={(e) => set('fontBody', e.target.value as BrandConfig['fontBody'])}
               disabled={disabled}
-              options={['Inter', 'DejaVu Sans', 'Liberation Sans'].map((f) => ({ value: f, label: f }))}
+              options={fontOptions(['Inter'], values.fontBody)}
             />
             <Select
               label="Text style in videos"
@@ -142,6 +156,14 @@ export function BrandingTab({ brand, logoUrl, disabled }: { brand: BrandConfig; 
               hint="Shown at the end of promo edits when the style uses it."
               error={errors['socialHandle'] ?? null}
             />
+            <LogoPlacementControl
+              values={{ logoPlacement: values.logoPlacement, logoCorner: values.logoCorner, logoOpacity: values.logoOpacity }}
+              onChange={(patch) => setValues((s) => ({ ...s, ...patch }))}
+              hasLogo={Boolean(logoUrl)}
+              logoUrl={logoUrl}
+              disabled={disabled}
+            />
+            <p className="text-sm text-charcoal-500 sm:col-span-2">Branding changes apply to new previews. Exports always match their preview.</p>
           </CardBody>
           <CardFooter>
             <Button type="submit" loading={saving} disabled={disabled}>

@@ -4,8 +4,9 @@ import { dirname, join } from 'node:path';
 import { AppError, CancelledError, safeZoneFor, validateEditPlan, type PlanValidationContext } from '@studio/core';
 import { FfmpegError, runFfmpeg } from '../ffmpeg.js';
 import { probeMedia } from '../ffprobe.js';
-import { buildAssDocument } from './ass.js';
+import { layoutAssDocument, type AssTextBox } from './ass.js';
 import { assertRenderableDuration, buildRenderCommand, exportLevelFor, resolveOutputFormat } from './command.js';
+import { checkOverlayRects, layoutLogo, logoRects, resolveRenderFont, type LogoLayout } from './logo.js';
 import type { RenderInputs, RenderResult } from './types.js';
 import { verifyExport, type ExportCheck } from './verify.js';
 
@@ -68,6 +69,7 @@ export async function renderEditPlan(inputs: RenderInputs, outputPath: string): 
   await mkdir(dirname(outputPath), { recursive: true });
 
   let assPath: string | null = null;
+  let textBoxes: AssTextBox[] = [];
   if (planHasText({ plan, brand: inputs.brand })) {
     const fonts = await stat(inputs.fontsDir).catch(() => null);
     if (!fonts?.isDirectory()) {
@@ -76,14 +78,24 @@ export async function renderEditPlan(inputs: RenderInputs, outputPath: string): 
       });
     }
     assPath = join(inputs.tmpDir, `overlay-${randomUUID()}.ass`);
-    const document = buildAssDocument(plan, timeline, output, safeZone, inputs.brand, {
-      headline: inputs.brand.fontHeadline,
-      body: inputs.brand.fontBody,
-    });
-    await writeFile(assPath, document, 'utf8');
+    // Fonts that do not ship with the renderer (older settings) are drawn with Inter rather than a random system font.
+    const headline = await resolveRenderFont(inputs.brand.fontHeadline, inputs.fontsDir);
+    const body = await resolveRenderFont(inputs.brand.fontBody, inputs.fontsDir);
+    const layout = layoutAssDocument(plan, timeline, output, safeZone, inputs.brand, { headline, body });
+    textBoxes = layout.boxes;
+    await writeFile(assPath, layout.document, 'utf8');
   }
 
-  const command = buildRenderCommand({ ...inputs, plan, output }, outputPath, assPath);
+  let logoLayout: LogoLayout | null = null;
+  if (inputs.brand.logo) {
+    logoLayout = layoutLogo(inputs.brand.logo, output, safeZone, timeline.totalDurationSec, textBoxes);
+    const check = checkOverlayRects(logoRects(logoLayout), safeZone);
+    if (!check.ok) {
+      throw new AppError('INTERNAL', 'The logo could not be placed safely, so this edit was not rendered.', { details: { problems: check.problems } });
+    }
+  }
+
+  const command = buildRenderCommand({ ...inputs, plan, output }, outputPath, assPath, logoLayout);
   const total = command.totalDurationSec;
   const onProgress = inputs.onProgress;
 
@@ -141,5 +153,6 @@ export async function renderEditPlan(inputs: RenderInputs, outputPath: string): 
     ffmpegArgs: command.args,
     assPath,
     exportCheck,
+    logoLayout,
   };
 }

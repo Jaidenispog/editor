@@ -1,6 +1,7 @@
 import { AppError, VERTICAL_1080, VERTICAL_PREVIEW, computeTimeline, type OutputFormat } from '@studio/core';
 import { buildAudioGraph } from './audio-filters.js';
 import { escapeFilterPath, formatNumber } from './escape.js';
+import { buildLogoFilters, type LogoLayout } from './logo.js';
 import { buildSegmentFilter, quantiseTimeline } from './video-filters.js';
 import type { RenderCommand, RenderInputs } from './types.js';
 
@@ -88,10 +89,11 @@ export const AUDIO_CODEC_ARGS: readonly string[] = ['-c:a', 'aac', '-profile:a',
  * Inputs: one `-ss/-t/-i` per segment (accurate input seeking, auto-rotation left on), then the
  * music file. Video: a chain per segment (see buildSegmentFilter), joined left to right with
  * `concat` for hard cuts or `xfade` for transitions, with every length, offset and transition
- * snapped to the frame grid by quantiseTimeline, then the ASS overlay. Audio: see buildAudioGraph. The output is trimmed to the timeline
+ * snapped to the frame grid by quantiseTimeline, then the logo (when `logoLayout` draws one; see logo.ts), then the
+ * ASS overlay. Audio: see buildAudioGraph. The output is trimmed to the timeline
  * total so the file length matches the plan to within a frame.
  */
-export function buildRenderCommand(inputs: RenderInputs, outputPath: string, assPath: string | null): RenderCommand {
+export function buildRenderCommand(inputs: RenderInputs, outputPath: string, assPath: string | null, logoLayout: LogoLayout | null = null): RenderCommand {
   const { plan } = inputs;
   const output = resolveOutputFormat(inputs);
   const timeline = computeTimeline(plan);
@@ -115,6 +117,14 @@ export function buildRenderCommand(inputs: RenderInputs, outputPath: string, ass
   const musicInputIndex = plan.audio.music && inputs.music ? plan.segments.length : null;
   if (musicInputIndex !== null && inputs.music) {
     args.push('-i', inputs.music.path);
+  }
+
+  // The logo, looped as a still at the output frame rate and cut to the edit's length.
+  const logo = inputs.brand.logo ?? null;
+  const drawsLogo = Boolean(logo && logoLayout && (logoLayout.corner || logoLayout.endCard));
+  const logoInputIndex = drawsLogo ? plan.segments.length + (musicInputIndex !== null ? 1 : 0) : null;
+  if (drawsLogo && logo) {
+    args.push('-loop', '1', '-framerate', String(output.fps), '-t', formatNumber(total), '-i', logo.path);
   }
 
   const frameGrid = quantiseTimeline(timeline, output.fps);
@@ -150,6 +160,12 @@ export function buildRenderCommand(inputs: RenderInputs, outputPath: string, ass
       filters.push(`[${current}][v_${k}]concat=n=2:v=1:a=0,settb=1/${output.fps}[${label}]`);
     }
     current = label;
+  }
+
+  if (logoInputIndex !== null && logoLayout) {
+    // Before the text, so captions and titles always sit on top of the logo.
+    filters.push(...buildLogoFilters(logoLayout, logoInputIndex, current, 'vlogo'));
+    current = 'vlogo';
   }
 
   if (assPath) {

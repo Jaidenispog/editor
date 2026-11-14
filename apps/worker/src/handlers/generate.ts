@@ -3,6 +3,7 @@ import {
   AppError,
   CancelledError,
   JOB_TYPES,
+  effectivePreferences,
   applyAudioPatch,
   needsRecut,
   validateEditPlan,
@@ -320,7 +321,8 @@ export function buildPlannerInput(args: {
     music: music ? { trackId: music.track.id, durationSec: music.durationSec, bpm: music.bpm, beatTimesSec: music.beatTimesSec, title: music.track.title } : null,
     // Settings saved before the start point existed have no value: treat them as automatic.
     musicStartSec: music ? (settings.musicStartSec ?? null) : null,
-    preferences: appSettings.preferences,
+    // Learned values apply unless the owner pinned the field.
+    preferences: effectivePreferences(appSettings.preferences),
     brand: appSettings.brand,
     businessName: appSettings.brand.businessName,
     instructions: settings.instructions,

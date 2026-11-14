@@ -147,3 +147,30 @@ Built once so every Stage B/C module integrates the same way and parallel work p
 - **Spotify**: link-only by default; the official embed only on signed-in pages once the legal pages exist and the
   owner acknowledged Spotify's terms. Nothing from Spotify reaches the planner, AI prompts, publishing, email or the
   website module (a unit test checks the imports).
+
+## Saved preferences, reference video and brand (Stage B, WP2)
+
+- **Contracts** (`packages/core`): `preference-learning.ts` (`LEARNABLE_FIELDS`, `LearnedPreferencesSchema`,
+  `LearningStateSchema`, `computeLearnedPreferences`, `effectivePreferences`, `styleAffinityFrom`, `pinOwnerSetFields`),
+  `reference.ts` (`ReferenceStyleProfileSchema`, `profileReference`), `brand.ts` (`logoPlacement`, `logoCorner`,
+  `logoOpacity`, `BUNDLED_FONTS`, `RenderBrandSnapshotSchema`), `settings.ts` (`styleOrder`, `musicGenres`,
+  `musicArtists`, `learning`, `learned`; `parseStoredSettings` pins hand-set values of settings that predate learning),
+  `jobs/preferences.ts` (`preferences.recompute`, `reference.analyse`).
+- **Data**: `edits.dismissed_at`, `edit_versions.render_brand`, `media_assets.reference_profile`,
+  `feedback_events_created_idx` (migration `preferences`).
+- **Learning**: every owner action writes a `feedback_events` row with plan facts inside its own transaction, then
+  queues a debounced `preferences.recompute` (10 s, singleton). The job is a pure function of the events, writes only
+  its subtree with `jsonb_set` (conditional on the reset point it read), and runs nightly so recency decay applies.
+  Web writes to settings take a row lock and keep the stored `learned` and `styleAffinity`, so neither side loses the
+  other's change. Every reader (Studio defaults, `buildPlannerInput`, the rules planner's `effectiveSettings`) uses
+  `effectivePreferences`: pinned → declared, else learned, else declared. The style order sorts new generations' cards;
+  it never hides a style.
+- **Reference videos**: `kind = 'reference_video'` assets with their own upload route and ingest branch; they are
+  excluded by kind from footage, style support, the status clip list and planner input. `reference.analyse` stores
+  only measurements and deletes the original, proxy and frames.
+- **Brand in videos**: `packages/media/src/render/logo.ts` lays out the corner mark (≤ 150 px, inset 12 px in R_head)
+  and the end card (≤ 420 × 300 px at y 380, last min(2 s, 30 %)) from the text layout of the same render, so the
+  corner mark steps aside for top text and the end card is skipped when top or centre text overlaps it; every
+  rectangle is checked against R_head and the forbidden areas before rendering. The overlay chain runs before the
+  `ass` filter and adds no time to the timeline. `resolveRenderFont` maps fonts that are not bundled to Inter. Each
+  preview stores its brand snapshot (logo copied by content hash), and the export uses it.

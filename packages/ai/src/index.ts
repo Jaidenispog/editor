@@ -29,3 +29,4 @@ export {
   type TimedWord,
 } from './transcription/deepgram.js';
 export { audioMimeType } from './transcription/audio-mime.js';
+export { AnthropicTextEstimator, TextEstimateWireSchema, TEXT_ESTIMATE_SYSTEM_PROMPT, TEXT_ESTIMATE_MAX_FRAMES, type OnScreenTextEstimator, type TextEstimateFrame, type TextEstimateResult, type AnthropicTextEstimatorOptions } from './anthropic/text-estimate.js';

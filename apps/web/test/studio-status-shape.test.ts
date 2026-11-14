@@ -83,6 +83,7 @@ function asset(id: string, overrides: Partial<MediaAsset> = {}): MediaAsset {
     analysis: a,
     manualLabels: {},
     clipLabel: null,
+    referenceProfile: null,
     deletedAt: null,
     createdAt: t0,
     updatedAt: t0,
@@ -159,6 +160,7 @@ function version(id: string, overrides: Partial<EditVersion> = {}): EditVersion 
     exportByteSize: null,
     exportMessage: '',
     variantExports: {},
+    renderBrand: null,
     createdAt: t0,
     updatedAt: t0,
     ...overrides,
@@ -177,7 +179,7 @@ const generation: Generation = {
   updatedAt: t0,
 };
 
-const edit: Edit = { id: 'e1', projectId: 'p1', generationId: 'g1', styleId: 'beat_montage', slot: 0, isFavourite: true, currentVersionId: 'v2', deletedAt: null, createdAt: t0, updatedAt: t0 };
+const edit: Edit = { id: 'e1', projectId: 'p1', generationId: 'g1', styleId: 'beat_montage', slot: 0, isFavourite: true, currentVersionId: 'v2', dismissedAt: null, deletedAt: null, createdAt: t0, updatedAt: t0 };
 
 function rows(overrides: Partial<Parameters<typeof shapeStudioStatus>[0]> = {}): Parameters<typeof shapeStudioStatus>[0] {
   return {

@@ -25,3 +25,6 @@ export * from './jobs/music.js';
 export * from './settings/music.js';
 export * from './trend-label.js';
 export * from './jobs/trends.js';
+export * from './preference-learning.js';
+export * from './reference.js';
+export * from './jobs/preferences.js';

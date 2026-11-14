@@ -128,3 +128,19 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   Content-Security-Policy is written it must allow `frame-src https://open.spotify.com` for the optional embed.
 - The usage ledger keeps a licence snapshot per export; ledger rows reference the track with `ON DELETE RESTRICT`
   (tracks are soft-deleted, so this never blocks a removal).
+
+## Saved preferences, reference video and brand (Stage B, WP2)
+
+- Owner only: pin / "Let it learn", the learning switch, "Reset what it learned", "Try again", the reference video
+  list and its suggestion decisions, and every Settings change (logo placement included). Staff see the learned
+  preferences read-only, and may hide edits and add reference videos in projects they can open.
+- New audit actions: `preferences.pinned`, `preferences.unpinned`, `preferences.learning_toggled`,
+  `preferences.learning_reset`, `reference.uploaded`, `reference.suggestions_decided`,
+  `settings.logo_placement_changed`.
+- `PUT /api/settings` refuses the server-owned preference fields (`learned`, `learning`, `styleAffinity`); the
+  recompute job writes only its subtree, and web writes keep it under a row lock.
+- Reference videos are private like all media. The original, proxy and sampled frames are deleted once measured;
+  only the numbers, the thumbnail and the file name remain. Frames go to Anthropic only with the owner's tick on that
+  upload, at most 8, with a prompt that forbids reading out text or identifying people. A reference never reaches
+  footage, style support, the planner or a render (excluded by kind; the validator would refuse an unknown asset).
+- Feedback events hold ids, plan facts, the revision instruction and parsed hints; no media.

@@ -2,13 +2,14 @@ import 'server-only';
 import { and, eq, inArray, isNull, max, sql } from 'drizzle-orm';
 import {
   AppError,
+  EditPlanSchema,
   GenerationSettingsSchema,
   META_ONLY_FILE_SUFFIX,
   META_ONLY_LABEL,
   STYLES,
-  STYLE_IDS,
   clearanceSummary,
   computeTimeline,
+  effectivePreferences,
   formatSeconds,
   isEmptyAudioPatch,
   licenceStateOf,
@@ -17,6 +18,8 @@ import {
   needsRecut,
   newId,
   originalSoundModeOf,
+  parseRevisionInstruction,
+  withoutMusic,
   type AudioPatch,
   type EditPlan,
   type ExportVariant,
@@ -32,7 +35,8 @@ import { getDb } from './db.js';
 import { ACTIVE_JOB_STATUSES, createTrackedJob } from './jobs.js';
 import { downloadNameFor, signedUrlFor } from './media-links.js';
 import { getLogger } from './logger.js';
-import { getSettings, updateSettings } from './settings.js';
+import { recordFeedback, recordFeedbackNow, scheduleRecompute } from './feedback.js';
+import { getSettings } from './settings.js';
 import { getAccessibleEdit, getAccessibleProject, getAccessibleVersion } from './studio-access.js';
 import { downsampleEnergy } from './shared/music-curve.js';
 import type { VariantExportDto, VersionMusicDto } from './shared/studio-dto.js';
@@ -107,7 +111,9 @@ export async function startGeneration(projectId: string, user: SessionUser, raw:
   });
   if (busy) throw new AppError('CONFLICT', 'Edits are already being planned for this project. Wait for them to finish first.');
 
-  const ordered = STYLE_IDS.filter((id) => settings.styles.includes(id));
+  // Cards follow the owner's style order (pinned or learned); it never hides a style.
+  const styleOrder = effectivePreferences((await getSettings()).preferences).styleOrder;
+  const ordered = styleOrder.filter((id) => settings.styles.includes(id));
   const generationId = newId();
   const created = await db.transaction(async (tx) => {
     const [generation] = await tx
@@ -147,35 +153,37 @@ export async function startGeneration(projectId: string, user: SessionUser, raw:
   }
 }
 
+/** The plan of a version (for the plan-facts snapshot of a feedback event), or null when it has none or it does not parse. */
+async function planOf(versionId: string | null): Promise<EditPlan | null> {
+  if (!versionId) return null;
+  const row = await getDb().query.editVersions.findFirst({ columns: { plan: true }, where: eq(schema.editVersions.id, versionId) });
+  const parsed = row?.plan ? EditPlanSchema.safeParse(row.plan) : null;
+  return parsed?.success ? parsed.data : null;
+}
+
 /**
- * Marks or unmarks an edit as a favourite. A change also records a feedback event and nudges the style's
- * affinity in the editing preferences (+1 when favourited, −1 when removed, never below zero).
+ * Marks or unmarks an edit as a favourite. A change also records a feedback event with the current version's plan
+ * facts, and queues the (debounced) preferences recompute; the style affinity is written by that job only, so
+ * favouriting never rewrites the settings in the request.
  */
 export async function setFavourite(editId: string, user: SessionUser, value: boolean): Promise<{ isFavourite: boolean }> {
   const { edit } = await getAccessibleEdit(editId, user);
   if (edit.isFavourite === value) return { isFavourite: value };
   const db = getDb();
+  const plan = await planOf(edit.currentVersionId);
   await db.transaction(async (tx) => {
     await tx.update(schema.edits).set({ isFavourite: value, updatedAt: new Date() }).where(eq(schema.edits.id, editId));
-    await tx.insert(schema.feedbackEvents).values({
-      id: newId(),
+    await recordFeedback(tx, {
+      type: value ? 'favourite' : 'unfavourite',
       userId: user.id,
       projectId: edit.projectId,
       editId,
       editVersionId: edit.currentVersionId,
       styleId: edit.styleId,
-      type: value ? 'favourite' : 'unfavourite',
+      plan,
     });
   });
-  try {
-    const settings = await getSettings();
-    const affinity = { ...settings.preferences.styleAffinity };
-    affinity[edit.styleId] = Math.max(0, (affinity[edit.styleId] ?? 0) + (value ? 1 : -1));
-    await updateSettings({ preferences: { styleAffinity: affinity } }, user.id);
-  } catch (err) {
-    // The favourite itself is saved; a failed preference update only affects future suggestions.
-    getLogger().warn({ err, editId }, 'could not update style affinity');
-  }
+  await scheduleRecompute();
   return { isFavourite: value };
 }
 
@@ -212,6 +220,7 @@ export async function createEditVersion(
     }
   }
   const versionId = newId();
+  const parentPlan = await planOf(edit.currentVersionId);
   const version = await db.transaction(async (tx) => {
     // Lock the edit so two quick clicks cannot both take the same version number.
     await tx.execute(sql`select id from ${schema.edits} where ${schema.edits.id} = ${editId} for update`);
@@ -231,19 +240,26 @@ export async function createEditVersion(
       })
       .returning();
     await tx.update(schema.edits).set({ currentVersionId: versionId, updatedAt: new Date() }).where(eq(schema.edits.id, editId));
-    await tx.insert(schema.feedbackEvents).values({
-      id: newId(),
+    // Revise: the instruction, its parsed hints and any Sound panel change; regenerate: the parent version. Both
+    // carry the parent's plan facts so learning does not depend on rows that may later be deleted.
+    await recordFeedback(tx, {
+      type: input.mode,
       userId: user.id,
       projectId: edit.projectId,
       editId,
       editVersionId: versionId,
       styleId: edit.styleId,
-      type: input.mode,
-      data: { ...(input.instruction ? { instruction: input.instruction } : {}), ...(audio ? { audioPatch: audio } : {}) },
+      plan: parentPlan,
+      factsKey: 'parentPlanFacts',
+      data:
+        input.mode === 'revise'
+          ? { ...(input.instruction ? { instruction: input.instruction, hints: parseRevisionInstruction(input.instruction) } : {}), ...(audio ? { audioPatch: audio } : {}) }
+          : { parentVersionId: locked?.currentVersionId ?? null },
     });
     if (!row) throw new AppError('INTERNAL', 'The new version could not be recorded.');
     return row;
   });
+  await scheduleRecompute();
   try {
     const job = await createTrackedJob({ type: 'edits.revise', payload: { editId, projectId: edit.projectId, newVersionId: versionId, mode: jobMode, ...(audio ? { audio } : {}) } });
     return { version, jobId: job.id };
@@ -431,10 +447,19 @@ export async function downloadLink(versionId: string, user: SessionUser, kind: '
 }
 
 async function recordDownload(user: SessionUser, projectId: string, edit: Edit, versionId: string, variant: ExportVariant): Promise<void> {
-  await getDb()
-    .insert(schema.feedbackEvents)
-    .values({ id: newId(), userId: user.id, projectId, editId: edit.id, editVersionId: versionId, styleId: edit.styleId, type: 'download', data: variant === 'standard' ? {} : { variant } })
-    .catch((err: unknown) => getLogger().warn({ err, versionId }, 'could not record download feedback'));
+  // Never fails the download: a lost event only affects what the editor learns.
+  await recordFeedbackNow(getDb(), {
+    type: 'download',
+    userId: user.id,
+    projectId,
+    editId: edit.id,
+    editVersionId: versionId,
+    styleId: edit.styleId,
+    plan: await planOf(versionId)
+      .then((p) => (p && variant === 'no_music' ? withoutMusic(p) : p))
+      .catch(() => null),
+    data: variant === 'standard' ? {} : { variant },
+  });
 }
 
 /**

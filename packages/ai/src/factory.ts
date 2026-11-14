@@ -2,6 +2,7 @@ import type { Logger } from 'pino';
 import { createAnthropicClient, type AnthropicMessagesClient } from './anthropic/client.js';
 import { AnthropicVisionLabeler } from './anthropic/labeler.js';
 import { AnthropicPlanner } from './anthropic/planner.js';
+import { AnthropicTextEstimator, type OnScreenTextEstimator } from './anthropic/text-estimate.js';
 import type { RateTable } from './pricing.js';
 import { RulesPlanner } from './rules/planner.js';
 import { DeepgramTranscriber } from './transcription/deepgram.js';
@@ -52,6 +53,8 @@ export interface AiProviders {
   labeler: VisionLabeler | null;
   /** Speech-to-text, or null when no provider is configured. */
   transcriber: Transcriber | null;
+  /** On-screen text estimate for reference videos (vision model), or null when AI is not configured. */
+  textEstimator: OnScreenTextEstimator | null;
   /** Non-secret summary for logs and the settings page. */
   describe(): AiProviderSummary;
 }
@@ -65,6 +68,7 @@ export function createAiProviders(env: AiEnv, logger?: Logger, overrides: AiProv
   const rulesPlanner = new RulesPlanner();
   let planner: EditPlanner = rulesPlanner;
   let labeler: VisionLabeler | null = null;
+  let textEstimator: OnScreenTextEstimator | null = null;
 
   if (env.AI_PROVIDER === 'anthropic') {
     const client = overrides.anthropicClient ?? (env.ANTHROPIC_API_KEY ? createAnthropicClient(env.ANTHROPIC_API_KEY) : null);
@@ -77,6 +81,12 @@ export function createAiProviders(env: AiEnv, logger?: Logger, overrides: AiProv
         ...(overrides.rates ? { rates: overrides.rates } : {}),
       });
       labeler = new AnthropicVisionLabeler({
+        client,
+        model: env.AI_VISION_MODEL,
+        ...(logger ? { logger } : {}),
+        ...(overrides.rates ? { rates: overrides.rates } : {}),
+      });
+      textEstimator = new AnthropicTextEstimator({
         client,
         model: env.AI_VISION_MODEL,
         ...(logger ? { logger } : {}),
@@ -111,6 +121,7 @@ export function createAiProviders(env: AiEnv, logger?: Logger, overrides: AiProv
     rulesPlanner,
     labeler,
     transcriber,
+    textEstimator,
     describe: () => ({
       plannerName: planner.name,
       plannerModel: planner.model,

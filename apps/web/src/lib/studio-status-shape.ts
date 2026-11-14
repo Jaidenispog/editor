@@ -1,7 +1,7 @@
-import { STYLES, STYLE_IDS, applyManualLabels, type AppSettings, type MusicLicence, type StyleId, type StyleSupport } from '@studio/core';
+import { ReferenceStyleProfileSchema, STYLES, STYLE_IDS, applyManualLabels, effectivePreferences, licenceStateOf, type AppSettings, type MusicLicence, type StyleId, type StyleSupport } from '@studio/core';
 import type { Edit, EditVersion, Generation, JobRow, MediaAsset, MusicTrack, Project } from '@studio/db';
 import { downsampleEnergy } from './shared/music-curve.js';
-import type { AssetDto, AssetShotsDto, EditDto, GenerationDto, MusicOptionDto, ShotDto, StudioStatusDto, StyleOptionDto, VersionDto } from './shared/studio-dto.js';
+import type { AssetDto, AssetShotsDto, EditDto, GenerationDto, MusicOptionDto, ReferenceDto, ShotDto, StudioStatusDto, StyleOptionDto, VersionDto } from './shared/studio-dto.js';
 import { ACTIVE_VERSION_STATUSES, PROCESSING_ASSET_STATUSES } from './shared/studio-dto.js';
 import type { JobDto } from './shared/dto.js';
 
@@ -111,6 +111,26 @@ export function shapeMusicOption(track: MusicTrack): MusicOptionDto {
     licenceConfirmed: Boolean(track.licence.confirmedByOwnerAt),
     licenceSummary: licenceSummary(track.licence),
     energy: track.status === 'ready' && track.beats ? downsampleEnergy(track.beats.energy, track.beats.energyStepSec) : null,
+    genres: track.genres ?? [],
+    moods: track.moods ?? [],
+    licenceState: licenceStateOf(track.licence),
+  };
+}
+
+/**
+ * One reference video for the Studio strip and Settings: file name, processing state, thumbnail and (once measured)
+ * the profile with its suggestions. Never anything that could be used as footage.
+ */
+export async function shapeReference(asset: MediaAsset, sign: LinkSigner): Promise<ReferenceDto> {
+  const parsed = asset.referenceProfile ? ReferenceStyleProfileSchema.safeParse(asset.referenceProfile) : null;
+  return {
+    id: asset.id,
+    filename: asset.originalFilename,
+    status: asset.status,
+    statusMessage: asset.statusMessage,
+    thumbnailUrl: asset.thumbnailKey ? await sign(asset.thumbnailKey) : null,
+    profile: parsed?.success ? parsed.data : null,
+    createdAt: asset.createdAt.toISOString(),
   };
 }
 
@@ -176,7 +196,7 @@ function isStyleId(value: string): value is StyleId {
 }
 
 /** True when anything in the payload is still queued or being worked on. */
-export function isStudioBusy(dto: Pick<StudioStatusDto, 'assets' | 'generations' | 'jobs' | 'music'>): boolean {
+export function isStudioBusy(dto: Pick<StudioStatusDto, 'generations' | 'jobs' | 'music'> & { assets: Array<Pick<AssetDto, 'status'>> }): boolean {
   if (dto.jobs.some((j) => j.status === 'queued' || j.status === 'running')) return true;
   if (dto.assets.some((a) => PROCESSING_ASSET_STATUSES.includes(a.status))) return true;
   if (dto.music.some((m) => m.status === 'uploaded' || m.status === 'processing')) return true;
@@ -225,6 +245,7 @@ export async function shapeStudioStatus(rows: StudioStatusRows, sign: LinkSigner
         styleDescription: def.shortDescription,
         slot: e.slot,
         isFavourite: e.isFavourite,
+        dismissed: e.dismissedAt !== null && e.dismissedAt !== undefined,
         currentVersionId: e.currentVersionId,
         versions: await Promise.all(versions.map((v) => shapeVersion(v, posterKeyFor, sign))),
       });
@@ -242,8 +263,15 @@ export async function shapeStudioStatus(rows: StudioStatusRows, sign: LinkSigner
 
   const music = rows.tracks.filter((t) => !t.deletedAt && t.projectId === null).map(shapeMusicOption);
   const assets = await Promise.all(videoAssets.map((a) => shapeAsset(a, sign)));
-  const prefs = settings.preferences;
-  const partial = { assets, generations, jobs: rows.jobs, music };
+  const references = await Promise.all(
+    rows.assets
+      .filter((a) => a.kind === 'reference_video' && !a.deletedAt)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((a) => shapeReference(a, sign)),
+  );
+  // Form defaults use the effective preferences: pinned, else learned, else declared.
+  const prefs = effectivePreferences(settings.preferences);
+  const partial = { assets: [...assets, ...references.map((r) => ({ status: r.status }))], generations, jobs: rows.jobs, music };
   return {
     project: {
       id: project.id,
@@ -264,7 +292,10 @@ export async function shapeStudioStatus(rows: StudioStatusRows, sign: LinkSigner
       keepOriginalSound: prefs.keepOriginalSound,
       captions: prefs.captions,
       preferredStyles: prefs.preferredStyles,
+      styleOrder: prefs.styleOrder,
+      musicVolume: prefs.musicVolume,
     },
+    references,
     limits: { maxUploadBytes: rows.maxUploadBytes, partSize: rows.partSize, mediaLinkTtlSeconds: rows.mediaLinkTtlSeconds },
     busy: isStudioBusy(partial),
     generatedAt: (rows.now ?? new Date()).toISOString(),
