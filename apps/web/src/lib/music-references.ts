@@ -16,7 +16,7 @@ import type { SessionUser } from './auth.js';
 import { writeAudit } from './audit.js';
 import { getDb } from './db.js';
 import { getEnv } from './env.js';
-import { getSettings, saveSettings } from './settings.js';
+import { getSettings, updateSettingsLocked } from './settings.js';
 import type { MusicReferenceDto, MusicReferencesDto } from './shared/studio-dto.js';
 
 /*
@@ -123,19 +123,22 @@ export async function deleteReference(id: string, user: SessionUser): Promise<vo
  */
 export async function setReferenceMode(user: SessionUser, input: z.infer<typeof ReferenceModeSchema>): Promise<MusicReferencesDto> {
   if (user.role !== 'owner') throw new AppError('FORBIDDEN', 'Only the owner can change how music references are shown.');
-  const current = await getSettings();
-  const music = {
-    ...current.music,
-    spotifyReferenceMode: input.mode,
-    spotifyTermsAcknowledgedAt: input.acknowledgeSpotifyTerms ? (current.music.spotifyTermsAcknowledgedAt ?? new Date().toISOString()) : current.music.spotifyTermsAcknowledgedAt,
-  };
-  if (input.mode === 'embed') {
-    const state = spotifyEmbedState({ ...current, music }, getEnv().APP_URL);
-    if (!state.canEmbed) {
-      throw new AppError('CONFLICT', `The Spotify player can't be shown yet. Still needed: ${state.missing.join('; ')}.`, { details: { missing: state.missing } });
+  // Decided and written under the settings row lock, so the embed check sees the legal pages as stored and a
+  // concurrent save or learning run is never overwritten. Throwing inside abandons the write.
+  await updateSettingsLocked((current) => {
+    const music = {
+      ...current.music,
+      spotifyReferenceMode: input.mode,
+      spotifyTermsAcknowledgedAt: input.acknowledgeSpotifyTerms ? (current.music.spotifyTermsAcknowledgedAt ?? new Date().toISOString()) : current.music.spotifyTermsAcknowledgedAt,
+    };
+    if (input.mode === 'embed') {
+      const state = spotifyEmbedState({ ...current, music }, getEnv().APP_URL);
+      if (!state.canEmbed) {
+        throw new AppError('CONFLICT', `The Spotify player can't be shown yet. Still needed: ${state.missing.join('; ')}.`, { details: { missing: state.missing } });
+      }
     }
-  }
-  await saveSettings({ ...current, music });
+    return { ...current, music };
+  });
   await writeAudit({ userId: user.id, action: 'music.spotify_mode_changed', entityType: 'settings', entityId: 'default', data: { mode: input.mode } });
   return listReferences();
 }

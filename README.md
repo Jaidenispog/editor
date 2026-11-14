@@ -48,7 +48,8 @@ bash scripts/dev.sh                    # web app + worker together, logs prefixe
 ```
 
 Open **http://localhost:3000/setup** and create the owner account (or run
-`pnpm --filter @studio/web create-owner --email you@example.com --password '…'`).
+`OWNER_EMAIL=you@example.com OWNER_PASSWORD='…' pnpm --filter @studio/web create-owner`; pnpm prints the
+command it runs, so a `--password` flag would show the password on screen).
 
 - Synthetic test clips: `bash scripts/make-sample-footage.sh data/samples`.
 - Stop the database with `bash scripts/local-postgres.sh stop`.

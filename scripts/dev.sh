@@ -6,7 +6,8 @@
 #   bash scripts/dev.sh migrate     # apply database migrations using DATABASE_URL from the root .env
 #   bash scripts/dev.sh --no-check  # skip the tool check
 #
-# Settings come from the .env at the repository root (copy .env.example to start).
+# Settings come from the .env at the repository root (copy .env.example to start). Every line of it is exported
+# to both processes. The website listens on 127.0.0.1 only, unless WEB_HOST (e.g. 0.0.0.0) is set in .env.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,7 +19,7 @@ for arg in "$@"; do
   case "$arg" in
     migrate) COMMAND="migrate" ;;
     --no-check) CHECK=0 ;;
-    -h|--help) sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -115,7 +116,15 @@ PIDS+=("$!")
 set +m
 
 printf 'Starting web (http://localhost:%s) and worker. Press Ctrl+C to stop both.\n' "${PORT:-3000}"
-printf 'First run? Open http://localhost:%s/setup to create the owner account.\n' "${PORT:-3000}"
+case "${WEB_HOST:-127.0.0.1}" in
+  127.0.0.1|localhost|::1)
+    printf 'Only this computer can open the app. (To try it on a phone on the same Wi-Fi, see WEB_HOST in .env.example.)\n'
+    ;;
+  *)
+    printf 'WEB_HOST=%s: other devices on this network can open the app too, including /setup until an owner exists.\n' "$WEB_HOST"
+    ;;
+esac
+printf 'First run? Open http://localhost:%s/setup straight away to create the owner account.\n' "${PORT:-3000}"
 
 # Wait until either service exits, then stop the other. (Polling instead of `wait -n`, which the bash 3.2
 # that ships with macOS does not have.)

@@ -31,7 +31,7 @@ import type { SessionUser } from './auth.js';
 import { writeAudit } from './audit.js';
 import { getDb } from './db.js';
 import { recordFeedback, scheduleRecompute } from './feedback.js';
-import { getSettings } from './settings.js';
+import { getSettings, updateSettingsLocked } from './settings.js';
 import { mergeSettings, normaliseStoredSettings, type SettingsPatch } from './settings-merge.js';
 import { getAccessibleEdit } from './studio-access.js';
 
@@ -47,30 +47,10 @@ export const ResetLearningSchema = z.object({ confirm: z.literal(true, { error: 
 export const DismissSchema = z.object({ value: z.boolean() }).strict();
 
 /**
- * Reads the settings row under a row lock, applies `change` and stores the result, keeping the server-owned
- * preference subtrees (`learned`, `styleAffinity`) exactly as the database has them, so neither an owner's save nor
- * a preferences route can overwrite what the recompute job wrote (and the job's jsonb_set waits for the lock).
- */
-export async function updateSettingsLocked(change: (current: AppSettings) => AppSettings): Promise<AppSettings> {
-  await getSettings(); // creates the row on first use
-  return getDb().transaction(async (tx) => {
-    const rows = await tx.execute<{ data: unknown }>(sql`select data from ${schema.settings} where ${schema.settings.id} = ${SETTINGS_ID} for update`);
-    const current = normaliseStoredSettings(rows.rows[0]?.data ?? DEFAULT_SETTINGS);
-    const next = change(current);
-    const kept: AppSettings = {
-      ...next,
-      preferences: { ...next.preferences, learned: current.preferences.learned, styleAffinity: current.preferences.styleAffinity },
-    };
-    await tx.update(schema.settings).set({ data: kept, updatedAt: new Date() }).where(eq(schema.settings.id, SETTINGS_ID));
-    return kept;
-  });
-}
-
-/**
  * PUT /api/settings: merges the patch (learnable fields it changes are pinned to the owner) under the row lock,
  * writes an audit entry and, when a learnable field changed, queues a recompute so suggestions refresh.
  */
-export async function updateSettingsFromPatch(patch: SettingsPatch, userId: string): Promise<AppSettings> {
+export async function updateSettingsFromPatch(patch: SettingsPatch, userId: string | null): Promise<AppSettings> {
   let pinnedNow: LearnableField[] = [];
   const next = await updateSettingsLocked((current) => {
     const merged = mergeSettings(current, patch);

@@ -143,13 +143,12 @@ Run these from inside the `studio-assistant` folder.
    It ends with `Ready. Put these in your .env …` and two addresses. You do not need to copy them: the settings
    file in the next step already contains them.
 
-5. Create your settings file, fill in the one required secret, and turn off Next.js's anonymous usage reporting:
+5. Create your settings file and fill in the one required secret:
 
    ```bash
    cp .env.example .env
    SECRET="$(openssl rand -base64 48 | tr -d '\n')"
    sed -i.bak "s|^APP_SECRET=.*|APP_SECRET=$SECRET|" .env && rm .env.bak
-   echo 'NEXT_TELEMETRY_DISABLED=1' >> .env
    grep '^APP_SECRET=' .env | cut -c1-20
    ```
 
@@ -181,8 +180,10 @@ Leave that window open: it runs the website and the worker together, and their m
 website prepares it; that is normal.
 
 **Straight away**, open **<http://localhost:3000/setup>** in your browser and create the owner account (your
-email and a password of at least 10 characters). Do this first: while the app runs, other devices on the same
-Wi-Fi can reach this page until an owner exists. After that, sign in at <http://localhost:3000>.
+email and a password of at least 10 characters). Do this first: until an owner exists, whoever opens this page
+can create one. The app only answers on this computer, so phones and other devices on the Wi-Fi cannot open it,
+unless you switch that on with `WEB_HOST` in `.env` (see the comment there); then they can reach this page too.
+After that, sign in at <http://localhost:3000>.
 
 To stop: press **Ctrl+C** in that window, then `bash scripts/local-postgres.sh stop`.
 
@@ -215,7 +216,7 @@ Stop the app first (Ctrl+C in its window), then:
 
 ```bash
 cd ~/studio-assistant
-git checkout -- apps/web/next-env.d.ts
+git checkout -- apps/web/next-env.d.ts 2>/dev/null || true
 git pull
 corepack enable pnpm
 pnpm install
@@ -224,8 +225,9 @@ bash scripts/dev.sh migrate
 bash scripts/dev.sh
 ```
 
-The `git checkout` line throws away a small file the website rewrites every time it runs (it holds none of your
-data), so `git pull` does not refuse to update. `corepack enable pnpm` is needed again after Homebrew updates Node.
+The `git checkout` line undoes changes to a small file the website rewrites every time it runs (it holds none of
+your data), so `git pull` does not refuse to update; once your copy no longer tracks that file it does nothing.
+`corepack enable pnpm` is needed again after Homebrew updates Node.
 
 ---
 
@@ -240,7 +242,7 @@ data), so `git pull` does not refuse to update. `corepack enable pnpm` is needed
 | `Port 3000 is in use … using available port 3001 instead` | Another program has port 3000. In `.env`, change `APP_URL=http://localhost:3000` to `APP_URL=http://localhost:3001` and add a line `PORT=3001`, restart with `bash scripts/dev.sh`, and use 3001 wherever this guide says 3000. |
 | `ECONNREFUSED 127.0.0.1:5433` in the `[worker]` lines or when migrating | The database is not running (for example after a restart). Run `bash scripts/local-postgres.sh start`, then start the app again. |
 | `Invalid environment configuration … APP_SECRET` | Step 3.5 did not save the secret. Open `.env` in a text editor and paste a long random value after `APP_SECRET=`. |
-| The browser says the site can't be reached | Check the `dev.sh` window is still running and shows `Ready`. On Windows, open `http://localhost:3000` in the Windows browser while the Ubuntu window runs it. |
+| The browser says the site can't be reached | Check the `dev.sh` window is still running and shows `Ready`. On Windows, open `http://localhost:3000` in the Windows browser while the Ubuntu window runs it. A phone or another computer cannot open it unless `WEB_HOST` is set in `.env` (see the comment there). |
 | Clips stay on "Analysing" | Look at the `[worker]` lines for an error; most often FFmpeg is missing a feature that `check-tools.sh` names. |
 | Windows: `wsl --install` stops with error 0x80370102 or 0x80070003 | Virtualisation is switched off in the PC's BIOS/UEFI settings (usually under the CPU options). Turn it on, restart, and run the command again. |
 | Windows: the install sits at 0.0% | Press Ctrl+C and run `wsl --install --web-download -d Ubuntu-24.04` instead. |
@@ -253,5 +255,9 @@ data), so `git pull` does not refuse to update. `corepack enable pnpm` is needed
   the Windows browser) were checked against Microsoft's documentation, not run on a Windows PC.
 - **Mac:** checked line by line against Homebrew's own package definitions and the Node, pnpm and macOS tool
   sources, which is how the `ffmpeg-full` requirement was found. It has not been run on a Mac yet.
+- **Later changes (also 14 November 2026, on Linux):** the website now answers only on this computer unless
+  `WEB_HOST` is set. That was checked by opening it from this computer and from the computer's own network address
+  (refused without `WEB_HOST`, working with `WEB_HOST=0.0.0.0`), not from a real phone or through WSL. The
+  section 6 lines were run on a copy that still tracked the rewritten file and again after the change.
 
 If a step fails for you, copy the message and send it to me.

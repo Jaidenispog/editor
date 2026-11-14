@@ -1,8 +1,11 @@
 /**
  * Creates (or, with --reset-password, re-keys) the studio owner account from the command line.
  *
- *   pnpm --filter @studio/web create-owner --email you@example.com --password '…' --name 'Sam'
- *   OWNER_EMAIL=… OWNER_PASSWORD=… OWNER_NAME=… pnpm --filter @studio/web create-owner
+ *   OWNER_EMAIL=you@example.com OWNER_PASSWORD='…' OWNER_NAME='Sam' pnpm --filter @studio/web create-owner
+ *   OWNER_EMAIL=you@example.com OWNER_PASSWORD='…' pnpm --filter @studio/web create-owner --reset-password
+ *
+ * Pass the password through OWNER_PASSWORD, not --password: pnpm prints the command line it runs (arguments
+ * included), so a --password flag shows up on screen and in logs. --email, --password and --name still work.
  *
  * Reads DATABASE_URL (and the rest of the environment) the same way as the web app, including the
  * repository-root .env in local development. Never prints the password.
@@ -33,12 +36,12 @@ async function main(): Promise<number> {
   const name = (values.name ?? process.env.OWNER_NAME ?? 'Owner').trim() || 'Owner';
 
   if (!EMAIL.test(email)) {
-    console.error('Give a valid email with --email or OWNER_EMAIL.');
+    console.error('Give a valid email with OWNER_EMAIL (or --email).');
     return 1;
   }
   const problem = passwordProblem(password);
   if (problem) {
-    console.error(`Password not accepted: ${problem} (use --password or OWNER_PASSWORD)`);
+    console.error(`Password not accepted: ${problem} (set it with OWNER_PASSWORD)`);
     return 1;
   }
 
@@ -55,7 +58,7 @@ async function main(): Promise<number> {
       return 0;
     }
     if (!values['reset-password']) {
-      console.log(`An account for ${email} already exists; nothing changed. Add --reset-password to set a new password.`);
+      console.log(`An account for ${email} already exists; nothing changed. Add --reset-password to set a new password from OWNER_PASSWORD.`);
       return 0;
     }
     await db

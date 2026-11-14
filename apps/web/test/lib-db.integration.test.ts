@@ -79,7 +79,8 @@ suite('database-backed helpers', () => {
   }, 60_000);
 
   it('creates settings on first load, seeds curated trends once and validates updates', async () => {
-    const { getSettings, updateSettings } = await import('../src/lib/settings');
+    const { getSettings } = await import('../src/lib/settings');
+    const { updateSettingsFromPatch: updateSettings } = await import('../src/lib/preferences');
     const { listTrends } = await import('../src/lib/trends');
     const settings = await getSettings();
     expect(settings.brand.accentColour).toBe('#C8A24A');
