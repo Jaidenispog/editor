@@ -74,10 +74,10 @@ export function performanceLine(state: ProfilePerformanceState): string | null {
   }
 }
 
-/** The Settings → Integrations card (pure). */
-export function businessProfileCard(env: IntegrationEnv, conn: ConnectionFact | undefined): IntegrationStatus {
+/** The Settings → Integrations card (pure). `checkInFlight`: a `reviews.gbp.sync` is queued or running. */
+export function businessProfileCard(env: IntegrationEnv, conn: ConnectionFact | undefined, checkInFlight = false): IntegrationStatus {
   const missing = missingEnv(env, ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']);
-  const state = businessProfileState(env, conn);
+  const state = businessProfileState(env, conn, checkInFlight);
   const location = chosenProfileLocation(conn);
   const perf = performanceLine(profilePerformanceState(env, conn));
   const base = {
@@ -141,4 +141,6 @@ export function businessProfileCard(env: IntegrationEnv, conn: ConnectionFact | 
 }
 
 /** Google Business Profile: one card for reviews and Performance. */
-export const buildBusinessProfileIntegrations: IntegrationBuilder = (env, facts) => [businessProfileCard(env, connectionFor(facts, 'google_business_profile'))];
+export const buildBusinessProfileIntegrations: IntegrationBuilder = (env, facts) => [
+  businessProfileCard(env, connectionFor(facts, 'google_business_profile'), facts.checksInFlight?.includes('google_business_profile') ?? false),
+];

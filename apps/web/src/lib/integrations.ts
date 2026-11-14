@@ -1,4 +1,5 @@
 import 'server-only';
+import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@studio/db';
 import { getDb } from './db.js';
 import { getEnv } from './env.js';
@@ -51,7 +52,8 @@ export async function getIntegrationStatuses(): Promise<IntegrationStatus[]> {
   const db = getDb();
   const c = schema.integrationConnections;
   const w = schema.trendWatches;
-  const [connections, socialAccounts, trendWatches] = await Promise.all([
+  const j = schema.jobs;
+  const [connections, socialAccounts, trendWatches, profileCheck] = await Promise.all([
     db
       .select({ provider: c.provider, status: c.status, displayName: c.displayName, capabilities: c.capabilities, config: c.config, lastError: c.lastError, lastSyncAt: c.lastSyncAt })
       .from(c),
@@ -59,6 +61,9 @@ export async function getIntegrationStatuses(): Promise<IntegrationStatus[]> {
       .select({ platform: schema.socialAccounts.platform, status: schema.socialAccounts.status, username: schema.socialAccounts.username, capabilities: schema.socialAccounts.capabilities })
       .from(schema.socialAccounts),
     db.select({ provider: w.provider, enabled: w.enabled, status: w.status, statusMessage: w.statusMessage, lastSuccessAt: w.lastSuccessAt }).from(w),
+    // The Business Profile card may say "Checking" only while its read-only check is really queued or running.
+    db.query.jobs.findFirst({ columns: { id: true }, where: and(eq(j.type, 'reviews.gbp.sync'), inArray(j.status, ['queued', 'running'])) }),
   ]);
-  return buildIntegrationStatuses(env, { connections, socialAccounts, trendWatches });
+  const checksInFlight = profileCheck ? ['google_business_profile'] : [];
+  return buildIntegrationStatuses(env, { connections, socialAccounts, trendWatches, checksInFlight });
 }

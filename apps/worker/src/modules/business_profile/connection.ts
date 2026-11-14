@@ -63,6 +63,15 @@ export function signedInRow() {
   return and(eq(t.provider, PROVIDER), notInArray(t.status, ['disconnected', 'not_configured']));
 }
 
+/**
+ * The shared row while it is still signed in and still set to `location`. Performance answers belong to one location:
+ * a probe or sync that was asked about the old location never records its answer after the owner chose another.
+ */
+export function signedInAt(location: string) {
+  const t = schema.integrationConnections;
+  return and(signedInRow(), sql`${t.config}->>'location' = ${location}`);
+}
+
 /** Records a check's outcome on the shared row, unless the owner has disconnected it meanwhile. */
 export function recordProfileCheck(ctx: Pick<WorkerContext, 'db'>, result: ConnectionCheckResult, now: Date = new Date()): Promise<ConnectionRow | null> {
   return recordConnectionCheck(ctx.db, PROVIDER, result, now, { unlessDisconnected: true });
@@ -109,12 +118,19 @@ export type ProfileApi = 'apiAccess' | 'performanceApi';
  * - `awaiting_approval`: recorded, the job ends normally (no retry until the next scheduled run);
  * - `transient`: nothing recorded, rethrown so pg-boss retries;
  * - anything else (owner-fixable): recorded with a plain message, then a NonRetryableError.
- * Performance problems never change the row's status (reviews may still work), except a refused sign-in.
+ * Performance problems never change the row's status (reviews may still work), except a refused sign-in, and are
+ * recorded only while the row is still set to the `location` that was asked about (required for `performanceApi`).
  */
-export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: unknown, api: ProfileApi): Promise<'awaiting_approval'> {
+export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: unknown, api: 'apiAccess'): Promise<'awaiting_approval'>;
+export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: unknown, api: 'performanceApi', location: string): Promise<'awaiting_approval'>;
+export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: unknown, api: ProfileApi, location?: string): Promise<'awaiting_approval'> {
   if (!(err instanceof BusinessProfileError)) throw err;
   const messageKey = api === 'apiAccess' ? 'apiAccessMessage' : 'performanceMessage';
   if (err.kind === 'transient') throw err;
+  if (err.kind === 'awaiting_approval' && api === 'performanceApi') {
+    await setProfileCapabilities(ctx, { performanceApi: 'awaiting_approval' satisfies BusinessProfileApiState, performanceMessage: null }, location ?? null);
+    return 'awaiting_approval';
+  }
   if (err.kind === 'awaiting_approval') {
     await recordProfileCheck(ctx, {
       status: 'connected',
@@ -136,12 +152,22 @@ export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: un
       await recordProfileCheck(ctx, { status: 'error', lastError: err.message, capabilities: { apiAccess: state, apiAccessMessage: err.message } });
     }
   } else {
-    // The reviews side may still work: only the Performance capability changes.
-    const t = schema.integrationConnections;
-    await ctx.db
-      .update(t)
-      .set({ capabilities: sql`${t.capabilities} || ${JSON.stringify({ performanceApi: state, performanceMessage: err.message })}::jsonb`, updatedAt: new Date() })
-      .where(signedInRow());
+    // The reviews side may still work: only the Performance capability changes, and only for the location asked about.
+    await setProfileCapabilities(ctx, { performanceApi: state, performanceMessage: err.message }, location ?? null);
   }
   throw new NonRetryableError(err.kind === 'unrecognised' ? 'PROCESSING_FAILED' : 'INTEGRATION_NOT_CONFIGURED', err.message);
+}
+
+/**
+ * Merges capability keys into the shared row without touching its status or last error, only while it is signed in
+ * and (when `location` is given) still set to that location. True when the row was updated.
+ */
+export async function setProfileCapabilities(ctx: Pick<WorkerContext, 'db'>, caps: Record<string, string | null>, location: string | null, now: Date = new Date()): Promise<boolean> {
+  const t = schema.integrationConnections;
+  const updated = await ctx.db
+    .update(t)
+    .set({ capabilities: sql`${t.capabilities} || ${JSON.stringify(caps)}::jsonb`, updatedAt: now })
+    .where(location === null ? signedInRow() : signedInAt(location))
+    .returning({ id: t.id });
+  return updated.length > 0;
 }

@@ -6,7 +6,7 @@ import { loadConnection } from '../../lib/connections.js';
 import { fetchDailyMetrics, fetchMonthlyKeywords, keywordMonths, performanceWindows, probeWindow, type DailyMetricRow, type KeywordRow } from '../../lib/google/business-profile-performance.js';
 import type { TrackedRun } from '../../lib/job-tracker.js';
 import { enqueueTracked } from '../../lib/jobs.js';
-import { PROVIDER, ProfileStoppedError, chosenLocation, handleProfileError, isUsable, profileAccessToken, signedInRow, whileSignedIn } from './connection.js';
+import { PROVIDER, ProfileStoppedError, chosenLocation, handleProfileError, isUsable, profileAccessToken, setProfileCapabilities, whileSignedIn } from './connection.js';
 
 /**
  * Business Profile Performance (website design §7.3, §8), on the shared `google_business_profile` connection and
@@ -17,14 +17,8 @@ import { PROVIDER, ProfileStoppedError, chosenLocation, handleProfileError, isUs
 
 const UPSERT_BATCH = 500;
 
-/** Writes the Performance capability keys on the shared row without touching its status or last error. */
-async function setPerformanceCapabilities(ctx: Pick<WorkerContext, 'db'>, caps: Record<string, string | null>, now: Date): Promise<void> {
-  const t = schema.integrationConnections;
-  await ctx.db
-    .update(t)
-    .set({ capabilities: sql`${t.capabilities} || ${JSON.stringify(caps)}::jsonb`, updatedAt: now })
-    .where(signedInRow());
-}
+/** Said when the owner chose another location while Google was being asked about the old one. */
+const LOCATION_CHANGED = 'Another Business Profile location was chosen while checking; nothing was recorded for the old one.';
 
 /**
  * `website.connection_check` with provider `business_profile_performance`: one 7-day daily-metrics read. 200 →
@@ -53,11 +47,15 @@ export async function checkProfilePerformance(ctx: WorkerContext, run: TrackedRu
   try {
     await fetchDailyMetrics(ctx, token, location.location, probeWindow(melbourneDateOf(now())), run.signal);
   } catch (err) {
-    await handleProfileError(ctx, err, 'performanceApi');
+    await handleProfileError(ctx, err, 'performanceApi', location.location);
     await run.progress(1, "Waiting for Google's approval of API access");
     return 'awaiting_approval';
   }
-  await setPerformanceCapabilities(ctx, { performanceApi: 'available', performanceMessage: null, performanceCheckedAt: now().toISOString() }, now());
+  const recorded = await setProfileCapabilities(ctx, { performanceApi: 'available', performanceMessage: null, performanceCheckedAt: now().toISOString() }, location.location, now());
+  if (!recorded) {
+    await run.progress(1, LOCATION_CHANGED);
+    return 'skipped';
+  }
   if (before !== 'available' || reason === 'connect') {
     await enqueueTracked(ctx, 'search.sync', { source: 'business_profile', reason: 'connect' }, { singletonKey: 'search-sync:business_profile' });
   }
@@ -111,11 +109,14 @@ export async function syncProfilePerformance(ctx: WorkerContext, run: TrackedRun
       await run.progress(1, err.message);
       return { stored, outcome: 'skipped' };
     }
-    await handleProfileError(ctx, err, 'performanceApi');
+    await handleProfileError(ctx, err, 'performanceApi', location.location);
     await run.progress(1, "Waiting for Google's approval of API access");
     return { stored, outcome: 'awaiting_approval' };
   }
-  await setPerformanceCapabilities(ctx, { performanceApi: 'available', performanceMessage: null, performanceSyncedAt: now().toISOString() }, now());
+  if (!(await setProfileCapabilities(ctx, { performanceApi: 'available', performanceMessage: null, performanceSyncedAt: now().toISOString() }, location.location, now()))) {
+    await run.progress(1, LOCATION_CHANGED);
+    return { stored, outcome: 'skipped' };
+  }
   await run.progress(1, `Stored ${stored} Business Profile number${stored === 1 ? '' : 's'}`);
   return { stored, outcome: 'synced' };
 }

@@ -32,6 +32,17 @@ describe('Business Profile card states (email design §4.8, website design §10.
     expect(buildBusinessProfileIntegrations(env, { connections: [], socialAccounts: [] })).toHaveLength(1);
   });
 
+  it('the Settings card says "checking" while a check is really running, and never asks the owner to act then', () => {
+    const signedIn = row({});
+    const facts = (checksInFlight?: string[]) => ({ connections: [signedIn], socialAccounts: [], ...(checksInFlight ? { checksInFlight } : {}) }) as never;
+    const running = buildBusinessProfileIntegrations(env, facts(['google_business_profile']))[0]!;
+    expect(running).toMatchObject({ state: 'connected', stateLabel: 'Checking', pillStatus: 'processing' });
+    expect(running.message).not.toMatch(/Press Check again/);
+    // Facts that were not read, or another card's check, never make it "checking".
+    expect(buildBusinessProfileIntegrations(env, facts())[0]).toMatchObject({ stateLabel: 'Not checked yet' });
+    expect(buildBusinessProfileIntegrations(env, facts(['square']))[0]).toMatchObject({ stateLabel: 'Not checked yet' });
+  });
+
   it('derives the Performance state from the shared connection', () => {
     expect(profilePerformanceState(env, undefined)).toBe('not_connected');
     expect(profilePerformanceState(env, row({ capabilities: { apiAccess: 'awaiting_approval' } }) as never)).toBe('awaiting_approval');

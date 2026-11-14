@@ -86,6 +86,11 @@ export interface ConnectionFacts {
   socialAccounts: Array<{ platform: string; status: string; username: string; capabilities?: Record<string, unknown> }>;
   /** Trend watches, when the caller read them; absent means "not read" and cards fall back to settings only. */
   trendWatches?: TrendWatchFact[];
+  /**
+   * Card ids with a read-only check queued or running right now, when the caller read them. A card may say
+   * "Checking" only for these; absent means "not read", never "checking".
+   */
+  checksInFlight?: readonly string[];
 }
 
 /** Builds one module's status cards. Pure (no database or network access), so it is unit tested. */

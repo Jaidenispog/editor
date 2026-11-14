@@ -43,6 +43,8 @@ export function fakeBusinessProfile() {
     beforeReviewsPage: null as null | ((offset: number) => Promise<void>),
     /** Called before the locations list is answered (tests use it to act while discovery runs). */
     beforeLocations: null as null | (() => Promise<void>),
+    /** Called before a Performance request is answered (tests use it to act while a probe or sync runs). */
+    beforePerformance: null as null | (() => Promise<void>),
   };
   const quota = () => json(429, { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: "Quota exceeded for quota metric 'Requests' and limit 'Requests per minute'.", details: [{ metadata: { quota_limit_value: '0' } }] } });
   const respond = async (call: FakeCall): Promise<Response> => {
@@ -57,6 +59,7 @@ export function fakeBusinessProfile() {
     }
     if (call.headers['authorization'] !== `Bearer access-${state.refreshes}`) return json(401, { error: { code: 401 } });
     if (url.hostname === 'businessprofileperformance.googleapis.com') {
+      if (state.beforePerformance) await state.beforePerformance();
       if (state.performanceQuotaZero || state.quotaZero) return quota();
       if (url.pathname.endsWith(':fetchMultiDailyMetricsTimeSeries')) {
         if (state.performanceShape === 'weird') return json(200, { multiDailyMetricTimeSeries: [{ series: 'unexpected' }] });

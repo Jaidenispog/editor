@@ -7,7 +7,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { loadEnv } from '@studio/config';
 import { NonRetryableError, newId, type JobType } from '@studio/core';
@@ -265,6 +265,35 @@ describe.skipIf(skip)('Business Profile module on a real database with a fake Go
       expect((await conn()).capabilities).toMatchObject({ performanceApi: 'error', performanceMessage: UNRECOGNISED_RESPONSE_MESSAGE });
       expect(await handle.db.select().from(schema.searchMetrics)).toHaveLength(before.length);
       google.state.performanceShape = 'ok';
+    });
+
+    it('a probe for one location never records its answer after the owner chose another location', async () => {
+      const t = schema.integrationConnections;
+      const chooseOther = async () => {
+        google.state.beforePerformance = null;
+        // What choosing a location does: the new location, with its Performance state reset to "not checked".
+        await handle.db
+          .update(t)
+          .set({
+            config: { account: 'accounts/111', location: 'locations/333', locationTitle: 'Second shop' },
+            capabilities: sql`${t.capabilities} || ${JSON.stringify({ performanceApi: null, performanceMessage: null })}::jsonb`,
+          })
+          .where(eq(t.provider, 'google_business_profile'));
+      };
+      for (const quotaZero of [false, true]) {
+        await handle.db.update(t).set({ config: { account: 'accounts/111', location: 'locations/222', locationTitle: 'Ivanhoe Barber Co' } }).where(eq(t.provider, 'google_business_profile'));
+        google.state.performanceQuotaZero = quotaZero;
+        google.state.beforePerformance = chooseOther;
+        enqueued.length = 0;
+        await handleWebsiteConnectionCheck(ctx, fakeRun(), { provider: 'business_profile_performance', reason: 'manual' }, deps);
+        const row = await conn();
+        expect(row.config['location']).toBe('locations/333');
+        expect(row.capabilities['performanceApi'] ?? null).toBeNull();
+        expect(row.status).toBe('connected');
+        expect(enqueued).toHaveLength(0);
+      }
+      google.state.performanceQuotaZero = false;
+      await handle.db.update(t).set({ config: { account: 'accounts/111', location: 'locations/222', locationTitle: 'Ivanhoe Barber Co' } }).where(eq(t.provider, 'google_business_profile'));
     });
   });
 
