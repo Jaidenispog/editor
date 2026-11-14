@@ -52,6 +52,28 @@ History of the background runs:
    on that commit. **G2 (WP2 preferences ∥ WP4 publishing) started right after** (workflow run `wf_5a49e176-d40`).
    Plan §10 lists the requests G2+ must honour; the agents read it.
 
+9. G2 merged and pushed 2026-11-14 (ed37bbd): migrations 0004_preferences and 0005_publishing; the integrator fixed
+   export audio to AAC 128 kbps (Instagram Reels limit) and queued preferences.recompute on publish. Then, merged on
+   top: the setup-guide hotfix (`docs/run-locally.md`; Mac needs Homebrew `ffmpeg-full`, verified by a fresh-clone
+   run on Ubuntu 24.04 and against Homebrew/Microsoft sources) and the UI polish branch from a 29-screenshot review
+   (15 findings fixed, 4 left to WP4/WP2/WP7 in plan §10.1). Verified on ed37bbd: typecheck, 753 unit tests,
+   integration 12/12, web build, browser test 51/51 (51 needs `E2E_SCREENSHOT_DIR`; 44 without it).
+   - The GitHub repository is PUBLIC and `claude/blissful-lamport-f1lndn` is its default branch: never push
+     unverified merges; the owner may be cloning it (they have a Mac and follow `docs/run-locally.md`).
+   - Remote Control: the owner's Mac lists folders but offers none to cloud sessions (`not_available`, even after
+     updating the app); do not keep re-requesting it.
+   - Progress page for the owner: https://claude.ai/artifact/9Bx4CSC1gGWJyHxFDiA8Wj, built from a separate showcase
+     stack (port 3200, database studio_showcase, files in the scratchpad `showcase/` folder, capture script
+     `showcase/capture.cjs`). Republish it after each group.
+   - **G3 (WP5 hashtag watch) started** (run `wf_f68429be-c39`), then the Stage B acceptance pass.
+   - In parallel, worktree run `wf_7fd264b2-afe` fixes: the whole-object settings write that can overwrite learned
+     preferences (logo routes), dev server bound to 127.0.0.1 by default, `apps/web/next-env.d.ts` untracked,
+     telemetry off in `.env.example`, README owner command without the password on the command line. Merge it
+     after G3's integrator has finished, then re-run all checks.
+   - Still open from G2: shared pill label for manual_step_required ("Action needed" vs "Your turn"), Studio style
+     checkboxes not pre-ticked by learned order (style-controls.tsx), logo copy key belongs in packages/storage,
+     nothing tested against real Meta accounts.
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
