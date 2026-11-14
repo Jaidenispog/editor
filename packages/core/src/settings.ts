@@ -11,6 +11,7 @@ import { PUBLISHING_SETTINGS_SECTIONS } from './settings/publishing.js';
 import { SQUARE_SETTINGS_SECTIONS } from './settings/square.js';
 import { TRENDS_SETTINGS_SECTIONS } from './settings/trends.js';
 import { WEBSITE_SETTINGS_SECTIONS } from './settings/website.js';
+import { OpeningHoursSchema } from './website.js';
 
 export * from './settings/types.js';
 export * from './settings/legal.js';
@@ -33,6 +34,8 @@ export const BusinessConfigSchema = z.object({
   termsUrl: z.string().max(500).default(''),
   /** Privacy page used elsewhere (Meta, Google, Spotify embed). Blank = this app's own published /privacy page. */
   privacyUrl: z.string().max(500).default(''),
+  /** Opening hours (Settings → Business): up to two ranges per day, Melbourne time; a day without one is closed. */
+  openingHours: OpeningHoursSchema,
 });
 export type BusinessConfig = z.infer<typeof BusinessConfigSchema>;
 

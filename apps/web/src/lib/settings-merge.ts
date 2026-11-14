@@ -1,4 +1,4 @@
-import { AppSettingsSchema, LEARNABLE_FIELDS, declaredValue, parseStoredSettings, type AppSettings, type LearnableField } from '@studio/core';
+import { AppSettingsSchema, LEARNABLE_FIELDS, SERVER_ONLY_WEBSITE_FIELDS, declaredValue, parseStoredSettings, type AppSettings, type LearnableField } from '@studio/core';
 import { z } from 'zod';
 
 /** Preference fields only the server writes: learning state through the preferences routes, learned values by the recompute job. */
@@ -17,6 +17,8 @@ export const SettingsPatchSchema = z
     preferences: z.record(z.string(), z.unknown()).optional(),
     /** Legal pages (Settings → Business → Legal pages); each page object is replaced whole. */
     legal: z.record(z.string(), z.unknown()).optional(),
+    /** Website check settings (word lists, external links). The ownership fields are server-only and dropped here. */
+    website: z.record(z.string(), z.unknown()).optional(),
     /** Never accepted here: present only so the refusal can explain where it changes. */
     music: z.unknown().optional(),
   })
@@ -49,6 +51,9 @@ const PROTECTED_BRAND_FIELDS = ['logoStorageKey'] as const;
 export function mergeSettings(current: AppSettings, patch: SettingsPatch, now: Date = new Date()): AppSettings {
   const brandPatch = { ...(patch.brand ?? {}) };
   for (const field of PROTECTED_BRAND_FIELDS) delete brandPatch[field];
+  const websitePatch = { ...(patch.website ?? {}) };
+  // Only POST /api/website/ownership sets these (design §5.3).
+  for (const field of SERVER_ONLY_WEBSITE_FIELDS) delete websitePatch[field];
   const prefsPatch = { ...(patch.preferences ?? {}) };
   for (const field of SERVER_OWNED_PREFERENCE_FIELDS) delete prefsPatch[field];
   const merged = AppSettingsSchema.parse({
@@ -58,6 +63,7 @@ export function mergeSettings(current: AppSettings, patch: SettingsPatch, now: D
     business: { ...current.business, ...(patch.business ?? {}) },
     preferences: { ...current.preferences, ...prefsPatch },
     legal: { ...current.legal, ...(patch.legal ?? {}) },
+    website: { ...current.website, ...websitePatch },
   });
   return pinChangedFields(current, merged, now);
 }

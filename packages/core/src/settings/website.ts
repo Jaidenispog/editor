@@ -1,4 +1,10 @@
+import { WebsiteSettingsSchema } from '../website.js';
 import type { SettingsSectionMap } from './types.js';
 
-/** New top-level settings sections of the website check and Search Console module (WP8 adds them here; each needs a full default). */
-export const WEBSITE_SETTINGS_SECTIONS = {} as const satisfies SettingsSectionMap;
+/**
+ * The `website` settings section (WP8): ownership confirmation (server-set), the manual Business Profile check date,
+ * the search-grouping word lists and the external-link switch. Older settings parse to the defaults.
+ */
+export const WEBSITE_SETTINGS_SECTIONS = {
+  website: WebsiteSettingsSchema.default(WebsiteSettingsSchema.parse({})),
+} as const satisfies SettingsSectionMap;

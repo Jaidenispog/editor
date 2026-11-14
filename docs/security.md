@@ -179,3 +179,26 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   Instagram or TikTok post pattern. Graph messages are shown as text.
 - **Media**: uploads stream from private storage to `rupload.facebook.com` (no public URL); owner downloads use
   expiring links. Deleting a project cancels its unsent posts and removes its `publishing/{postId}/` covers.
+
+## Website and local search (Stage C, WP8)
+
+- **Owner only**: every website route and the Website page; staff see a plain notice.
+- **Ownership binding**: checks run only against the host the owner confirmed ("This is my business's own website");
+  the confirmation is server-set (`PUT /api/settings` drops it) and is cleared in effect when the website address
+  changes host.
+- **SSRF guard** (`apps/worker/src/website/ssrf.ts`, `fetcher.ts`): the crawler resolves every host and refuses it if
+  any address is in 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.168/16, 198.18/15, multicast,
+  reserved, ::1, fc00::/7, fe80::/10 or an IPv4-mapped private address; it connects to the checked address only (no
+  DNS rebinding), uses ports 80/443 only and re-validates every redirect. The owner-entered WordPress address goes
+  through the same resolver check. Only test code can allow loopback; no setting turns the guard off.
+- **Fetched pages are data**: parsed with cheerio into capped fields, never executed; nothing on a page is followed
+  except plain links in scope; React renders every string as text. The optional AI step wraps page text in a JSON
+  field declared untrusted, uses structured output and drops options with ranking claims, other phone numbers or
+  addresses; AI text is never applied without the owner choosing it and confirming Apply.
+- **WordPress credential**: `username:applicationPassword` encrypted with AES-256-GCM in `integration_connections`,
+  decrypted only in the worker, never echoed, logged or audited; HTTPS only. A dedicated Editor user is recommended
+  (an Administrator gets a note). Disconnect wipes it; deleting the Application Password in WordPress revokes it.
+- **No live change without the owner**: connection checks are read-only; apply needs `approved_by` from the explicit
+  confirmation; a retry never writes twice (`already_applied`). Search Console is read-only (`webmasters.readonly`).
+- **Privacy**: checks store extracted facts, never page HTML or images. Search queries stay server-side and owner-only
+  and can be deleted on disconnect ("Also delete stored search data").

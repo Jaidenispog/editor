@@ -372,3 +372,29 @@ its process alive, and five clips sat on "Waiting to be analysed" with no hint w
      again. To see the notice, run the web app and `pnpm --filter @studio/worker start` separately and `kill -9` the
      worker: within about 60 s `GET /api/health` reports `"worker":{"alive":false,…}` (still 200) and a project with
      a waiting clip shows "The background worker isn't running" above the clips.
+
+## Website and local search (Stage C, WP8)
+
+All with fakes; nothing contacts a real website, WordPress or Google.
+
+- **Unit** (`pnpm -r test`): `packages/core/test/{robots,website-scope,website-checks,classify-query,
+  website-suggestions,change-lifecycle}.test.ts` (RFC 9309 cases, scope/normalisation, one fixture per check plus a
+  clean fixture, prioritisation, query groups, suggestions, `checkCopyClaims`, instructions, dedupe/refresh/supersede);
+  `packages/ai/test/website-copy.test.ts` (fake Anthropic client); `apps/worker/test/{website-ssrf,extract,
+  wordpress-adapter,search-console}.test.ts` (blocked ranges incl. IPv4-mapped IPv6, redirect to a private address,
+  pinned DNS, polite spacing; HTML fixtures incl. a hostile page; fake WordPress REST API; recorded-shape Search
+  Console responses); `apps/web/test/website.test.ts` (card states, apply availability, read-time grouping, settings).
+- **Database** (`TEST_DATABASE_URL`): `apps/worker/test/website-db.test.ts` runs `website.audit` against a local
+  fixture site (`apps/worker/test/helpers/fixture-site.ts`: robots.txt with a disallowed folder, `Crawl-delay: 1`, a
+  gzip sitemap behind an index, a 404 and a redirect in the sitemap, `noindex`, a redirect chain, a redirect off the
+  site, a soft 404, duplicate titles, invalid JSON-LD, a wrong phone number, a 900 KB image without dimensions, a
+  broken link and 30 extra pages): result validates, disallowed pages are never requested, ≤ 400 requests, 25-page
+  limit, changes created once and refreshed on a second run, cancel → `cancelled`, an interrupted attempt is
+  overwritten cleanly by the retry. Fake WordPress through the injected fetch: staging label, exactly-once apply,
+  crash between write and status update → `already_applied` with one write, conflict, 401 → `needs_reauth`, undo,
+  no apply without approval. Fake Google: token refresh, `sites.list` auto-select, 16-month backfill, idempotent
+  upsert, `invalid_grant` → `needs_reauth`. `apps/web/test/website.integration.test.ts` covers the routes.
+- **Smoke test on a real site you own** (never in CI): `pnpm --filter @studio/worker exec tsx
+  scripts/website-smoke.ts --audit https://your-site/ --i-own-this-site` prints the request log and findings and
+  writes nothing. Then, with the owner present: connect Search Console and compare one 28-day total with the Search
+  Console web report; run the WordPress check and one `text_replace` plus its undo on a staging copy first.

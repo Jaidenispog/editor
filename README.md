@@ -28,6 +28,7 @@ Australian English, AUD, `Australia/Melbourne`.
 | Publishing: composer, "Post it yourself", Instagram direct (WP4) | Yes | Yes, against a local fake of Meta (Stage B browser test and worker tests); no real post made | Meta business app, configuration and the first real verification post |
 | Trends: curated (sourced, dated), noted by staff, YouTube AU chart; no "trending" claims | Yes (WP3) | Unit and database tests with a fake YouTube API; curated and noted labels in the Stage B browser test | `YOUTUBE_API_KEY` for the chart (optional) |
 | Instagram hashtag watch (WP5) | Yes | Yes, against the fake of Meta (unit, database and Stage B browser tests) | A connected Instagram account and Meta's hashtag search permission |
+| Website check, prepared changes, WordPress apply, Search Console (WP8) | Yes | Yes, against a local fixture site, a fake WordPress REST API and a fake Google (unit, database and route tests); no real site, WordPress or Google contacted | The owner's site builder and an Application Password if it is WordPress; Search Console verification and connection; the owner's first check |
 | TikTok direct, Square, email, Google reviews, website tools (Stage C) | TikTok: manual posting only; the rest "Needs setup" screens | — | TikTok (optional Zernio route), Square, Resend, Google accounts |
 
 **Not yet done:**
