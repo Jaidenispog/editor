@@ -95,6 +95,8 @@ export interface BookingDto {
   missingFromSquare: boolean;
   /** Attended / Didn't attend may be pressed (with the reason when not). */
   attendanceMark: { allowed: boolean; reason: string | null; current: 'attended' | 'not_attended' | null };
+  /** Past bookings: the latest review request for this booking (design §9.1 badge, links to Reviews), or null. */
+  reviewRequest: { status: string; label: string } | null;
 }
 
 /** A booking with everything the detail dialog shows. */

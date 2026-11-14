@@ -169,6 +169,11 @@ suite('Website routes (database-backed)', () => {
       (await call(wordpress.POST, 'POST', '/api/integrations/website/wordpress', { baseUrl: 'http://insecure.example', username: 'u', applicationPassword: 'abcd efgh ijkl mnop' }))
         .status,
     ).toBe(400);
+    for (const baseUrl of ['https://10.0.0.5/', 'https://[::1]/', 'https://169.254.169.254/', 'https://localhost/', 'https://wordpress/', 'https://nas.local/']) {
+      const refused = await call(wordpress.POST, 'POST', '/api/integrations/website/wordpress', { baseUrl, username: 'u', applicationPassword: 'abcd efgh ijkl mnop' });
+      expect(refused.status, baseUrl).toBe(400);
+      expect(refused.json.error.message).toMatch(/not a public website/);
+    }
     const saved = await call(wordpress.POST, 'POST', '/api/integrations/website/wordpress', {
       baseUrl: 'https://staging.ivanhoebarber.example.com.au/',
       username: 'studio-assistant',
@@ -234,6 +239,28 @@ suite('Website routes (database-backed)', () => {
     const marked = await call(done.POST, 'POST', `/api/website/edits/${id}/mark-done`, {}, { id });
     expect(marked.json.edit).toMatchObject({ status: 'applied', appliedVia: 'manual', verification: 'pending' });
     expect((await call(reject.POST, 'POST', `/api/website/edits/${id}/reject`, {}, { id })).status).toBe(409);
+  });
+
+  it('a removal applied through WordPress offers no undo (its reverse could never find the text)', async () => {
+    const { getDb } = await import('../src/lib/db');
+    const { schema } = await import('@studio/db');
+    const edits = await import('../src/app/api/website/edits/route');
+    const undo = await import('../src/app/api/website/edits/[id]/undo/route');
+    const removal = randomUUID();
+    const replacement = randomUUID();
+    const page = 'https://www.ivanhoebarber.example.com.au/contact/';
+    await getDb()
+      .insert(schema.websiteEdits)
+      .values([
+        { id: removal, title: 'Remove old offer', pageUrl: page, status: 'applied', appliedVia: 'wordpress', proposedChange: { kind: 'text_replace', pageUrl: page, before: 'Half price Tuesdays!', after: '' } },
+        { id: replacement, title: 'Correct text', pageUrl: page, status: 'applied', appliedVia: 'wordpress', proposedChange: { kind: 'text_replace', pageUrl: page, before: '(03) 9876 5432', after: '03 9499 1234' } },
+      ]);
+    const done = (await call(edits.GET, 'GET', '/api/website/edits?status=done')).json.edits as Array<{ id: string; canUndo: boolean }>;
+    expect(done.find((e) => e.id === removal)?.canUndo).toBe(false);
+    expect(done.find((e) => e.id === replacement)?.canUndo).toBe(true);
+    const refused = await call(undo.POST, 'POST', `/api/website/edits/${removal}/undo`, {}, { id: removal });
+    expect(refused.status).toBe(422);
+    expect(refused.json.error.message).toMatch(/revisions in WordPress/);
   });
 
   it('shows no search numbers until Search Console is connected with a property, then groups stored rows', async () => {

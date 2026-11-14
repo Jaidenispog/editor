@@ -21,6 +21,7 @@ import { handleAnalyseMusic } from './handlers/music.js';
 import { handleCleanup } from './handlers/cleanup.js';
 import { handleGoogleDisconnect } from './handlers/google-disconnect.js';
 import { handleWebhookProcess } from './handlers/webhook-process.js';
+import { queueStartupProviderCheck } from './handlers/email-check.js';
 import { WORKER_MODULES, defineHandler, moduleCrons, moduleHandlers, type ModuleJobHandler, type WorkerModule } from './modules/index.js';
 
 type Handler<T extends JobType> = (ctx: WorkerContext, run: TrackedRun, payload: JobPayload<T>) => Promise<void>;
@@ -236,6 +237,8 @@ export async function startWorker(options: StartWorkerOptions = {}): Promise<{ c
   for (const h of handlers) await register(h.type, h.handler as Handler<JobType>, h.concurrency ?? 1);
   await queue.schedule(JOB_TYPES.CLEANUP, '17 * * * *', { olderThanHours: 24 });
   for (const cron of moduleCrons()) await queue.schedule(cron.type, cron.cron, cron.payload, { key: cron.key });
+  // One read-only email provider check after start-up when email is configured (never sends; see the function).
+  await queueStartupProviderCheck(ctx).catch((err: unknown) => logger.warn({ err }, 'could not queue the start-up email provider check'));
 
   const missing = ALL_JOB_TYPES.filter((type) => !registered.includes(type));
   if (missing.length) throw new Error(`No handler registered for: ${missing.join(', ')}`);

@@ -20,6 +20,12 @@ export const MAX_REQUESTS_PER_CHECK = 400;
 export const MAX_REDIRECTS = 5;
 /** Minimum gap between requests to the owner's site. */
 export const POLITE_INTERVAL_MS = 500;
+/**
+ * A check spends at most this long waiting between requests to the owner's site (robots.txt `Crawl-delay` makes the
+ * gap longer): every owner-site request after the first costs one gap, so with `Crawl-delay: 10` at most 72 more
+ * requests are made. This keeps a check well inside the job's 20-minute limit.
+ */
+export const MAX_POLITE_WAIT_MS = 12 * 60_000;
 
 /** Who may be connected to. Production uses {@link DEFAULT_FETCH_POLICY}; only tests build another one in code. */
 export interface FetchPolicy {
@@ -89,10 +95,21 @@ export class RequestBudgetError extends Error {
   }
 }
 
+/** Raised when another request to the owner's site would take the polite waiting past {@link MAX_POLITE_WAIT_MS}. */
+export class PoliteWaitBudgetError extends Error {
+  constructor() {
+    super('The check reached its limit for waiting between requests to your site');
+    this.name = 'PoliteWaitBudgetError';
+  }
+}
+
 /** A fetcher for one check: counts requests, spaces requests to the owner's hosts and logs every request. */
 export class WebsiteFetcher {
   readonly log: RequestLogEntry[] = [];
   private requests = 0;
+  private ownerRequests = 0;
+  /** Spacing committed so far between requests to the owner's site (an upper bound on the time spent waiting). */
+  private ownerSpacingMs = 0;
   private lastOwnerRequestAt = Number.NEGATIVE_INFINITY;
   private intervalMs: number;
   private readonly ownerHosts: Set<string>;
@@ -183,6 +200,12 @@ export class WebsiteFetcher {
       throw err;
     }
     if (this.ownerHosts.has(host)) {
+      // The polite-wait budget: refuse (before sending anything) a request whose gap would pass the 12-minute cap.
+      if (this.ownerRequests > 0) {
+        if (this.ownerSpacingMs + this.intervalMs > MAX_POLITE_WAIT_MS) throw new PoliteWaitBudgetError();
+        this.ownerSpacingMs += this.intervalMs;
+      }
+      this.ownerRequests++;
       const wait = this.lastOwnerRequestAt + this.intervalMs - this.now();
       if (wait > 0) await this.sleep(wait, options.signal);
       this.lastOwnerRequestAt = this.now();

@@ -7,6 +7,13 @@ import type { TrackedRun } from '../lib/job-tracker.js';
 import { SquareApiError } from '../square/api.js';
 import { markSquareNeedsReauth, refreshSquareToken, squareBaseUrl } from '../square/client.js';
 
+/** True when the `square` row is live again for the same seller and environment the revoke was queued for. */
+async function reconnectedSince(ctx: WorkerContext, payload: JobPayload<'square.revoke'>): Promise<boolean> {
+  const conn = await loadConnection(ctx.db, 'square');
+  if (!conn || !['connected', 'error', 'needs_reauth'].includes(conn.status)) return false;
+  return conn.externalAccountId === payload.merchantId && parseSquareConfig(conn.config).environment === payload.environment;
+}
+
 /** The daily job refreshes when fewer than this many days are left (about weekly, as access tokens last 30 days). */
 export const SQUARE_DAILY_REFRESH_SKEW_SECONDS = 23 * 24 * 3600;
 
@@ -42,11 +49,20 @@ export async function handleSquareTokenRefresh(ctx: WorkerContext, run: TrackedR
  * `square.revoke`: after the owner disconnects, asks Square to revoke every token of this app for that seller
  * (`POST /oauth2/revoke` with `Authorization: Client <application secret>`; no stored token is needed). The outcome
  * is audited; when Square cannot be reached after the retries, the owner is told to remove the app in Square.
+ *
+ * Square revokes EVERY token of the app for that seller, so a revoke that runs after the owner has already
+ * reconnected the same Square account (a busy or restarted worker, or a retry) would kill the new connection. It is
+ * skipped then (audited as `integration.square.revoke_skipped`): the owner's reconnect wins.
  */
 export async function handleSquareRevoke(ctx: WorkerContext, run: TrackedRun, payload: JobPayload<'square.revoke'>): Promise<void> {
   const env = ctx.env;
-  const audit = (action: 'integration.square.revoked' | 'integration.square.revoke_failed', data: Record<string, unknown>) =>
+  const audit = (action: 'integration.square.revoked' | 'integration.square.revoke_failed' | 'integration.square.revoke_skipped', data: Record<string, unknown>) =>
     writeWorkerAudit(ctx.db, { userId: null, action, entityType: 'integration_connection', data: { merchantId: payload.merchantId, environment: payload.environment, ...data } }, ctx.logger);
+  if (await reconnectedSince(ctx, payload)) {
+    await audit('integration.square.revoke_skipped', { reason: 'reconnected' });
+    await run.progress(1, 'Not revoked: you connected this Square account again after disconnecting.');
+    return;
+  }
   if (!env.SQUARE_APPLICATION_ID || !env.SQUARE_APPLICATION_SECRET) {
     await audit('integration.square.revoke_failed', { reason: 'not_configured' });
     await run.progress(1, 'Square is not set up on the server, so access could not be revoked. Remove Studio Assistant in Square’s App integrations page.');

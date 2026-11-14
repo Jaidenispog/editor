@@ -28,3 +28,20 @@ export function verifySquareSignature(input: { signatureKey: string; notificatio
   const given = Buffer.from(input.signature.trim(), 'utf8');
   return expected.length === given.length && timingSafeEqual(expected, given);
 }
+
+/**
+ * The only part of a verified Square delivery that is stored: what `webhook.process` needs to re-read the object from
+ * Square (event id, type, merchant, time, and the object's type and id). Square's copy of the object, which can hold
+ * a client's name, contact details, address and notes, is dropped before anything is written.
+ */
+export function squareWebhookEnvelope(event: Record<string, unknown>): Record<string, unknown> {
+  const str = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : null);
+  const data = event['data'] && typeof event['data'] === 'object' ? (event['data'] as Record<string, unknown>) : {};
+  return {
+    event_id: str(event['event_id'], 200),
+    type: str(event['type'], 100),
+    merchant_id: str(event['merchant_id'], 200),
+    created_at: str(event['created_at'], 40),
+    data: { type: str(data['type'], 100), id: str(data['id'], 192) },
+  };
+}

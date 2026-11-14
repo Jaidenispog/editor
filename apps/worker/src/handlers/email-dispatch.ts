@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, lt, lte, notInArray, or, sql } from 'drizzle-orm';
-import type { JobPayload } from '@studio/core';
+import { webhooksReadyForCommercial, type JobPayload } from '@studio/core';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
@@ -33,6 +33,7 @@ export async function handleEmailDispatch(ctx: WorkerContext, run: TrackedRun, _
   }
   const m = schema.emailMessages;
   const c = schema.emailCampaigns;
+  const commercialOk = webhooksReadyForCommercial(readiness);
   const pausedCampaigns = ctx.db.select({ id: c.id }).from(c).where(inArray(c.status, ['paused', 'cancelled', 'draft']));
   const due = await ctx.db
     .select({ id: m.id })
@@ -44,6 +45,9 @@ export async function handleEmailDispatch(ctx: WorkerContext, run: TrackedRun, _
         isNull(m.ownerAction),
         or(isNull(m.scheduledFor), lte(m.scheduledFor, now)),
         or(isNull(m.campaignId), notInArray(m.campaignId, pausedCampaigns)),
+        // Commercial email waits (in `approved`, without a job) while the webhooks are missing and not attested; the
+        // send gate would only hold it again, and handing it on every minute would pile up jobs.
+        commercialOk ? undefined : or(eq(m.messageClass, 'transactional_factual'), eq(m.origin, 'preview')),
       ),
     )
     .orderBy(sql`${m.scheduledFor} asc nulls first`, m.createdAt)

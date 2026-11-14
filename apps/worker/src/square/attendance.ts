@@ -1,5 +1,5 @@
 import { and, eq, gte, isNull, lte, or } from 'drizzle-orm';
-import { SQUARE_MATCH_AFTER_END_MS, SQUARE_MATCH_BEFORE_START_MS, SQUARE_PAYMENT_GIVE_UP_MS, matchPayments, type MatchBooking } from '@studio/core';
+import { SQUARE_MATCH_AFTER_END_MS, SQUARE_MATCH_BEFORE_START_MS, SQUARE_PAYMENT_GIVE_UP_MS, effectiveLocationId, matchPayments, type MatchBooking } from '@studio/core';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
@@ -29,12 +29,16 @@ export async function runAttendance(
   const t = schema.bookings;
   const from = input.from ?? new Date(now.getTime() - SQUARE_PAYMENT_GIVE_UP_MS);
   const to = input.to ?? now;
+  // Only the studio's Square location (none while the owner still has to choose one).
+  const locationId = effectiveLocationId(s.config);
+  if (!locationId) return { candidates: 0, changed: 0, payments: 0 };
   const rows = await ctx.db
     .select()
     .from(t)
     .where(
       and(
         eq(t.squareEnvironment, s.environment),
+        eq(t.locationId, locationId),
         eq(t.status, 'ACCEPTED'),
         isNull(t.ownerAttendance),
         gte(t.endAt, from),
@@ -42,7 +46,7 @@ export async function runAttendance(
         input.squareCustomerId ? eq(t.squareCustomerId, input.squareCustomerId) : undefined,
       ),
     );
-  let changed = await settleWithoutPayments(ctx, s, now);
+  let changed = await settleWithoutPayments(ctx, s, locationId, now);
   if (!rows.length) return { candidates: 0, changed, payments: 0 };
 
   // One payments read per location, over the union of the candidates' matching windows.
@@ -82,7 +86,7 @@ export async function runAttendance(
  * for a payment", one that ended over 7 days ago without a match becomes "no payment found", and one the owner marked
  * attended before it ended is completed. The stored evidence is kept.
  */
-async function settleWithoutPayments(ctx: WorkerContext, s: SquareSession, now: Date): Promise<number> {
+async function settleWithoutPayments(ctx: WorkerContext, s: SquareSession, locationId: string, now: Date): Promise<number> {
   const t = schema.bookings;
   const giveUp = new Date(now.getTime() - SQUARE_PAYMENT_GIVE_UP_MS);
   const rows = await ctx.db
@@ -91,10 +95,12 @@ async function settleWithoutPayments(ctx: WorkerContext, s: SquareSession, now: 
     .where(
       and(
         eq(t.squareEnvironment, s.environment),
+        eq(t.locationId, locationId),
         or(
           and(isNull(t.ownerAttendance), or(and(eq(t.attendance, 'upcoming'), lte(t.endAt, now)), and(eq(t.attendance, 'awaiting_payment'), lte(t.endAt, giveUp)))),
-          // Marked "attended" while the appointment was still running: completed once it has ended.
-          and(eq(t.ownerAttendance, 'attended'), eq(t.status, 'ACCEPTED'), eq(t.completionSource, 'none'), lte(t.endAt, now)),
+          // Marked "attended" while the appointment was still running: completed once it has ended (live Square only;
+          // sandbox bookings never complete).
+          s.environment === 'production' ? and(eq(t.ownerAttendance, 'attended'), eq(t.status, 'ACCEPTED'), eq(t.completionSource, 'none'), lte(t.endAt, now)) : undefined,
         ),
       ),
     );

@@ -423,6 +423,13 @@ export const ApplyResultSchema = z.object({
   message: z.string().max(500).optional(),
   verification: z.enum(VERIFICATIONS).optional(),
   verifiedAt: z.string().optional(),
+  /**
+   * The durable "a write was sent" marker (design §7.4.1 exactly-once): stored, conditional on `applying`, right
+   * before the write request, with the SHA-256 of the page content the write was computed from. A retry trusts only
+   * this record, never the page text alone, to decide whether an earlier attempt already wrote.
+   */
+  writeSentAt: z.string().optional(),
+  preWriteHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
 export type ApplyResult = z.infer<typeof ApplyResultSchema>;
 

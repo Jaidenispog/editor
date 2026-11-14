@@ -1,6 +1,6 @@
-import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
+import { and, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { classifyAudience, foldConsent, normaliseEmail, type AppSettings, type AudienceCandidate, type AudienceExclusion, type CampaignAudienceFilter } from '@studio/core';
-import { schema } from '@studio/db';
+import { genuinelyCompletedBookingWhere, schema } from '@studio/db';
 import type { Db } from './facts.js';
 
 /** One client in a campaign audience, included or left out with a reason. */
@@ -25,7 +25,7 @@ export async function computeAudience(db: Db, settings: AppSettings, audience: C
   const visits = await db
     .select({ customerId: schema.bookings.customerId, completedAt: schema.bookings.completedAt })
     .from(schema.bookings)
-    .where(and(eq(schema.bookings.status, 'ACCEPTED'), inArray(schema.bookings.completionSource, ['payment', 'owner_marked']), isNotNull(schema.bookings.completedAt), isNotNull(schema.bookings.customerId)));
+    .where(and(genuinelyCompletedBookingWhere(), isNotNull(schema.bookings.customerId)));
   const visitsByCustomer = new Map<string, Date[]>();
   for (const v of visits) {
     if (!v.customerId || !v.completedAt) continue;

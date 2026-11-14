@@ -12,7 +12,7 @@ import {
   type JobPayload,
   type MessageClass,
 } from '@studio/core';
-import { schema } from '@studio/db';
+import { genuinelyCompletedBookingWhere, schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import { writeWorkerAudit } from '../lib/audit.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
@@ -26,17 +26,34 @@ type Customer = typeof schema.customers.$inferSelect;
 type AutomationName = 'follow_up' | 'review_request';
 
 const DAY_MS = 86_400_000;
-/** Most bookings considered per automation per run (the next run continues). */
-const SWEEP_BATCH = 200;
+/** Most bookings considered per automation per run (the next run continues with the ones still unprocessed). */
+export const SWEEP_BATCH = 200;
 
-/** Bookings genuinely completed since `since`, with their client. */
-async function completedBookingsSince(ctx: WorkerContext, since: Date): Promise<Array<{ booking: Booking; customer: Customer | null }>> {
+/**
+ * Live-Square bookings genuinely completed since `since` that this automation has not handled yet (design §6: "with
+ * no row for the dedupe key"), oldest first, with their client. Handled bookings are excluded in SQL, so a busy week
+ * with more than {@link SWEEP_BATCH} completions never holds newer bookings back. Follow-ups only consider clients
+ * with a usable address (the others never get a row, so they would otherwise be read again on every run).
+ */
+async function completedBookingsSince(ctx: WorkerContext, since: Date, name: AutomationName): Promise<Array<{ booking: Booking; customer: Customer | null }>> {
+  const b = schema.bookings;
+  const handled =
+    name === 'review_request'
+      ? sql`not exists (select 1 from ${schema.reviewRequests} where ${schema.reviewRequests.dedupeKey} = 'review:' || ${b.id})`
+      : sql`not exists (select 1 from ${schema.emailMessages} where ${schema.emailMessages.dedupeKey} = 'follow_up:' || ${b.id})`;
   const rows = await ctx.db
-    .select({ booking: schema.bookings, customer: schema.customers })
-    .from(schema.bookings)
-    .leftJoin(schema.customers, eq(schema.bookings.customerId, schema.customers.id))
-    .where(and(eq(schema.bookings.status, 'ACCEPTED'), inArray(schema.bookings.completionSource, ['payment', 'owner_marked']), isNotNull(schema.bookings.completedAt), gte(schema.bookings.completedAt, since)))
-    .orderBy(schema.bookings.completedAt)
+    .select({ booking: b, customer: schema.customers })
+    .from(b)
+    .leftJoin(schema.customers, eq(b.customerId, schema.customers.id))
+    .where(
+      and(
+        genuinelyCompletedBookingWhere(),
+        gte(b.completedAt, since),
+        handled,
+        name === 'follow_up' ? and(isNotNull(schema.customers.email), isNull(schema.customers.deletedAt)) : undefined,
+      ),
+    )
+    .orderBy(b.completedAt, b.id)
     .limit(SWEEP_BATCH);
   return rows.filter((r) => isGenuinelyCompleted(r.booking));
 }
@@ -77,7 +94,7 @@ async function prepareForBooking(
       marketingBlock = marketingBlockFrom(facts.consent, facts.suppressions, customer.squareEmailUnsubscribed);
     }
     const eligibility = reviewEligibility({
-      evidence: { kind: 'booking', booking: { status: booking.status, completionSource: booking.completionSource, completedAt } },
+      evidence: { kind: 'booking', booking: { status: booking.status, completionSource: booking.completionSource, completedAt, squareEnvironment: booking.squareEnvironment } },
       automation: { enabledAt: automation.enabledAt ? new Date(automation.enabledAt) : null, maxAgeDays: settings.reviews.maxAgeDays },
       customer: customer ? { deleted: Boolean(customer.deletedAt), email: customer.email, reviewRequestsOptOut: customer.reviewRequestsOptOut } : null,
       lastRequestSentAt: customer ? await lastReviewRequestSentAt(ctx.db, customer.id, null) : null,
@@ -257,7 +274,7 @@ export async function handleEmailSweep(ctx: WorkerContext, run: TrackedRun, _pay
     if (name === 'review_request' && settings.email.squareSends.feedbackOrReviews === true) continue;
     const enabledAt = new Date(automation.enabledAt);
     const since = new Date(Math.max(enabledAt.getTime(), now.getTime() - settings.reviews.maxAgeDays * DAY_MS));
-    for (const item of await completedBookingsSince(ctx, since)) {
+    for (const item of await completedBookingsSince(ctx, since, name)) {
       const outcome = await prepareForBooking(ctx, settings, name, automation, item, now);
       if (outcome === 'created') counts.created++;
       if (outcome === 'skipped') counts.skipped++;

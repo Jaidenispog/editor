@@ -8,13 +8,23 @@ import { decryptOptionalCredential } from '../lib/credentials.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { loadSettings } from '../lib/plan-context.js';
 import { TransientAdapterError } from '../website/adapters/types.js';
-import { WordPressAdapter } from '../website/adapters/wordpress.js';
+import { AdapterRedirectError, WordPressAdapter } from '../website/adapters/wordpress.js';
 import { applyChange } from '../website/apply.js';
 import { defaultWebsiteDeps, type WebsiteDeps } from '../website/deps.js';
 import { WebsiteFetcher, followRedirects } from '../website/fetcher.js';
+import { createGuardedFetch } from '../website/guarded-fetch.js';
+import { BlockedHostError, resolveSafeAddress, systemResolver } from '../website/ssrf.js';
 
 /** Plain message when the editing connection is not usable. */
 export const CONNECTION_NEEDS_ATTENTION = 'Your website editing connection needs attention. Check it in Settings → Integrations.';
+
+/**
+ * The HTTP context for WordPress calls: the SSRF-guarded, address-pinned transport (no redirects followed), unless a
+ * test injected its own fake `fetch`.
+ */
+export function wordPressContext(ctx: WorkerContext, deps: Pick<WebsiteDeps, 'fetchPolicy'>): Pick<WorkerContext, 'fetch' | 'logger'> {
+  return { logger: ctx.logger, fetch: ctx.fetch ?? createGuardedFetch(deps.fetchPolicy) };
+}
 
 /** Splits the stored `username:applicationPassword` credential. */
 export function splitWordPressCredential(plain: string): { username: string; applicationPassword: string } | null {
@@ -52,6 +62,13 @@ export async function handleWebsiteEditApply(
     await run.message('This change is not waiting to be applied');
     return;
   }
+  // The durable "a write was sent" record (design §7.4.1): kept across retries and failures, so a later attempt can
+  // tell a write that landed from one that never did.
+  const stored = edit.applyResult;
+  let marker: Pick<ApplyResult, 'writeSentAt' | 'preWriteHash' | 'resourceId' | 'resourceType'> | null =
+    stored.writeSentAt && stored.preWriteHash && stored.resourceId
+      ? { writeSentAt: stored.writeSentAt, preWriteHash: stored.preWriteHash, resourceId: stored.resourceId, ...(stored.resourceType ? { resourceType: stored.resourceType } : {}) }
+      : null;
   const fail = async (outcome: NonNullable<ApplyResult['outcome']>, message: string, extra: Partial<ApplyResult> = {}) => {
     await ctx.db
       .update(t)
@@ -59,7 +76,7 @@ export async function handleWebsiteEditApply(
         status: 'apply_failed',
         statusReason: outcome,
         statusMessage: message,
-        applyResult: { adapter: 'wordpress', outcome, message, ...extra },
+        applyResult: { adapter: 'wordpress', outcome, message, ...extra, ...(marker ?? {}) },
         updatedAt: deps.now(),
       })
       .where(eq(t.id, edit.id));
@@ -96,8 +113,16 @@ export async function handleWebsiteEditApply(
     await fail('auth', CONNECTION_NEEDS_ATTENTION);
     throw new NonRetryableError('INTEGRATION_NOT_CONFIGURED', CONNECTION_NEEDS_ATTENTION);
   }
+  // The same address guard as the read-only check, here too: the address (or its DNS) may have changed since.
+  try {
+    await resolveSafeAddress(new URL(baseUrl).hostname, deps.fetchPolicy, deps.fetchPolicy.resolver ?? systemResolver);
+  } catch (err) {
+    const message = err instanceof BlockedHostError && err.reason === 'unresolvable' ? `The WordPress address could not be found, so nothing was changed.` : 'The WordPress address points to a private or reserved address, so nothing was changed.';
+    await fail('error', message);
+    throw new NonRetryableError('VALIDATION', message);
+  }
   const settings = await loadSettings(ctx);
-  const adapter = new WordPressAdapter(ctx, {
+  const adapter = new WordPressAdapter(wordPressContext(ctx, deps), {
     baseUrl,
     ...cred,
     publicWebsite: settings.business.website,
@@ -116,7 +141,20 @@ export async function handleWebsiteEditApply(
   };
   try {
     await run.progress(0.2, 'Applying the change through WordPress…');
-    const attempt = await applyChange(adapter, change.data, run.signal, readPublic);
+    const attempt = await applyChange(adapter, change.data, run.signal, readPublic, {
+      prior: marker?.preWriteHash && marker.resourceId ? { resourceId: marker.resourceId, preWriteHash: marker.preWriteHash } : null,
+      beforeWrite: async (target, preWriteHash) => {
+        const next = { writeSentAt: deps.now().toISOString(), preWriteHash, resourceId: target.resourceId, resourceType: target.resourceType };
+        // Only while this attempt still holds the change: a row moved on meanwhile is never written.
+        const rows = await ctx.db
+          .update(t)
+          .set({ applyResult: { adapter: 'wordpress', ...next }, updatedAt: deps.now() })
+          .where(and(eq(t.id, edit.id), eq(t.status, 'applying')))
+          .returning({ id: t.id });
+        if (rows.length) marker = next;
+        return rows.length > 0;
+      },
+    });
     const now = deps.now();
     const resultBase: ApplyResult = {
       adapter: 'wordpress',
@@ -133,9 +171,11 @@ export async function handleWebsiteEditApply(
     if (attempt.outcome === 'applied' || attempt.outcome === 'already_applied') {
       const verification = attempt.verification ?? 'confirmed_api';
       const message =
-        verification === 'confirmed_public'
-          ? 'Changed on your website. Confirmed through WordPress and visible on the public page.'
-          : 'Changed on your website. Confirmed through WordPress; not visible on the public page yet (your site may cache pages for a while).';
+        attempt.outcome === 'already_applied' && !attempt.earlierWrite
+          ? 'Your website already shows this, so nothing needed changing.'
+          : verification === 'confirmed_public'
+            ? 'Changed on your website. Confirmed through WordPress and visible on the public page.'
+            : 'Changed on your website. Confirmed through WordPress; not visible on the public page yet (your site may cache pages for a while).';
       await ctx.db
         .update(t)
         .set({
@@ -161,6 +201,7 @@ export async function handleWebsiteEditApply(
           entityId: edit.id,
           data: {
             outcome: attempt.outcome,
+            earlierWrite: attempt.earlierWrite,
             kind: change.data.kind,
             pageUrl: change.data.pageUrl,
             before: 'before' in change.data ? change.data.before : null,
@@ -187,6 +228,10 @@ export async function handleWebsiteEditApply(
       // Owner cancel or shutdown: the claim is released only if nothing was written yet; a retry re-reads first.
       if (!run.willRetry) await fail('error', 'Applying was stopped. Nothing was changed unless the page shows the new text; check again before retrying.');
       throw err;
+    }
+    if (err instanceof AdapterRedirectError) {
+      await fail('error', err.message);
+      throw new NonRetryableError('PROCESSING_FAILED', err.message);
     }
     if (err instanceof TransientAdapterError) {
       if (!run.willRetry) {

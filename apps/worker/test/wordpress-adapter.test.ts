@@ -2,7 +2,7 @@ import pino from 'pino';
 import { describe, expect, it } from 'vitest';
 import type { WebsiteChange } from '@studio/core';
 import { WP_MESSAGES, WordPressAdapter } from '../src/website/adapters/wordpress.js';
-import { applyChange, computeNextContent } from '../src/website/apply.js';
+import { CHANGED_SINCE_EARLIER_WRITE, applyChange, computeNextContent, contentHash, type PriorWrite, type WriteRecord } from '../src/website/apply.js';
 import { fakeWordPress } from './fakes/wordpress.js';
 
 const logger = pino({ level: 'silent' });
@@ -36,6 +36,21 @@ function adapterFor(wp: ReturnType<typeof fakeWordPress>, password = 'abcd efgh 
   );
 }
 const replace = (before: string, after: string, page = 'https://ivanhoebarber.example.com.au/contact/'): WebsiteChange => ({ kind: 'text_replace', pageUrl: page, before, after });
+
+/** An in-memory stand-in for the row's durable "write sent" marker (website-edit-apply stores it on the edit). */
+function memoryRecord(): WriteRecord & { saved: PriorWrite | null } {
+  const r: WriteRecord & { saved: PriorWrite | null } = {
+    saved: null,
+    get prior() {
+      return r.saved;
+    },
+    beforeWrite: async (target, preWriteHash) => {
+      r.saved = { resourceId: target.resourceId, preWriteHash };
+      return true;
+    },
+  };
+  return r;
+}
 
 describe('WordPress adapter (fake REST API)', () => {
   it('check is read-only, reports the user, rights and a staging site when the host differs', async () => {
@@ -93,20 +108,76 @@ describe('WordPress adapter (fake REST API)', () => {
     const wp = fakeWordPress({ base: BASE, items: [contact] });
     const a = adapterFor(wp);
     const change = replace('(03) 9876 5432', '03 9499 1234');
-    const first = await applyChange(a, change, signal, async () => null);
+    const record = memoryRecord();
+    const first = await applyChange(a, change, signal, async () => null, record);
     expect(first).toMatchObject({
       outcome: 'applied',
       verification: 'confirmed_api',
       wrote: true,
     });
+    expect(record.saved).toEqual({ resourceId: '12', preWriteHash: contentHash(contact.raw) });
     expect(wp.state.items[0]?.raw).toContain('Phone 03 9499 1234.');
-    const second = await applyChange(a, change, signal, async () => '<p>Phone 03 9499 1234.</p>');
+    const second = await applyChange(a, change, signal, async () => '<p>Phone 03 9499 1234.</p>', record);
     expect(second).toMatchObject({
       outcome: 'already_applied',
       verification: 'confirmed_public',
       wrote: false,
+      earlierWrite: true,
     });
     expect(wp.state.writes).toHaveLength(1);
+  });
+
+  it('a deletion whose write landed is recognised on the retry from the stored marker (never a false conflict)', async () => {
+    const wp = fakeWordPress({ base: BASE, items: [{ ...contact, raw: '<p>Hello. Call us now!</p>' }] });
+    const change = replace('Call us now!', '');
+    const record = memoryRecord();
+    // The write lands, then reading it back fails (a time-out after WordPress committed): the job retries.
+    const a = adapterFor(wp);
+    const readBack = a.readBack.bind(a);
+    let failRead = true;
+    a.readBack = async (t, sig) => {
+      if (failRead) {
+        failRead = false;
+        throw new Error('timed out');
+      }
+      return readBack(t, sig);
+    };
+    await expect(applyChange(a, change, signal, async () => null, record)).rejects.toThrow(/timed out/);
+    expect(wp.state.items[0]?.raw).toBe('<p>Hello. </p>');
+    const retry = await applyChange(a, change, signal, async () => null, record);
+    expect(retry).toMatchObject({ outcome: 'already_applied', wrote: false, earlierWrite: true });
+    expect(wp.state.writes).toHaveLength(1);
+    // Without the marker the same content is a conflict that says nothing was changed, which would be false here.
+    expect(computeNextContent(change, '<p>Hello. </p>').kind).toBe('conflict');
+  });
+
+  it('never reports "already applied" on a first attempt just because the new text appears somewhere', async () => {
+    const expansion = replace('Ivanhoe', 'Ivanhoe VIC 3079');
+    const page = '<h1>Barber in Ivanhoe</h1><p>Find us at 12 Upper Heidelberg Rd, Ivanhoe VIC 3079</p>';
+    // The old text appears twice (once inside the new text): a conflict, never a silent "Changed on your website".
+    expect(computeNextContent(expansion, page)).toMatchObject({ kind: 'conflict', message: expect.stringMatching(/more than once/) });
+    const once = replace('Book online', 'Book online today');
+    const elsewhere = '<p>Book online</p><p>Book online today for a fade.</p>';
+    expect(computeNextContent(once, elsewhere).kind).toBe('conflict');
+    expect(computeNextContent(once, '<p>Book online</p>')).toEqual({ kind: 'next', content: '<p>Book online today</p>' });
+    const wp = fakeWordPress({ base: BASE, items: [{ ...contact, raw: page }] });
+    expect(await applyChange(adapterFor(wp), expansion, signal, async () => null)).toMatchObject({ outcome: 'conflict', wrote: false });
+    expect(wp.state.writes).toEqual([]);
+  });
+
+  it('with a marker: unchanged content means the earlier write never landed (written again); other changes are a conflict', async () => {
+    const change = replace('(03) 9876 5432', '03 9499 1234');
+    const prior = { preWriteHash: contentHash(contact.raw) };
+    expect(computeNextContent(change, contact.raw, prior)).toEqual({ kind: 'next', content: contact.raw.replace('(03) 9876 5432', '03 9499 1234') });
+    expect(computeNextContent(change, '<p>Phone 9999 0000.</p>', prior)).toEqual({ kind: 'conflict', message: CHANGED_SINCE_EARLIER_WRITE });
+    expect(computeNextContent(change, '<p>Phone 03 9499 1234.</p>', prior)).toEqual({ kind: 'already_applied' });
+  });
+
+  it('writes nothing when the marker cannot be stored (the change was taken back meanwhile)', async () => {
+    const wp = fakeWordPress({ base: BASE, items: [contact] });
+    const refused: WriteRecord = { prior: null, beforeWrite: async () => false };
+    expect(await applyChange(adapterFor(wp), replace('(03) 9876 5432', '03 9499 1234'), signal, async () => null, refused)).toMatchObject({ outcome: 'error', wrote: false });
+    expect(wp.state.writes).toEqual([]);
   });
 
   it('gives a conflict when the old text is missing or appears twice, and never writes', async () => {

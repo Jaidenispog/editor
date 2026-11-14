@@ -6,7 +6,7 @@ import { defaultRefId } from '../src/lib/jobs';
 import { consumeOAuthState, createOAuthState, oauthStateCookieName } from '../src/lib/oauth-state';
 import { attendanceMarkAllowed } from '../src/lib/shared/square-dto';
 import { buildSquareAuthUrl, squareRedirectUri } from '../src/lib/square/oauth';
-import { squareNotificationUrl, squareSignature, verifySquareSignature } from '../src/lib/square/webhook';
+import { squareNotificationUrl, squareSignature, squareWebhookEnvelope, verifySquareSignature } from '../src/lib/square/webhook';
 import { WORDING_CASES } from './integration-wording-cases';
 
 describe('Square webhook signature', () => {
@@ -92,5 +92,24 @@ describe('Square helpers', () => {
     expect(defaultRefId('square.availability', { searchId: 's1' })).toBe('s1');
     expect(defaultRefId('square.refresh', { entity: 'booking', squareId: 'B1' })).toBe('B1');
     expect(defaultRefId('square.sync', { reason: 'manual' })).toBeNull();
+  });
+});
+
+describe('squareWebhookEnvelope', () => {
+  it('keeps only what the worker needs to re-read the object, never Square’s copy of a client', () => {
+    const event = {
+      merchant_id: 'M1',
+      type: 'customer.updated',
+      event_id: 'evt-9',
+      created_at: '2026-11-14T00:00:00Z',
+      data: { type: 'customer', id: 'CUST_1', object: { customer: { given_name: 'Jordan', email_address: 'jordan@example.com', phone_number: '+61400000000', address: { address_line_1: '1 Main St' }, note: 'VIP' } } },
+    };
+    const env = squareWebhookEnvelope(event);
+    expect(env).toEqual({ event_id: 'evt-9', type: 'customer.updated', merchant_id: 'M1', created_at: '2026-11-14T00:00:00Z', data: { type: 'customer', id: 'CUST_1' } });
+    expect(JSON.stringify(env)).not.toMatch(/Jordan|jordan@|\+614|Main St|VIP/);
+  });
+  it('copes with a missing or odd data block', () => {
+    expect(squareWebhookEnvelope({ event_id: 'e', type: 't', merchant_id: 'm' })).toEqual({ event_id: 'e', type: 't', merchant_id: 'm', created_at: null, data: { type: null, id: null } });
+    expect(squareWebhookEnvelope({ event_id: 'e', type: 't', merchant_id: 'm', data: 'x' })).toMatchObject({ data: { type: null, id: null } });
   });
 });

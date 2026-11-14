@@ -254,18 +254,18 @@ All times are ISO UTC with a Melbourne `…Label` beside them. Types in `apps/we
 | GET | `/api/integrations/square/connect?access=read` | Owner. 302 to Square's authorise page (code flow, read scopes, `session=false`); state in a 10-minute HttpOnly cookie on `/api/integrations/square`. 409 when the server keys are missing; `access=write` → 422 until booking changes exist |
 | GET | `/api/integrations/square/callback?code&state[&error]` | Owner, same session. One code exchange (10 s, no retry); another environment's or account's copied data is purged first; tokens stored encrypted; queues `square.sync { reason: 'connect' }`; 302 to `/settings?tab=integrations&square=checking` (or `square_error=…`) |
 | GET | `/api/integrations/square` | Signed in. `SquareStatusDto`: `state` (shared union), `liveMode` (`sandbox`/`live`), `dataEnvironment`, location choice, last sync, stale flag, webhooks line, booking-changes checklist (read-only), services with labels, team, latest sync job; owner-only `details` (merchant id, scopes, access expiry). Never tokens |
-| PATCH | `/api/integrations/square` | Owner. `{ locationId?, serviceConfirmation?: { variationId, confirmed }, writesEnabled? }` → `SquareStatusDto`. `writesEnabled: true` → 409 (not available yet) |
-| DELETE | `/api/integrations/square` | Owner. `{ purgeData }` → `{ status: 'disconnected', revokeJobId, purged }`. Tokens wiped; with `purgeData` bookings deleted and Square clients scrubbed (never deleted); queues `square.revoke` |
+| PATCH | `/api/integrations/square` | Owner. `{ locationId?, serviceConfirmation?: { variationId, confirmed }, writesEnabled? }` → `SquareStatusDto`. `writesEnabled: true` → 409 (not available yet). Choosing a location deletes the copied bookings of every other location (audit `otherLocationBookingsRemoved`) and queues a sync |
+| DELETE | `/api/integrations/square` | Owner. `{ purgeData }` → `{ status: 'disconnected', revokeJobId, purged }`. Tokens wiped; with `purgeData` bookings and stored Square webhook deliveries deleted and Square clients scrubbed (never deleted), under the connection row's lock so a running job cannot write them back; queues `square.revoke` (skipped if the same account is reconnected before it runs) |
 | POST | `/api/integrations/square/sync` | Owner. → `{ jobId }` (`square.sync { reason: 'manual' }`). 409 when not connected |
-| GET | `/api/appointments?view=upcoming\|confirm\|past&from&days&cursor` | Signed in. `{ bookings: BookingDto[], nextCursor, environment, syncedAt }` from the local copy (upcoming: today + 31 days; confirm: ended ACCEPTED bookings of the last 14 days still needing a word; past: 90 days) |
+| GET | `/api/appointments?view=upcoming\|confirm\|past&from&days&cursor` | Signed in. `{ bookings: BookingDto[], nextCursor, environment, syncedAt }` from the local copy, for the studio's Square location only (empty while the owner still has to choose one) (upcoming: today + 31 days; confirm: ended ACCEPTED bookings of the last 14 days still needing a word; past: 90 days). Past bookings carry `reviewRequest { status, label }` ("Review request: Skipped — …") or null |
 | GET | `/api/appointments/[id]` | Signed in. `BookingDetailDto` (evidence, "Open in Square" link with a one-line instruction; notes, email and phone only for the owner) |
-| POST | `/api/appointments/[id]/attendance` | Owner or staff. `{ value: 'attended' \| 'not_attended' \| null }` → `BookingDto`. 409 on Square `NO_SHOW`/cancelled/declined/pending or before the start. Sets `completed_at`/`completion_source` (`owner_marked`) once the appointment has ended; audit `booking.attendance_marked` |
+| POST | `/api/appointments/[id]/attendance` | Owner or staff. `{ value: 'attended' \| 'not_attended' \| null }` → `BookingDto`. 409 on Square `NO_SHOW`/cancelled/declined/pending or before the start. Sets `completed_at`/`completion_source` (`owner_marked`) once the appointment has ended, for live Square bookings only (a sandbox booking keeps the label but never counts as completed); audit `booking.attendance_marked` |
 | GET | `/api/appointments/clients?q&cursor` | Signed in. `{ clients: ClientDto[], nextCursor }`; email and phone (and searching by them) only for the owner |
 | GET | `/api/appointments/clients/[id]` | Signed in. `ClientDto` + bookings |
 | GET | `/api/appointments/services` | Signed in. `{ services, teamMembers }` with the per-service label (`bookable`, `needs_confirmation`, `book_in_square`, `unverified`, `not_bookable`) |
 | POST | `/api/appointments/availability` | Signed in. `{ serviceVariationId, teamMemberId?, fromDate: 'YYYY-MM-DD', days: 1..14 }` → `{ searchId, jobId }`. 400 for an unknown service or a day before today (Melbourne) |
 | GET | `/api/appointments/availability/[searchId]` | Signed in. `{ status, slots: [{ startAt, dayLabel, startLabel, endLabel, teamMemberName, … }], fetchedAt, fetchedLabel, stale, error }` |
-| POST | `/api/webhooks/square` | Public, no CSRF. HMAC-SHA256 of `notification URL + raw body` (timing-safe); invalid → 401 and not stored; valid → stored once per `event_id` and `webhook.process` queued; 404 when `SQUARE_WEBHOOK_SIGNATURE_KEY` is unset |
+| POST | `/api/webhooks/square` | Public, no CSRF. HMAC-SHA256 of `notification URL + raw body` (timing-safe); invalid → 401 and not stored; valid → stored once per `event_id` as a minimal envelope (`event_id`, `type`, `merchant_id`, `created_at`, `data: { type, id }`; Square's copy of the object is dropped) and `webhook.process` queued; 404 when `SQUARE_WEBHOOK_SIGNATURE_KEY` is unset |
 
 Jobs (worker, all read-only towards Square): `square.sync { reason: connect|schedule|manual|reconcile }` (token status,
 snapshot, bookings in ≤ 31-day windows, reconcile, customers, then `square.attendance`; `stately`; crons every 10
@@ -302,7 +302,7 @@ reasons in `details` (`path` = reason code).
 | GET / PATCH | `/api/email/campaigns/[id]` | Owner. PATCH only while `draft` |
 | POST | `/api/email/campaigns/[id]/audience-preview` | Owner. `{ search? }` → `{ included, excluded, byReason, rows, audienceHash, schedule }` |
 | POST | `/api/email/campaigns/[id]/approve` | Owner. `{ audienceHash, confirmConsent: true }`; 409 when the audience or content changed since the preview; queues `email.campaign.expand` |
-| POST | `/api/email/campaigns/[id]/pause` · `/resume` · `/cancel` | Owner. Cancel stops every unsent message |
+| POST | `/api/email/campaigns/[id]/pause` · `/resume` · `/cancel` | Owner. Each runs under the campaign row's lock, which expansion also takes, so no message is prepared after a pause or cancel. Pause hands queued, unsubmitted messages back to `approved`; resume expands again (adding nothing twice) when expansion had not finished; cancel stops every unsent message |
 | POST | `/api/email/suppressions/[id]/lift` | Owner. `{ note, confirm }`: bounces need "the address was corrected"; complaints need new express consent after the complaint and "they asked to hear from us again"; unsubscribes are only reversed by new consent (409) |
 | GET / POST | `/api/customers` | GET Staff+ `?q&permission=express\|none\|unsubscribed\|suppressed`. POST Owner `{ givenName, familyName?, email, phone? }` (409 on a duplicate address) |
 | PATCH | `/api/customers/[id]` | Owner. Manual clients only (Square clients: notes only) |
@@ -321,7 +321,9 @@ reasons in `details` (`path` = reason code).
 | GET | `/r/[token]` | Public. Counts a known token's open, then always 302 to the same saved review link (every token, valid or not) |
 
 Jobs: `email.send` (`stately`, key `email-send:{id}`), `email.dispatch` (every minute), `email.automation.sweep` (every
-10 minutes), `email.campaign.expand`, `email.provider.check` (daily 4:37 am Melbourne, read-only), `email.suppression.push`,
+10 minutes), `email.campaign.expand`, `email.provider.check` (daily 4:37 am Melbourne, plus once at worker start-up when
+email is configured and the last check is over 10 minutes old, singleton key `email-provider-check:startup`; read-only),
+`email.suppression.push`,
 `reviews.places.sync` (daily 5:41 am, read-only); `webhook.process` handles provider `postmark`. Job payloads hold ids only.
 
 ## Website and local search (Stage C, WP8)
@@ -340,20 +342,20 @@ apply internals beyond `outcome`, `message` and `verification`. Shapes: `apps/we
 | GET | `/api/website/audits/[id]` | — | `{ audit, result, fixedSinceLast }` (older checks keep only their summary) |
 | GET | `/api/website/edits` | `?status=open\|done\|dismissed` | `{ edits: WebsiteEditDto[] }` with `applyAvailable { ok, reason }`, copy-paste `instructions { text, markdown }`, AI options, verification |
 | POST | `/api/website/edits` | `{ kind: 'image_alt_text', pageUrl, imageSrc, after }` or `{ kind: 'text_replace', pageUrl, before, after }` | 201 `{ edit }`; the page must be in the latest check and `before` in its stored facts; 409 when an open change already exists |
-| PATCH | `/api/website/edits/[id]` | `{ after }` | `{ edit, warnings }`; kind limits (titles 10–70, descriptions 50–170); `checkCopyClaims` warnings are soft for the owner's text; source → `owner` |
+| PATCH | `/api/website/edits/[id]` | `{ after }` | `{ edit, warnings }`; kind limits (titles 10–70, descriptions 50–170); `checkCopyClaims` warnings are soft for the owner's text; source → `owner`. 409 when the change was claimed for applying meanwhile (also for `choose-draft`) |
 | POST | `/api/website/edits/[id]/draft` | `{}` | 202 `{ job }` (`website.copy_draft`); 422 when AI isn't configured or the kind isn't a title/description |
 | POST | `/api/website/edits/[id]/choose-draft` | `{ index: 0..2 }` | `{ edit }` (source `ai_draft`, always labelled) |
 | POST | `/api/website/edits/[id]/apply` | `{ confirm: true, expectedAfter }` | 202 `{ edit, job }`; 409 when the wording changed since the dialog opened; 422 without a connected adapter or for an unsupported kind. Sets `approved_by/at`; audit `website.edit.apply_requested` |
 | POST | `/api/website/edits/[id]/mark-done` | `{}` | `{ edit }`: `applied`, `applied_via = 'manual'`, verification `pending` (the next check confirms it) |
 | POST | `/api/website/edits/[id]/reject` | `{ reason? }` | `{ edit }` |
-| POST | `/api/website/edits/[id]/undo` | `{}` | 201 `{ edit }`: the reverse change (source `undo`), applied with the normal confirmation; only for WordPress-applied text and image descriptions |
+| POST | `/api/website/edits/[id]/undo` | `{}` | 201 `{ edit }`: the reverse change (source `undo`), applied with the normal confirmation; only for WordPress-applied text and image descriptions (not for a removal, whose reverse could never find the text: 422) |
 | GET | `/api/website/search-performance` | `?range=28d\|3m\|16m` | `SearchPerformanceDto`: `state` (not_configured / not_connected / choose_property / no_property / syncing / no_data / connected / needs_reauth / error), groups (brand, local, service, other) with impression-weighted average position, the "not listed" remainder, daily series, top 20 searches per group, `dataThrough`. Grouping happens when reading; no numbers unless Google returned rows |
 | POST | `/api/website/search-performance/sync` | `{ source: 'search_console' }` | 202 `{ job }`; 429 within 15 minutes of the last sync |
 | PUT | `/api/website/query-groups` | `{ brandTerms?, placeTerms?, serviceTerms? }` | `{ website }` |
 | PUT | `/api/integrations/google-search-console/property` | `{ siteUrl }` (one of the readable listed properties) | `{ property, job }` + queues `search.sync` (`connect`) |
 | POST | `/api/integrations/google-search-console/check` | `{}` | 202 `{ job }` (read-only) |
 | DELETE | `/api/integrations/google-search-console` | `?deleteData=true\|false` | 202; status `disconnected`, queues the shared `google.disconnect`, optionally deletes stored search numbers |
-| POST | `/api/integrations/website/wordpress` | `{ baseUrl (https), username, applicationPassword }` | 202 `{ state: 'checking', job }`; the credential is encrypted and never echoed |
+| POST | `/api/integrations/website/wordpress` | `{ baseUrl (https), username, applicationPassword }` | 202 `{ state: 'checking', job }`; the credential is encrypted and never echoed. 400 for a non-443 port, a private or reserved IP address, `localhost` or a local network name |
 | POST | `/api/integrations/website/check` | `{}` | 202 `{ job }` (read-only) |
 | DELETE | `/api/integrations/website` | — | 204; wipes the credential; approved changes go back to "To review" |
 

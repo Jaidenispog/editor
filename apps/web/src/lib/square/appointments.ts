@@ -12,12 +12,14 @@ import {
   attendanceLabel,
   deriveAttendance,
   deriveCompletion,
+  effectiveLocationId,
   isMelbourneDate,
   mapBookingStatus,
   melbourneDateOf,
   melbourneDayRange,
   newId,
   parseSquareConfig,
+  reviewRequestBadgeLabel,
   type Attendance,
   type OwnerAttendance,
   type PaymentMatch,
@@ -59,12 +61,26 @@ export function dayLabel(at: Date, now: Date = new Date()): string {
   return base;
 }
 
-/** The environment whose copied data is shown: the connection's own (even after the server switched). */
-async function dataEnvironment(db: Database): Promise<{ environment: 'sandbox' | 'production'; config: SquareConnectionConfig } | null> {
+/**
+ * The environment whose copied data is shown (the connection's own, even after the server switched) and the studio's
+ * Square location (the owner's choice, or the only active one; null while the owner still has to choose).
+ */
+async function dataEnvironment(db: Database): Promise<{ environment: 'sandbox' | 'production'; config: SquareConnectionConfig; locationId: string | null } | null> {
   const conn = await loadSquareConnection(db);
   if (!conn || conn.status === 'disconnected' || conn.status === 'not_configured') return null;
   const config = parseSquareConfig(conn.config);
-  return { environment: config.environment, config };
+  return { environment: config.environment, config, locationId: effectiveLocationId(config) };
+}
+
+/** Bookings shown: the connection's environment at the studio's location only (nothing while none is chosen). */
+function shownBookings(data: { environment: 'sandbox' | 'production'; locationId: string | null }) {
+  const t = schema.bookings;
+  return and(eq(t.squareEnvironment, data.environment), data.locationId ? eq(t.locationId, data.locationId) : sql`false`);
+}
+
+/** True when a stored booking belongs to what is shown. */
+function isShown(row: BookingRow, data: { environment: 'sandbox' | 'production'; locationId: string | null } | null): boolean {
+  return Boolean(data && row.squareEnvironment === data.environment && data.locationId && row.locationId === data.locationId);
 }
 
 function clientName(c: Pick<CustomerRow, 'givenName' | 'familyName'> | null | undefined): string {
@@ -80,6 +96,16 @@ async function toBookingDtos(db: Database, rows: BookingRow[], config: SquareCon
   const markers = markerIds.length ? await db.select({ id: schema.users.id, displayName: schema.users.displayName }).from(schema.users).where(inArray(schema.users.id, markerIds)) : [];
   const byCustomer = new Map(customers.map((c) => [c.id, c]));
   const byMarker = new Map(markers.map((m) => [m.id, m.displayName]));
+  // The latest review request of each past booking (the Appointments badge).
+  const pastIds = rows.filter((r) => r.startAt.getTime() <= now.getTime()).map((r) => r.id);
+  const requests = pastIds.length
+    ? await db
+        .select({ bookingId: schema.reviewRequests.bookingId, status: schema.reviewRequests.status, skipReason: schema.reviewRequests.skipReason })
+        .from(schema.reviewRequests)
+        .where(inArray(schema.reviewRequests.bookingId, pastIds))
+        .orderBy(asc(schema.reviewRequests.createdAt))
+    : [];
+  const byBookingRequest = new Map(requests.map((q) => [q.bookingId, q]));
   const team = new Map((config?.snapshot?.teamMembers ?? []).map((t) => [t.id, t.displayName]));
   return rows.map((r) => {
     const endAt = r.endAt ?? new Date(r.startAt.getTime() + r.durationMinutes * 60_000);
@@ -111,6 +137,10 @@ async function toBookingDtos(db: Database, rows: BookingRow[], config: SquareCon
       attendanceIsEstimate: ['awaiting_payment', 'payment_matched', 'possible_match', 'no_payment_matched'].includes(attendance),
       missingFromSquare: r.missingFromSquareAt !== null,
       attendanceMark: { allowed: mark.allowed, reason: mark.reason, current: (r.ownerAttendance ?? null) as 'attended' | 'not_attended' | null },
+      reviewRequest: (() => {
+        const q = byBookingRequest.get(r.id);
+        return q ? { status: q.status, label: reviewRequestBadgeLabel(q.status, q.skipReason) } : null;
+      })(),
     };
   });
 }
@@ -129,7 +159,7 @@ export async function listBookings(input: { view: BookingView; from?: string | u
   if (!data) return { bookings: [] as BookingDto[], nextCursor: null as string | null, environment: null, syncedAt: null };
   const t = schema.bookings;
   const offset = Math.max(0, Number.parseInt(input.cursor ?? '0', 10) || 0);
-  const env = eq(t.squareEnvironment, data.environment);
+  const env = shownBookings(data);
   let where;
   let order;
   if (input.view === 'upcoming') {
@@ -182,7 +212,7 @@ function createdIn(raw: Record<string, unknown>): string {
 export async function getBookingDetail(id: string, user: SessionUser, db: Database = getDb(), now: Date = new Date()): Promise<BookingDetailDto> {
   const data = await dataEnvironment(db);
   const row = await db.query.bookings.findFirst({ where: eq(schema.bookings.id, id) });
-  if (!row || !data || row.squareEnvironment !== data.environment) throw new AppError('NOT_FOUND', 'That booking is not in Studio Assistant’s copy of your Square bookings.');
+  if (!row || !data || !isShown(row, data)) throw new AppError('NOT_FOUND', 'That booking is not in Studio Assistant’s copy of your Square bookings.');
   const [dto] = await toBookingDtos(db, [row], data.config, now);
   if (!dto) throw new AppError('NOT_FOUND', 'That booking could not be read.');
   const owner = user.role === 'owner';
@@ -210,7 +240,7 @@ export async function getBookingDetail(id: string, user: SessionUser, db: Databa
 export async function markAttendance(id: string, value: OwnerAttendance | null, user: SessionUser, db: Database = getDb(), now: Date = new Date()): Promise<BookingDto> {
   const data = await dataEnvironment(db);
   const row = await db.query.bookings.findFirst({ where: eq(schema.bookings.id, id) });
-  if (!row || !data || row.squareEnvironment !== data.environment) throw new AppError('NOT_FOUND', 'That booking is not in Studio Assistant’s copy of your Square bookings.');
+  if (!row || !data || !isShown(row, data)) throw new AppError('NOT_FOUND', 'That booking is not in Studio Assistant’s copy of your Square bookings.');
   const allowed = attendanceMarkAllowed(row.status, row.startAt, now);
   if (!allowed.allowed) throw new AppError('CONFLICT', allowed.reason ?? 'This booking cannot be marked.');
   const endAt = row.endAt ?? new Date(row.startAt.getTime() + row.durationMinutes * 60_000);
@@ -218,7 +248,8 @@ export async function markAttendance(id: string, value: OwnerAttendance | null, 
   const match = (ev.kind === 'strong' || ev.kind === 'weak') && typeof ev.paymentId === 'string' ? (ev as PaymentMatch) : null;
   // Marked while the appointment is still running: completion follows once it has ended (the worker's attendance pass).
   const attendance = deriveAttendance({ status: row.status, endAt, ownerAttendance: value, missingFromSquareAt: row.missingFromSquareAt, match }, now);
-  const completion = deriveCompletion({ status: row.status, endAt, missingFromSquareAt: row.missingFromSquareAt, ownerAttendance: value, attendance, completedAt: row.completedAt }, now);
+  // Sandbox (test) bookings keep the label but never count as completed, so a test mark cannot start a real email.
+  const completion = deriveCompletion({ status: row.status, endAt, missingFromSquareAt: row.missingFromSquareAt, ownerAttendance: value, attendance, completedAt: row.completedAt, environment: row.squareEnvironment }, now);
   const previous = row.ownerAttendance ?? null;
   const [updated] = await db
     .update(schema.bookings)
@@ -270,7 +301,7 @@ export async function getClient(id: string, user: SessionUser, db: Database = ge
   const data = await dataEnvironment(db);
   const row = await db.query.customers.findFirst({ where: and(eq(schema.customers.id, id), isNull(schema.customers.deletedAt)) });
   if (!row || !data || row.squareEnvironment !== data.environment) throw new AppError('NOT_FOUND', 'That client is not in Studio Assistant’s copy of your Square clients.');
-  const bookings = await db.select().from(schema.bookings).where(and(eq(schema.bookings.customerId, row.id), eq(schema.bookings.squareEnvironment, data.environment))).orderBy(desc(schema.bookings.startAt)).limit(100);
+  const bookings = await db.select().from(schema.bookings).where(and(eq(schema.bookings.customerId, row.id), shownBookings(data))).orderBy(desc(schema.bookings.startAt)).limit(100);
   return { ...toClientDto(row, user.role === 'owner'), bookings: await toBookingDtos(db, bookings, data.config, now) };
 }
 

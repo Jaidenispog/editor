@@ -25,7 +25,17 @@ export async function handleSquareAvailability(ctx: WorkerContext, run: TrackedR
     await ctx.db.update(t).set({ status: 'failed', error: message }).where(eq(t.id, search.id));
   };
   await ctx.db.update(t).set({ status: 'running' }).where(and(eq(t.id, search.id), inArray(t.status, ['queued', 'running'])));
-  const s = await openSquare(ctx, run);
+  let s: Awaited<ReturnType<typeof openSquare>>;
+  try {
+    s = await openSquare(ctx, run);
+  } catch (err) {
+    // A refused token refresh, a decryption or database failure: the search must not stay "running" for ever, and the
+    // card shows the error on the final attempt (failSquareJob).
+    if (err instanceof CancelledError) throw err;
+    const forGood = !run.willRetry || err instanceof NonRetryableError || (err instanceof SquareApiError && err.kind !== 'transient' && err.kind !== 'rate_limited');
+    if (forGood) await fail(err instanceof NonRetryableError && err.code === 'UNAUTHORISED' ? 'Square needs you to reconnect.' : AVAILABILITY_FAILED_MESSAGE);
+    return failSquareJob(ctx, run, err, 'Availability search failed');
+  }
   if ('skip' in s) {
     await fail(s.skip);
     await run.progress(1, s.skip);

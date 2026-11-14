@@ -453,6 +453,14 @@ export interface ProviderReadiness {
   sandbox: boolean;
 }
 
+/**
+ * Commercial email needs working bounce, complaint and unsubscribe webhooks (Spam Act: an unsubscribe must take
+ * effect): found by the provider check, or attested by the owner when the check could not tell.
+ */
+export function webhooksReadyForCommercial(p: Pick<ProviderReadiness, 'webhooksConfigured' | 'webhooksAttested'>): boolean {
+  return p.webhooksConfigured === true || (p.webhooksConfigured === null && p.webhooksAttested);
+}
+
 /** Everything the gate decides from. Loaded by the worker immediately before the provider call. */
 export interface SendPolicyInput {
   messageClass: MessageClass;
@@ -468,7 +476,7 @@ export interface SendPolicyInput {
   identity: BusinessIdentity;
   provider: ProviderReadiness;
   /** The booking this follow-up or review request is about; null when none (manual or attested). */
-  booking: { status: string; completionSource: string; completedAt: Date | null } | null;
+  booking: { status: string; completionSource: string; completedAt: Date | null; squareEnvironment: string } | null;
   /** A review request: the saved review link (validated here). */
   reviewLink: string | null;
   /** A review request: a request was already sent to this client within the minimum gap. */
@@ -568,7 +576,7 @@ export function sendReason(code: SendReasonCode, n?: number, detail?: string): S
 const CANCELLED_STATUSES = new Set(['CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SELLER', 'DECLINED']);
 
 /** Why a booking no longer counts as completed, or null when it genuinely does. */
-export function bookingBlock(b: { status: string; completionSource: string; completedAt: Date | null }): 'booking_cancelled' | 'booking_no_show' | 'booking_not_completed' | null {
+export function bookingBlock(b: { status: string; completionSource: string; completedAt: Date | null; squareEnvironment: string }): 'booking_cancelled' | 'booking_no_show' | 'booking_not_completed' | null {
   if (CANCELLED_STATUSES.has(b.status)) return 'booking_cancelled';
   if (b.status === 'NO_SHOW') return 'booking_no_show';
   return isGenuinelyCompleted(b) ? null : 'booking_not_completed';
@@ -589,7 +597,7 @@ export function evaluateSendPolicy(input: SendPolicyInput): SendDecision {
   const checkedAt = now.toISOString();
 
   if (!input.provider.ready) blocks.push(sendReason('provider_not_ready'));
-  if (commercial && input.origin !== 'preview' && input.provider.ready && input.provider.webhooksConfigured !== true && !(input.provider.webhooksConfigured === null && input.provider.webhooksAttested)) {
+  if (commercial && input.origin !== 'preview' && input.provider.ready && !webhooksReadyForCommercial(input.provider)) {
     blocks.push(sendReason('webhooks_missing'));
   }
   const missing = missingIdentityFields(input.identity);

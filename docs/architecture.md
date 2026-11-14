@@ -131,8 +131,10 @@ Built once so every Stage B/C module integrates the same way and parallel work p
 - **Legal pages.** `/privacy`, `/terms`, `/data-deletion` show only text the owner published (Settings → Business →
   Legal pages, stored in `settings.legal`); the suggested starting text is marked "Review before publishing".
 - **Shared rules.** `isGenuinelyCompleted` (`packages/core/src/completion.ts`) checks stored booking columns only
-  (`ACCEPTED` and a `payment` or `owner_marked` source with `completed_at`); `customers.square_email_unsubscribed`
-  exists from migration `0001_foundations`.
+  (a live-Square `production` booking, `ACCEPTED`, and a `payment` or `owner_marked` source with `completed_at`); its
+  SQL twin `genuinelyCompletedBookingWhere` (`packages/db/src/completion.ts`) is used by every query that picks real
+  visits. Sandbox bookings never count. `customers.square_email_unsubscribed` exists from migration
+  `0001_foundations`.
 
 ## Trends (Stage B, WP3)
 
@@ -274,13 +276,20 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   evidence, the owner's mark and `missing_from_square_at`; `customers` gains environment, Square version and sync time
   (and fills WP0's `square_email_unsubscribed`); new `square_availability_searches` (deleted after 24 h by
   `maintenance.cleanup`). `purgeSquareData` (`packages/db/src/square-purge.ts`) deletes bookings and searches and always
-  scrubs customers (soft delete), so rows of other modules keep working.
+  scrubs customers (soft delete), so rows of other modules keep working; it also deletes stored Square webhook
+  deliveries. Mirror writes (`upsertBooking`, `upsertCustomer`) run under `withMirrorGuard` (`square/map.ts`): a
+  transaction holding the `square` row `FOR SHARE` that writes only while the job's connection (same seller and
+  environment, `connected`/`error`) is still current; disconnect and location changes take the row `FOR UPDATE`.
+  Bookings are copied, listed and matched only for the studio's location (`effectiveLocationId`); with several active
+  locations and none chosen, no booking is copied and the card says so.
 - **Flow**: Connect (OAuth code flow, read scopes) → callback stores encrypted tokens (purging another environment's or
   account's data first) → `square.sync` → every 10 minutes (31-day window) and nightly reconcile (3 × 31 days, missing
   bookings re-read and marked) → `square.attendance` matches COMPLETED payments to ended ACCEPTED bookings (strong =
   same client; weak = possible) → `completed_at` set only for a strong match or the owner's mark; a refund, a later
-  NO_SHOW/cancellation or "didn't attend" resets the source to `none`. Verified webhooks only queue `square.refresh`,
-  which re-reads the object from Square. Stale versions never overwrite newer ones.
+  NO_SHOW/cancellation or "didn't attend" resets the source to `none`; sandbox bookings keep their attendance label
+  but never complete. Verified webhooks store a minimal envelope and only queue `square.refresh`, which re-reads the
+  object from Square. Stale versions never overwrite newer ones. Opening the connection (and its token refresh) runs
+  inside each handler's error handling, so its failures reach the card and fail an availability search.
 - **Times**: everything stored in UTC; availability searches use `availabilityRange` (a 23-hour DST day is widened to
   Square's 24-hour minimum and the extra slots dropped); lists are grouped by Melbourne day.
 
@@ -300,11 +309,15 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   the call; a conditional claim sets `submitted_at` (the non-repeatable call marker), the hashed tokens and the
   token-free stored copy, then Postmark is called once. Transient errors release the claim and retry; an unknown
   outcome keeps it and the retry calls `findSent` first (found → sent, else `check_before_retry` for the owner).
-  406 suppresses the address, 412 records "waiting for approval", auth/sender errors stop dispatch until the next
-  successful check.
+  406 suppresses the address, 412 records "waiting for approval" (cleared by the next accepted live send to an address
+  outside the sender's domain), auth/sender errors stop dispatch until the next successful check. Campaign messages
+  are sent only while their campaign is `approved`/`sending`; a held message (`provider_not_ready`,
+  `webhooks_missing`) is pushed 30 minutes forward, and dispatch leaves commercial email waiting while the webhooks
+  are missing and not attested.
 - **Automation**: `email.automation.sweep` turns genuinely completed bookings (`isGenuinelyCompleted`, completed after
   the switch was turned on and within `maxAgeDays`) into one request and message per booking (`ON CONFLICT
-  (dedupe_key) DO NOTHING`), or a skipped request with its reason; cancels pending items whose booking changed; records
+  (dedupe_key) DO NOTHING`), or a skipped request with its reason (bookings already handled are excluded in SQL, so more
+  than 200 completions in the window never hold newer ones back); cancels pending items whose booking changed; records
   Square's email opt-out once as a `withdrawn` ledger event. `email.dispatch` hands due approved messages on; daily
   caps, the send window and one automated email per client per Melbourne day are deferrals in the gate.
 - **Consent and suppressions**: the append-only `consent_events` ledger and the global `email_suppressions` list are
@@ -324,7 +337,10 @@ Built once so every Stage B/C module integrates the same way and parallel work p
 - **Crawler** (`apps/worker/src/website/`): `fetcher.ts` is a stricter HTTP client than `lib/http.ts` — GET/HEAD only,
   no cookies or auth, every host resolved and refused if any address is private/reserved (`ssrf.ts`), the connection
   pinned to the checked address, ports 80/443 only, redirects followed by hand (≤ 5, each re-validated), size and time
-  caps, ≤ 400 requests per check and polite spacing (500 ms, or robots.txt `Crawl-delay`). `crawl.ts` reads robots.txt
+  caps, ≤ 400 requests per check and polite spacing (500 ms, or robots.txt `Crawl-delay`) with a 12-minute budget for
+  that waiting (later requests to the owner's site are skipped and the check says so). A robots.txt with no HTTP answer
+  (unresolvable, refused, timed out, blocked host) means the site is unreachable: a complete check with one
+  `site_unreachable` finding; a robots.txt 5xx stops the crawl with `robots_unreachable`. `crawl.ts` reads robots.txt
   (RFC 9309), host variants, the root, the sitemap (fast-xml-parser, entities off), ≤ 25 HTML pages breadth-first,
   image sizes, links and a soft-404 probe. `extract.ts` parses pages with cheerio as data only. Tests inject a
   loopback policy in code; there is no environment variable that loosens the guard.
@@ -332,7 +348,9 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   transaction (`changes.ts`): one open change per dedupe key (partial unique index), owner/AI wording kept, superseded
   when the finding is gone or the page changed, applied changes verified from the next check.
 - **Apply** (`apply.ts`, `adapters/wordpress.ts`): only after the owner's explicit confirmation (`approved_by`). The old
-  text must occur exactly once; a retry after a write that already landed reports `already_applied` (no second write);
+  text must occur exactly once; a durable marker stored before the write (`apply_result.writeSentAt`, `preWriteHash`)
+  lets a retry tell a write that landed (`already_applied`, no second write, deletions included) from one that never
+  did; WordPress calls use the guarded, pinned transport (`guarded-fetch.ts`, no redirects followed);
   read-back through WordPress, then a public read through the guarded fetcher. Only page text and image descriptions
   are written through core WordPress; titles, descriptions, structured data, header code and robots.txt stay
   copy-paste. A WordPress host other than the public website is labelled `staging`.

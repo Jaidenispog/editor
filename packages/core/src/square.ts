@@ -507,13 +507,15 @@ export interface CompletionResult {
  * Decides genuine completion (what `bookings.completed_at` / `completion_source` store): Square still shows the
  * booking as ACCEPTED, it has ended, it still exists in Square, and either the owner marked it attended or a strong
  * payment match exists. Becoming false resets the source to `none`. Consumers check the stored values with
- * `isGenuinelyCompleted` (completion.ts).
+ * `isGenuinelyCompleted` (completion.ts). Sandbox bookings are test data and never complete (attendance is still
+ * labelled, so the owner can try the screens), so test data can never start a real email.
  */
 export function deriveCompletion(
-  b: { status: string; endAt: Date; missingFromSquareAt: Date | null; ownerAttendance: OwnerAttendance | null; attendance: Attendance; completedAt?: Date | null },
+  b: { status: string; endAt: Date; missingFromSquareAt: Date | null; ownerAttendance: OwnerAttendance | null; attendance: Attendance; completedAt?: Date | null; environment: string },
   now: Date,
 ): CompletionResult {
   const completed =
+    b.environment === 'production' &&
     b.status === 'ACCEPTED' &&
     b.endAt.getTime() <= now.getTime() &&
     b.missingFromSquareAt === null &&

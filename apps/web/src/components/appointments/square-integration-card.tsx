@@ -168,6 +168,11 @@ export function SquareIntegrationCard() {
                       onChange={(e) => void act('location', () => apiRequest('/api/integrations/square', { method: 'PATCH', body: { locationId: e.target.value } }), 'Location saved')}
                       options={[...(s.locationId ? [] : [{ value: '', label: 'Choose a location', disabled: true }]), ...s.locations.map((l) => ({ value: l.id, label: l.name }))]}
                     />
+                    <p className="mt-1 text-xs text-charcoal-500">
+                      {s.needsLocation
+                        ? 'No bookings are copied until you choose. Only your studio’s location is shown.'
+                        : 'Only bookings at this location are copied and shown. Changing it removes the other location’s copied bookings.'}
+                    </p>
                   </div>
                 ) : null}
 

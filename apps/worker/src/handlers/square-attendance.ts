@@ -9,12 +9,12 @@ import { failSquareJob, openSquare } from '../square/client.js';
  * completion (design §4.7). Read-only towards Square; safe to run again.
  */
 export async function handleSquareAttendance(ctx: WorkerContext, run: TrackedRun, payload: JobPayload<'square.attendance'>): Promise<void> {
-  const s = await openSquare(ctx, run);
-  if ('skip' in s) {
-    await run.progress(1, s.skip);
-    return;
-  }
   try {
+    const s = await openSquare(ctx, run);
+    if ('skip' in s) {
+      await run.progress(1, s.skip);
+      return;
+    }
     const r = await runAttendance(ctx, run, s, {
       squareCustomerId: payload.squareCustomerId,
       from: payload.fromIso ? new Date(payload.fromIso) : undefined,

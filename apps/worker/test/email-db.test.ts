@@ -7,16 +7,16 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import pino from 'pino';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { loadEnv } from '@studio/config';
 import { AppSettingsSchema, dedupeKeys, newId, type JobType } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
 import type { WorkerContext } from '../src/context.js';
-import { handleEmailSend } from '../src/handlers/email-send.js';
+import { HOLD_RECHECK_MS, handleEmailSend } from '../src/handlers/email-send.js';
 import { handleEmailDispatch } from '../src/handlers/email-dispatch.js';
-import { handleEmailSweep } from '../src/handlers/email-sweep.js';
+import { SWEEP_BATCH, handleEmailSweep } from '../src/handlers/email-sweep.js';
 import { handleEmailCampaignExpand } from '../src/handlers/email-campaign.js';
-import { handleEmailProviderCheck } from '../src/handlers/email-check.js';
+import { STARTUP_CHECK_SINGLETON_KEY, handleEmailProviderCheck, queueStartupProviderCheck } from '../src/handlers/email-check.js';
 import { handleEmailSuppressionPush } from '../src/handlers/email-suppression.js';
 import { handleReviewsPlacesSync } from '../src/handlers/reviews-places.js';
 import { handleWebhookProcess, webhookLookupFor } from '../src/handlers/webhook-process.js';
@@ -34,6 +34,7 @@ const HOUR = 3600_000;
 interface Queued {
   type: JobType;
   payload: Record<string, unknown>;
+  options?: { singletonKey?: string };
 }
 
 describe.skipIf(skip)('email and review requests (database-backed, fake provider)', () => {
@@ -68,7 +69,7 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
   };
   const booking = async (customerId: string, over: Partial<typeof schema.bookings.$inferInsert> = {}) => {
     const id = newId();
-    await handle.db.insert(schema.bookings).values({ id, squareBookingId: `sq-${id}`, customerId, serviceName: 'Skin fade', startAt: new Date(NOW.getTime() - 6 * HOUR), status: 'ACCEPTED', completionSource: 'payment', completedAt: new Date(NOW.getTime() - 5 * HOUR), ...over });
+    await handle.db.insert(schema.bookings).values({ id, squareBookingId: `sq-${id}`, customerId, serviceName: 'Skin fade', startAt: new Date(NOW.getTime() - 6 * HOUR), status: 'ACCEPTED', completionSource: 'payment', completedAt: new Date(NOW.getTime() - 5 * HOUR), squareEnvironment: 'production', ...over });
     return id;
   };
   const message = async (over: Partial<typeof schema.emailMessages.$inferInsert> & { toEmail: string }) => {
@@ -114,8 +115,8 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
       db: handle.db,
       store: {} as WorkerContext['store'],
       queue: {
-        enqueue: async (type: JobType, payload: Record<string, unknown>) => {
-          queue.push({ type, payload });
+        enqueue: async (type: JobType, payload: Record<string, unknown>, options: { singletonKey?: string } = {}) => {
+          queue.push({ type, payload, options });
           return newId();
         },
       } as unknown as WorkerContext['queue'],
@@ -211,6 +212,23 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
       expect(conn?.capabilities['approved']).toBe(false);
     });
 
+    it('a live send outside the sender’s domain after a 412 clears "Postmark is still reviewing your account"', async () => {
+      const t = schema.integrationConnections;
+      await handle.db.update(t).set({ capabilities: { deliveryType: 'live', webhooksConfigured: true, approved: false } }).where(eq(t.provider, 'postmark'));
+      const caps = async () => (await handle.db.query.integrationConnections.findFirst({ where: eq(t.provider, 'postmark') }))!.capabilities;
+      // A send to the studio's own domain works during review, so it proves nothing.
+      const own = await message({ toEmail: 'staff@studio.example' });
+      await send(own);
+      expect((await get(own)).status).toBe('sent');
+      expect((await caps())['approved']).toBe(false);
+      const c = await customer();
+      const outside = await message({ toEmail: c.email!, customerId: c.id });
+      await send(outside);
+      expect((await get(outside)).status).toBe('sent');
+      expect((await caps())['approved']).toBe(true);
+      await handle.db.update(t).set({ capabilities: { deliveryType: 'live', webhooksConfigured: true } }).where(eq(t.provider, 'postmark'));
+    });
+
     it('blocks marketing without consent and treats Square’s email opt-out as an unsubscribe', async () => {
       const c = await customer();
       const id = await message({ toEmail: c.email!, customerId: c.id, messageClass: 'campaign', purpose: 'custom', bodyMarkdown: 'Hi {{first_name}}, new hours from next week.' });
@@ -288,6 +306,40 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
       expect((await handle.db.select().from(m()).where(eq(m().dedupeKey, `follow_up:${b}`)))[0]?.status).toBe('cancelled');
     });
 
+    it('a completed booking from Square’s sandbox (test data) gets no follow-up and no review request, and is never sent', async () => {
+      const c = await customer();
+      await consent(c);
+      // Test data with a stored completion (for example from before completion became live-only).
+      const b = await booking(c.id, { squareEnvironment: 'sandbox', completionSource: 'owner_marked' });
+      await handleEmailSweep(ctx, fakeRun(), {}, deps);
+      expect(await handle.db.select().from(schema.reviewRequests).where(eq(schema.reviewRequests.bookingId, b))).toHaveLength(0);
+      expect(await handle.db.select().from(m()).where(eq(m().bookingId, b))).toHaveLength(0);
+      // Even a message already approved for it is refused by the send gate.
+      const id = await message({ toEmail: c.email!, customerId: c.id, bookingId: b, origin: 'automation', approvedBy: null, purpose: 'follow_up', dedupeKey: dedupeKeys.followUp(b) });
+      await send(id);
+      expect(await get(id)).toMatchObject({ status: 'cancelled' });
+      expect(fake.sends).toHaveLength(0);
+    });
+
+    it('reaches newer bookings when more than 200 completed bookings are in the window (handled ones are skipped)', async () => {
+      const c = await customer();
+      const total = SWEEP_BATCH + 6;
+      const ids: string[] = [];
+      for (let i = 0; i < total; i++) {
+        ids.push(await booking(c.id, { completedAt: new Date(NOW.getTime() - 46 * HOUR + i * 60_000), startAt: new Date(NOW.getTime() - 47 * HOUR + i * 60_000) }));
+      }
+      const newest = ids.at(-1)!;
+      await handleEmailSweep(ctx, fakeRun(), {}, deps);
+      await handleEmailSweep(ctx, fakeRun(), {}, deps);
+      expect(await handle.db.select().from(schema.reviewRequests).where(eq(schema.reviewRequests.bookingId, newest))).toHaveLength(1);
+      expect(await handle.db.select().from(m()).where(eq(m().dedupeKey, dedupeKeys.followUp(newest)))).toHaveLength(1);
+      // Every booking handled exactly once.
+      const requests = await handle.db.select().from(schema.reviewRequests).where(eq(schema.reviewRequests.customerId, c.id));
+      expect(requests).toHaveLength(total);
+      // Keep later tests' dispatch and caps clean.
+      await handle.db.update(m()).set({ status: 'cancelled' }).where(eq(m().customerId, c.id));
+    }, 120_000);
+
     it('records Square’s opt-out once as a withdrawn ledger event (never a grant)', async () => {
       const c = await customer({ squareEmailUnsubscribed: true });
       await handleEmailSweep(ctx, fakeRun(), {}, deps);
@@ -354,6 +406,114 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
       expect(second.every((r) => r.status === 'approved' && r.origin === 'campaign')).toBe(true);
       const camp = await handle.db.query.emailCampaigns.findFirst({ where: eq(schema.emailCampaigns.id, campaignId) });
       expect(camp?.status).toBe('sending');
+    });
+  });
+
+  describe('campaign approval can be withdrawn at any moment', () => {
+    const c = () => schema.emailCampaigns;
+    const campaign = async (status: 'approved' | 'sending' = 'approved') => {
+      const id = newId();
+      await handle.db.insert(c()).values({ id, name: 'Spring', subject: 'Spring hours', bodyMarkdown: 'Hi {{first_name}}, spring hours.', status, approvedBy: ownerId, approvedAt: NOW });
+      return id;
+    };
+    /** What changeCampaign does for "Cancel", under the same row lock. */
+    const cancelCampaign = (id: string) =>
+      handle.db.transaction(async (tx) => {
+        await tx.select({ id: c().id }).from(c()).where(eq(c().id, id)).for('update');
+        await tx.update(c()).set({ status: 'cancelled' }).where(eq(c().id, id));
+        await tx.update(m()).set({ status: 'cancelled' }).where(and(eq(m().campaignId, id), inArray(m().status, ['draft', 'approved', 'queued']), isNull(m().submittedAt)));
+      });
+
+    it('a cancel while the campaign is being expanded stops it: nothing stays approved and the campaign stays cancelled', async () => {
+      for (let i = 0; i < 3; i++) await consent(await customer());
+      const id = await campaign();
+      // The owner presses Cancel between the first and the second insert.
+      let transactions = 0;
+      const db = new Proxy(handle.db, {
+        get(target, prop, receiver) {
+          if (prop === 'transaction') {
+            return async (fn: Parameters<typeof target.transaction>[0]) => {
+              if (++transactions === 2) await cancelCampaign(id);
+              return target.transaction(fn);
+            };
+          }
+          const v = Reflect.get(target, prop, receiver) as unknown;
+          return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
+      const run = fakeRun();
+      await handleEmailCampaignExpand({ ...ctx, db }, run, { campaignId: id }, deps);
+      expect(run.messages.at(-1)).toMatch(/Stopped: the campaign was cancelled/);
+      const rows = await handle.db.select().from(m()).where(eq(m().campaignId, id));
+      expect(rows).toHaveLength(1);
+      expect(rows.every((r) => r.status === 'cancelled')).toBe(true);
+      expect((await handle.db.query.emailCampaigns.findFirst({ where: eq(c().id, id) }))?.status).toBe('cancelled');
+      // Dispatch hands nothing on for it.
+      queue.length = 0;
+      await handleEmailDispatch(ctx, fakeRun(), {}, deps);
+      expect(queue.filter((q) => q.type === 'email.send' && rows.some((r) => r.id === q.payload['emailMessageId']))).toHaveLength(0);
+    });
+
+    it('messages already queued are not sent after a pause or a cancel', async () => {
+      const k = await customer();
+      await consent(k);
+      const id = await campaign('sending');
+      const queued = await message({ toEmail: k.email!, customerId: k.id, campaignId: id, origin: 'campaign', messageClass: 'campaign', status: 'queued', bodyMarkdown: 'Hi {{first_name}}, spring hours.' });
+      await handle.db.update(c()).set({ status: 'paused' }).where(eq(c().id, id));
+      await send(queued);
+      expect(await get(queued)).toMatchObject({ status: 'approved', submittedAt: null, statusMessage: 'Campaign paused.' });
+      await handle.db.update(c()).set({ status: 'cancelled' }).where(eq(c().id, id));
+      await send(queued);
+      expect((await get(queued)).status).toBe('cancelled');
+      expect(fake.sends).toHaveLength(0);
+    });
+
+    it('an automatic pause on a complaint hands the campaign’s queued messages back to approved', async () => {
+      const a = await customer();
+      const b = await customer();
+      await consent(b);
+      const id = await campaign('sending');
+      await handle.db.update(c()).set({ sentCount: 42 }).where(eq(c().id, id));
+      const pmId = `pm-${newId()}`;
+      await message({ toEmail: a.email!, customerId: a.id, campaignId: id, origin: 'campaign', messageClass: 'campaign', status: 'sent', providerMessageId: pmId, sentAt: NOW });
+      const queued = await message({ toEmail: b.email!, customerId: b.id, campaignId: id, origin: 'campaign', messageClass: 'campaign', status: 'queued' });
+      const ev = newId();
+      await handle.db.insert(schema.webhookEvents).values({ id: ev, provider: 'postmark', externalEventId: `test:${ev}`, eventType: 'SpamComplaint', payload: { RecordType: 'SpamComplaint', ID: 8, MessageID: pmId, Email: a.email, MessageStream: 'broadcast', BouncedAt: NOW.toISOString() }, signatureValid: true });
+      await handleWebhookProcess(ctx, fakeRun(), { webhookEventId: ev }, webhookLookupFor([emailModule]));
+      expect((await handle.db.query.emailCampaigns.findFirst({ where: eq(c().id, id) }))?.status).toBe('paused');
+      expect(await get(queued)).toMatchObject({ status: 'approved', submittedAt: null });
+      await send(queued);
+      expect(fake.sends).toHaveLength(0);
+    });
+  });
+
+  describe('held messages', () => {
+    it('while webhooks are missing, dispatch leaves commercial email waiting without creating a job each minute', async () => {
+      const t = schema.integrationConnections;
+      await handle.db.update(t).set({ capabilities: { deliveryType: 'live', webhooksConfigured: false } }).where(eq(t.provider, 'postmark'));
+      try {
+        const k = await customer();
+        await consent(k);
+        const marketing = await message({ toEmail: k.email!, customerId: k.id, messageClass: 'campaign', bodyMarkdown: 'Hi {{first_name}}, new hours.' });
+        const factual = await message({ toEmail: k.email!, customerId: k.id });
+        for (let i = 0; i < 3; i++) {
+          queue.length = 0;
+          await handleEmailDispatch(ctx, fakeRun(), {}, deps);
+          expect(queue.filter((q) => q.type === 'email.send' && q.payload['emailMessageId'] === marketing)).toHaveLength(0);
+        }
+        expect((await get(marketing)).status).toBe('approved');
+        expect(['queued', 'sent']).toContain((await get(factual)).status);
+        // A send that does reach the gate (approved before the check found the webhooks gone) is held and pushed
+        // forward, so it is not handed on again every minute.
+        await send(marketing);
+        const held = await get(marketing);
+        expect(held.status).toBe('approved');
+        expect(held.statusMessage).toMatch(/bounces and unsubscribes/);
+        expect(held.scheduledFor?.getTime()).toBe(NOW.getTime() + HOLD_RECHECK_MS);
+        expect(fake.sends.filter((x) => x.emailMessageId === marketing)).toHaveLength(0);
+      } finally {
+        await handle.db.update(t).set({ capabilities: { deliveryType: 'live', webhooksConfigured: true } }).where(eq(t.provider, 'postmark'));
+      }
     });
   });
 
@@ -432,6 +592,26 @@ describe.skipIf(skip)('email and review requests (database-backed, fake provider
       expect(fake.sends).toHaveLength(0);
       // Restore for later tests.
       await handle.db.update(schema.integrationConnections).set({ capabilities: { deliveryType: 'live', webhooksConfigured: true }, lastError: null }).where(eq(schema.integrationConnections.provider, 'postmark'));
+    });
+
+    it('queues one read-only provider check at start-up only when email is configured and not checked recently', async () => {
+      const t = schema.integrationConnections;
+      queue.length = 0;
+      // Not configured: nothing queued.
+      const bare = { ...ctx, env: { ...ctx.env, EMAIL_PROVIDER: 'none' as const, POSTMARK_SERVER_TOKEN: undefined } };
+      expect(await queueStartupProviderCheck(bare as WorkerContext, NOW)).toBeNull();
+      // Checked five minutes ago (a dev.sh restart): nothing queued.
+      await handle.db.update(t).set({ capabilities: { deliveryType: 'live', webhooksConfigured: true, checkedAt: new Date(NOW.getTime() - 5 * 60_000).toISOString() } }).where(eq(t.provider, 'postmark'));
+      expect(await queueStartupProviderCheck(ctx, NOW)).toBeNull();
+      expect(queue).toHaveLength(0);
+      // Last checked yesterday: one check, with a singleton key so restarts cannot pile them up.
+      await handle.db.update(t).set({ capabilities: { deliveryType: 'live', webhooksConfigured: true, checkedAt: new Date(NOW.getTime() - 24 * HOUR).toISOString() } }).where(eq(t.provider, 'postmark'));
+      expect(await queueStartupProviderCheck(ctx, NOW)).not.toBeNull();
+      expect(queue).toEqual([{ type: 'email.provider.check', payload: { reason: 'startup' }, options: expect.objectContaining({ singletonKey: STARTUP_CHECK_SINGLETON_KEY }) }]);
+      // The check itself only reads: nothing is sent.
+      await handleEmailProviderCheck(ctx, fakeRun(), { reason: 'startup' }, deps, { resolveTxt: async () => [], resolveCname: async () => [] });
+      expect(fake.sends).toHaveLength(0);
+      await handle.db.update(t).set({ capabilities: { deliveryType: 'live', webhooksConfigured: true }, lastError: null, status: 'connected' }).where(eq(t.provider, 'postmark'));
     });
 
     it('keeps only the latest Places snapshot and shows a 404 as an error', async () => {

@@ -22,6 +22,7 @@ export const WP_MESSAGES = {
   reconnect: 'WordPress refused the connection. Reconnect it in Settings → Integrations.',
   forbidden: "The WordPress user can't edit this page. Use a user with the Editor role.",
   unsupported: "WordPress can't change this through its standard connection; use the steps instead.",
+  redirected: 'The WordPress REST API redirected to another address, so nothing was sent there. Check the WordPress address in Settings → Integrations.',
 } as const;
 
 /** Connection details (the password is decrypted only in the worker, just before use). */
@@ -66,6 +67,8 @@ export class WordPressAdapter implements WebsiteEditAdapter {
         `${this.base}${path}`,
         {
           ...init,
+          // Never follow a redirect: a 307/308 would resend the page content (and the password) to another address.
+          redirect: 'manual',
           headers: {
             accept: 'application/json',
             authorization: this.auth,
@@ -78,6 +81,7 @@ export class WordPressAdapter implements WebsiteEditAdapter {
       if (signal.aborted) throw err;
       throw new TransientAdapterError("Your website didn't respond. Nothing was changed.");
     }
+    if ((res.status >= 300 && res.status < 400) || res.type === 'opaqueredirect') throw new AdapterRedirectError();
     return { status: res.status, json: await readJson(res) };
   }
 
@@ -93,11 +97,23 @@ export class WordPressAdapter implements WebsiteEditAdapter {
       needsReauth: false,
       note: null,
     };
-    const index = await this.call('/wp-json/', { method: 'GET' }, signal, 'wordpress.discovery');
+    let index: { status: number; json: unknown };
+    try {
+      index = await this.call('/wp-json/', { method: 'GET' }, signal, 'wordpress.discovery');
+    } catch (err) {
+      if (err instanceof AdapterRedirectError) return { ...out, problem: WP_MESSAGES.redirected };
+      throw err;
+    }
     const namespaces = (index.json as { namespaces?: unknown } | null)?.namespaces;
     if (index.status === 401) return { ...out, problem: WP_MESSAGES.auth, needsReauth: true };
     if (index.status >= 400 || !Array.isArray(namespaces) || !namespaces.includes('wp/v2')) return { ...out, problem: WP_MESSAGES.restUnreachable };
-    const me = await this.call('/wp-json/wp/v2/users/me?context=edit', { method: 'GET' }, signal, 'wordpress.users_me');
+    let me: { status: number; json: unknown };
+    try {
+      me = await this.call('/wp-json/wp/v2/users/me?context=edit', { method: 'GET' }, signal, 'wordpress.users_me');
+    } catch (err) {
+      if (err instanceof AdapterRedirectError) return { ...out, problem: WP_MESSAGES.redirected };
+      throw err;
+    }
     if (me.status === 401) return { ...out, problem: WP_MESSAGES.auth, needsReauth: true };
     if (me.status === 403) return { ...out, problem: WP_MESSAGES.capability };
     if (me.status >= 400 || !me.json || typeof me.json !== 'object') return { ...out, problem: WP_MESSAGES.restUnreachable };
@@ -235,5 +251,12 @@ export class AdapterForbiddenError extends Error {
   constructor() {
     super(WP_MESSAGES.forbidden);
     this.name = 'AdapterForbiddenError';
+  }
+}
+/** The REST API answered with a redirect (never followed): the address is wrong or something is steering requests. */
+export class AdapterRedirectError extends Error {
+  constructor() {
+    super(WP_MESSAGES.redirected);
+    this.name = 'AdapterRedirectError';
   }
 }

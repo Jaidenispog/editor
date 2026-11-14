@@ -27,12 +27,14 @@ export const SQUARE_SNAPSHOT_MAX_AGE_MS = 6 * 3600_000;
 /** Counts from one sync, for the job message and tests. */
 export interface SquareSyncSummary {
   snapshot: boolean;
+  /** Bookings were not copied because the owner still has to choose which Square location is the studio's. */
+  needsLocation: boolean;
   bookings: Record<UpsertOutcome, number>;
   missing: number;
   customers: Record<UpsertOutcome, number>;
 }
 
-const emptyCounts = (): Record<UpsertOutcome, number> => ({ inserted: 0, updated: 0, unchanged: 0, stale: 0 });
+const emptyCounts = (): Record<UpsertOutcome, number> => ({ inserted: 0, updated: 0, unchanged: 0, stale: 0, ignored: 0 });
 
 /**
  * `square.sync` (design §6): token status and permissions, the business snapshot, bookings in ≤ 31-day windows,
@@ -42,7 +44,7 @@ const emptyCounts = (): Record<UpsertOutcome, number> => ({ inserted: 0, updated
  */
 export async function runSquareSync(ctx: WorkerContext, run: TrackedRun, s: SquareSession, reason: SquareSyncReason, now: Date = new Date()): Promise<SquareSyncSummary> {
   const t = schema.integrationConnections;
-  const summary: SquareSyncSummary = { snapshot: false, bookings: emptyCounts(), missing: 0, customers: emptyCounts() };
+  const summary: SquareSyncSummary = { snapshot: false, needsLocation: false, bookings: emptyCounts(), missing: 0, customers: emptyCounts() };
   const capabilities = parseSquareCapabilities(s.conn.capabilities);
   const capPatch: Record<string, unknown> = {};
 
@@ -103,35 +105,46 @@ export async function runSquareSync(ctx: WorkerContext, run: TrackedRun, s: Squa
   }
   const locationId = effectiveLocationId({ ...s.config, snapshot });
 
-  // 3. Bookings, in windows of at most 31 days.
+  // 3. Bookings, in windows of at most 31 days, for the studio's location only. With several active locations and
+  // none chosen yet, no booking is copied: another location's bookings would otherwise stay in the lists for good.
   run.checkCancelled();
-  await run.progress(0.35, 'Fetching your bookings from Square…');
   const range = syncRange(reason, now);
   const seen = new Set<string>();
   const customerIds = new Set<string>();
-  for (const w of bookingWindows(range.start, range.end)) {
+  summary.needsLocation = locationId === null;
+  if (locationId) await run.progress(0.35, 'Fetching your bookings from Square…');
+  for (const w of locationId ? bookingWindows(range.start, range.end) : []) {
     run.checkCancelled();
     const list = await s.api.listBookings({ locationId, startAtMin: w.start.toISOString(), startAtMax: w.end.toISOString() });
     for (const b of list) {
       seen.add(b.id);
       if (b.customerId) customerIds.add(b.customerId);
-      summary.bookings[await upsertBooking(ctx.db, b, s.environment, snapshot, now)]++;
+      summary.bookings[await upsertBooking(ctx.db, b, s, snapshot, now)]++;
     }
   }
 
   // 4. Reconcile: bookings we hold in the range that Square did not return are re-read one by one.
-  if (reason === 'reconcile' || reason === 'connect') {
+  if (locationId && (reason === 'reconcile' || reason === 'connect')) {
     const b = schema.bookings;
     const held = await ctx.db
       .select({ id: b.id, squareBookingId: b.squareBookingId })
       .from(b)
-      .where(and(eq(b.squareEnvironment, s.environment), gte(b.startAt, range.start), lt(b.startAt, range.end), isNull(b.missingFromSquareAt), seen.size ? notInArray(b.squareBookingId, [...seen]) : undefined));
+      .where(
+        and(
+          eq(b.squareEnvironment, s.environment),
+          eq(b.locationId, locationId),
+          gte(b.startAt, range.start),
+          lt(b.startAt, range.end),
+          isNull(b.missingFromSquareAt),
+          seen.size ? notInArray(b.squareBookingId, [...seen]) : undefined,
+        ),
+      );
     for (const h of held) {
       run.checkCancelled();
       const fresh = await s.api.getBooking(h.squareBookingId);
       if (fresh) {
         if (fresh.customerId) customerIds.add(fresh.customerId);
-        summary.bookings[await upsertBooking(ctx.db, fresh, s.environment, snapshot, now)]++;
+        summary.bookings[await upsertBooking(ctx.db, fresh, s, snapshot, now)]++;
       } else {
         await markBookingMissing(ctx, h.id, now);
         summary.missing++;
@@ -144,14 +157,14 @@ export async function runSquareSync(ctx: WorkerContext, run: TrackedRun, s: Squa
   await run.progress(0.7, 'Fetching your clients from Square…');
   const since = s.config.customersSyncedAt;
   const customers = reason === 'connect' || !since ? await s.api.listCustomers() : await s.api.searchCustomersUpdatedSince(new Date(Date.parse(since) - 24 * 3600_000).toISOString());
-  for (const c of customers) summary.customers[await upsertCustomer(ctx.db, c, s.environment, now)]++;
+  for (const c of customers) summary.customers[await upsertCustomer(ctx.db, c, s, now)]++;
   const known = customerIds.size
     ? new Set(
         (await ctx.db.select({ id: schema.customers.squareCustomerId }).from(schema.customers).where(inArray(schema.customers.squareCustomerId, [...customerIds]))).map((r) => r.id),
       )
     : new Set<string | null>();
   const missingCustomers = [...customerIds].filter((id) => !known.has(id));
-  if (missingCustomers.length) for (const c of await s.api.bulkRetrieveCustomers(missingCustomers)) summary.customers[await upsertCustomer(ctx.db, c, s.environment, now)]++;
+  if (missingCustomers.length) for (const c of await s.api.bulkRetrieveCustomers(missingCustomers)) summary.customers[await upsertCustomer(ctx.db, c, s, now)]++;
   await mergeSquareConfig(ctx, { customersSyncedAt: now.toISOString() });
 
   // 6. Done: record the sync, clear any old error, and queue the attendance pass.

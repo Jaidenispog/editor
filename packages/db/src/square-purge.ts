@@ -8,6 +8,7 @@ export interface SquarePurgeResult {
   bookings: number;
   customers: number;
   availabilitySearches: number;
+  webhookEvents: number;
 }
 
 /** A database or an open transaction. */
@@ -20,8 +21,10 @@ const OPTIONAL_TABLES = ['square_booking_changes'] as const;
  * Removes Square data copied into Studio Assistant, in one transaction: availability searches and bookings of the
  * environment are deleted; customers of the environment are always scrubbed, never deleted (names, contact details
  * and the Square id cleared, `deleted_at` set), because other modules' rows (email messages, review requests,
- * consent events) may point at them and their suppressions are keyed by email. Pass no environment to remove every
- * environment's data (a different Square account). Writes the `integration.square.data_purged` audit entry.
+ * consent events) may point at them and their suppressions are keyed by email. Stored Square webhook deliveries are
+ * deleted too (older ones may hold Square's copy of a client; they carry no environment, so all of them go). Pass no
+ * environment to remove every environment's data (a different Square account). Writes the
+ * `integration.square.data_purged` audit entry.
  */
 export async function purgeSquareData(
   db: Executor,
@@ -49,14 +52,16 @@ export async function purgeSquareData(
         .set({ squareCustomerId: null, givenName: '', familyName: '', email: null, phone: null, squareEmailUnsubscribed: null, deletedAt: now, updatedAt: now })
         .where(inArray(c.id, ids));
     }
-    const result = { bookings: bookings.length, customers: ids.length, availabilitySearches: searches.length };
+    const w = schema.webhookEvents;
+    const webhooks = await tx.delete(w).where(eq(w.provider, 'square')).returning({ id: w.id });
+    const result = { bookings: bookings.length, customers: ids.length, availabilitySearches: searches.length, webhookEvents: webhooks.length };
     await tx.insert(schema.auditLog).values({
       id: newId(),
       userId: options.userId ?? null,
       action: 'integration.square.data_purged',
       entityType: 'integration_connection',
       entityId: null,
-      data: { environment: env ?? 'all', reason: options.reason ?? '', bookings: result.bookings, customers: result.customers },
+      data: { environment: env ?? 'all', reason: options.reason ?? '', bookings: result.bookings, customers: result.customers, webhookEvents: result.webhookEvents },
     });
     return result;
   };

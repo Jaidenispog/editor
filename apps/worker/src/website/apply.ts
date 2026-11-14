@@ -1,12 +1,31 @@
+import { createHash } from 'node:crypto';
 import type { ApplyOutcome, Verification, WebsiteChange } from '@studio/core';
-import { AdapterAuthError, AdapterForbiddenError, WP_MESSAGES } from './adapters/wordpress.js';
+import { AdapterAuthError, AdapterForbiddenError, AdapterRedirectError, WP_MESSAGES } from './adapters/wordpress.js';
 import type { LocatedTarget, WebsiteEditAdapter } from './adapters/types.js';
 
 /**
  * Adapter-independent apply (design §7.4.1): supports → locate → compute the new content (the old text must occur
- * exactly once) → write → read back. A retry after a write that already landed finds the new text and no old text, so it
- * reports `already_applied` and never writes twice.
+ * exactly once) → record that a write is being sent → write → read back.
+ *
+ * Exactly once: whether an earlier attempt already wrote is decided from a durable record ({@link PriorWrite}: stored
+ * on the row right before the write, with a hash of the content the write was computed from), never from the page text
+ * alone. Without that record the old text must be there exactly once; the new text being on the page already is never
+ * taken as proof (it may appear elsewhere, or be a longer text containing the old one). With the record, unchanged
+ * content means the earlier write did not land (it is computed again); changed content that shows the change means it
+ * did (`already_applied`, nothing is written twice), which also covers deletions.
  */
+
+/** The record an earlier attempt left right before it sent its write. */
+export interface PriorWrite {
+  resourceId: string;
+  /** SHA-256 (hex) of the content the earlier write was computed from. */
+  preWriteHash: string;
+}
+
+/** SHA-256 (hex) of a page's stored content. */
+export function contentHash(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
 
 /** What applying one change produced. */
 export interface ApplyAttempt {
@@ -16,6 +35,8 @@ export interface ApplyAttempt {
   verification: Verification | null;
   /** Whether a write request was sent in this attempt. */
   wrote: boolean;
+  /** `already_applied` because an earlier attempt's recorded write is on the page (false: it was already there). */
+  earlierWrite: boolean;
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -45,17 +66,26 @@ function altOf(tag: string): string | null {
   return m ? (m[2] ?? '') : null;
 }
 
+/** Shown when the page changed after an earlier attempt sent its write but does not show the change. */
+export const CHANGED_SINCE_EARLIER_WRITE =
+  "The page in WordPress changed after an earlier attempt sent this change, and it doesn't show the change. Check the page in WordPress before trying again.";
+
 /**
- * The page content after the change, or the reason it can't be made: `already_applied` (new text there, old text gone),
- * or `conflict` (old text missing or more than once). Pure.
+ * The page content after the change, or the reason it can't be made: `already_applied` (only with a {@link PriorWrite}
+ * record whose write is on the page) or `conflict` (old text missing or more than once). Pure.
  */
 export function computeNextContent(
   change: WebsiteChange,
   current: string,
+  prior: Pick<PriorWrite, 'preWriteHash'> | null = null,
 ): { kind: 'next'; content: string } | { kind: 'already_applied' } | { kind: 'conflict'; message: string } {
+  if (prior && contentHash(current) !== prior.preWriteHash) {
+    // The content moved on since the earlier attempt sent its write: it landed if the change shows.
+    return changePresent(change, current) ? { kind: 'already_applied' } : { kind: 'conflict', message: CHANGED_SINCE_EARLIER_WRITE };
+  }
+  // No earlier write, or it never landed (the content is exactly what it was computed from): a first attempt.
   if (change.kind === 'text_replace') {
     const count = countOccurrences(current, change.before);
-    if (change.after && current.includes(change.after) && (count === 0 || change.after.includes(change.before))) return { kind: 'already_applied' };
     if (count === 0)
       return {
         kind: 'conflict',
@@ -83,6 +113,7 @@ export function computeNextContent(
             : 'This image appears more than once on the page, so nothing was changed. Use the steps instead.',
       };
     const tag = tags[0]?.[0] ?? '';
+    // The one matching image already has exactly this description: nothing to write (reported as such).
     if ((altOf(tag) ?? '').trim() === change.after.trim()) return { kind: 'already_applied' };
     const nextTag =
       altOf(tag) === null ? tag.replace(/^<img\b/i, `<img alt="${escapeAttr(change.after)}"`) : tag.replace(/\balt\s*=\s*(["'])(.*?)\1/i, `alt="${escapeAttr(change.after)}"`);
@@ -104,6 +135,13 @@ export function changePresent(change: WebsiteChange, content: string): boolean {
   return false;
 }
 
+/** How the caller records writes: the earlier attempt's record, and the hook that stores one before each write. */
+export interface WriteRecord {
+  prior: PriorWrite | null;
+  /** Stores the marker durably; false when the change may no longer be written (nothing is sent then). */
+  beforeWrite: (target: LocatedTarget, preWriteHash: string) => Promise<boolean>;
+}
+
 /**
  * Applies one approved change. `readPublic` fetches the public page (through the crawler's guarded fetcher) to tell
  * "visible now" from "cached". Adapter errors for credentials and rights become outcomes; transient errors propagate so
@@ -114,6 +152,7 @@ export async function applyChange(
   change: WebsiteChange,
   signal: AbortSignal,
   readPublic: (url: string) => Promise<string | null>,
+  record: WriteRecord = { prior: null, beforeWrite: async () => true },
 ): Promise<ApplyAttempt> {
   const supported = adapter.supports(change);
   if (!supported.ok)
@@ -123,6 +162,7 @@ export async function applyChange(
       target: null,
       verification: null,
       wrote: false,
+      earlierWrite: false,
     };
   let target: LocatedTarget | null;
   try {
@@ -135,6 +175,16 @@ export async function applyChange(
         target: null,
         verification: null,
         wrote: false,
+        earlierWrite: false,
+      };
+    if (err instanceof AdapterRedirectError)
+      return {
+        outcome: 'error',
+        message: err.message,
+        target: null,
+        verification: null,
+        wrote: false,
+        earlierWrite: false,
       };
     if (err instanceof AdapterForbiddenError)
       return {
@@ -143,6 +193,7 @@ export async function applyChange(
         target: null,
         verification: null,
         wrote: false,
+        earlierWrite: false,
       };
     throw err;
   }
@@ -153,13 +204,15 @@ export async function applyChange(
       target: null,
       verification: null,
       wrote: false,
+      earlierWrite: false,
     };
   const ref = {
     resourceType: target.resourceType,
     resourceId: target.resourceId,
     link: target.link,
   };
-  const next = computeNextContent(change, target.current);
+  const prior = record.prior && record.prior.resourceId === target.resourceId ? record.prior : null;
+  const next = computeNextContent(change, target.current, prior);
   if (next.kind === 'conflict')
     return {
       outcome: 'conflict',
@@ -167,11 +220,22 @@ export async function applyChange(
       target: ref,
       verification: null,
       wrote: false,
+      earlierWrite: false,
     };
+  const earlierWrite = next.kind === 'already_applied' && prior !== null;
   let outcome: ApplyOutcome = 'already_applied';
-  let message = 'This change was already on your website (an earlier attempt applied it).';
+  let message = earlierWrite ? 'This change was already on your website (an earlier attempt applied it).' : 'Your website already shows this, so nothing needed changing.';
   let wrote = false;
   if (next.kind === 'next') {
+    if (!(await record.beforeWrite(target, contentHash(target.current))))
+      return {
+        outcome: 'error',
+        message: 'This change was stopped before anything was sent to WordPress, so nothing was changed.',
+        target: ref,
+        verification: null,
+        wrote: false,
+        earlierWrite: false,
+      };
     const res = await adapter.write(target, next.content, signal);
     wrote = true;
     if (res.outcome !== 'applied')
@@ -181,6 +245,7 @@ export async function applyChange(
         target: ref,
         verification: null,
         wrote,
+        earlierWrite: false,
       };
     outcome = 'applied';
     message = res.message;
@@ -193,6 +258,7 @@ export async function applyChange(
       target: ref,
       verification: 'not_found',
       wrote,
+      earlierWrite,
     };
   let verification: Verification = 'confirmed_api';
   try {
@@ -201,5 +267,5 @@ export async function applyChange(
   } catch {
     // The public read is a courtesy check; WordPress already confirmed the change.
   }
-  return { outcome, message, target: ref, verification, wrote };
+  return { outcome, message, target: ref, verification, wrote, earlierWrite };
 }

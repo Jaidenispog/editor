@@ -29,7 +29,7 @@ import {
   type MessageClass,
   type SuppressionFact,
 } from '@studio/core';
-import { schema } from '@studio/db';
+import { genuinelyCompletedBookingWhere, schema } from '@studio/db';
 import type { z } from 'zod';
 import type {
   AudiencePreviewDto,
@@ -202,7 +202,7 @@ async function completedVisits(db: Db | Tx, emailLower: string): Promise<Date[]>
     .select({ at: schema.bookings.completedAt })
     .from(schema.bookings)
     .innerJoin(schema.customers, eq(schema.bookings.customerId, schema.customers.id))
-    .where(and(sql`lower(${schema.customers.email}) = ${emailLower}`, eq(schema.bookings.status, 'ACCEPTED'), inArray(schema.bookings.completionSource, ['payment', 'owner_marked']), isNotNull(schema.bookings.completedAt)));
+    .where(and(sql`lower(${schema.customers.email}) = ${emailLower}`, genuinelyCompletedBookingWhere()));
   return rows.map((r) => r.at).filter((d): d is Date => d instanceof Date);
 }
 
@@ -251,7 +251,7 @@ export async function messageBlockers(msg: MessageRow, settings: AppSettings, ow
     suppressions,
     identity: { businessName: settings.brand.businessName, addressLine: settings.business.addressLine, suburb: settings.business.suburb, state: settings.business.state, postcode: settings.business.postcode, phone: settings.business.phone, email: settings.business.email },
     provider: { ready: configured && conn?.status === 'connected' && caps['sendingBlocked'] !== true, webhooksConfigured: typeof caps['webhooksConfigured'] === 'boolean' ? (caps['webhooksConfigured'] as boolean) : null, webhooksAttested: settings.email.webhooksAttested, sandbox: caps['deliveryType'] === 'sandbox' },
-    booking: booking ? { status: booking.status, completionSource: booking.completionSource, completedAt: booking.completedAt } : null,
+    booking: booking ? { status: booking.status, completionSource: booking.completionSource, completedAt: booking.completedAt, squareEnvironment: booking.squareEnvironment } : null,
     reviewLink: messageClass === 'review_request' ? settings.business.googleReviewLink : null,
     recentlyAsked,
     minDaysBetweenRequests: settings.reviews.minDaysBetweenRequests,
@@ -987,7 +987,7 @@ async function audienceRows(settings: AppSettings, audience: CampaignAudienceFil
   const visits = await db
     .select({ customerId: schema.bookings.customerId, at: schema.bookings.completedAt })
     .from(schema.bookings)
-    .where(and(eq(schema.bookings.status, 'ACCEPTED'), inArray(schema.bookings.completionSource, ['payment', 'owner_marked']), isNotNull(schema.bookings.completedAt)));
+    .where(genuinelyCompletedBookingWhere());
   return customers.map((c) => {
     const e = c.email ? normaliseEmail(c.email) : null;
     const own = visits.filter((v) => v.customerId === c.id && v.at).map((v) => v.at as Date);
@@ -1054,26 +1054,46 @@ export async function approveCampaign(user: SessionUser, id: string, input: z.in
 }
 
 /** Pause, resume or cancel a campaign (cancel stops every unsent message). */
+/**
+ * Pause, resume or cancel a campaign. Each change runs in one transaction holding the campaign row `FOR UPDATE`, the
+ * same lock `email.campaign.expand` takes before every insert, so expansion and the owner's change never interleave:
+ * after a pause or cancel no further message is prepared. Pausing hands messages already queued (not yet submitted)
+ * back to `approved`, so `email.send` never sends them while paused; cancelling cancels everything not yet submitted.
+ */
 export async function changeCampaign(user: SessionUser, id: string, action: 'pause' | 'resume' | 'cancel') {
-  const c = await loadCampaign(id);
+  await loadCampaign(id);
   const db = getDb();
   const now = new Date();
-  if (action === 'pause') {
-    if (!['approved', 'sending'].includes(c.status)) throw new AppError('CONFLICT', 'Only a sending campaign can be paused.');
-    await db.update(schema.emailCampaigns).set({ status: 'paused', pausedReason: 'Paused by you.', updatedAt: now }).where(eq(schema.emailCampaigns.id, id));
-  } else if (action === 'resume') {
-    if (c.status !== 'paused') throw new AppError('CONFLICT', 'Only a paused campaign can be resumed.');
-    const expanded = await db.query.emailMessages.findFirst({ columns: { id: true }, where: eq(schema.emailMessages.campaignId, id) });
-    await db.update(schema.emailCampaigns).set({ status: expanded ? 'sending' : 'approved', pausedReason: '', updatedAt: now }).where(eq(schema.emailCampaigns.id, id));
-    if (!expanded) await createTrackedJob({ type: 'email.campaign.expand', payload: { campaignId: id }, singletonKey: `campaign-expand:${id}` });
-  } else {
-    if (['sent', 'cancelled'].includes(c.status)) throw new AppError('CONFLICT', 'This campaign has already finished.');
-    await db.update(schema.emailCampaigns).set({ status: 'cancelled', updatedAt: now }).where(eq(schema.emailCampaigns.id, id));
-    await db
-      .update(schema.emailMessages)
-      .set({ status: 'cancelled', statusMessage: 'Campaign cancelled.', updatedAt: now })
-      .where(and(eq(schema.emailMessages.campaignId, id), inArray(schema.emailMessages.status, ['draft', 'approved', 'queued']), isNull(schema.emailMessages.submittedAt)));
-  }
+  const c = schema.emailCampaigns;
+  const m = schema.emailMessages;
+  let expandAgain = false;
+  await db.transaction(async (tx) => {
+    const [current] = await tx.select().from(c).where(eq(c.id, id)).for('update');
+    if (!current) throw new AppError('NOT_FOUND', 'That campaign no longer exists.');
+    if (action === 'pause') {
+      if (!['approved', 'sending'].includes(current.status)) throw new AppError('CONFLICT', 'Only a sending campaign can be paused.');
+      await tx.update(c).set({ status: 'paused', pausedReason: 'Paused by you.', updatedAt: now }).where(eq(c.id, id));
+      await tx
+        .update(m)
+        .set({ status: 'approved', statusMessage: 'Campaign paused.', updatedAt: now })
+        .where(and(eq(m.campaignId, id), eq(m.status, 'queued'), isNull(m.submittedAt)));
+    } else if (action === 'resume') {
+      if (current.status !== 'paused') throw new AppError('CONFLICT', 'Only a paused campaign can be resumed.');
+      const expanded = await tx.query.emailMessages.findFirst({ columns: { id: true }, where: eq(m.campaignId, id) });
+      // A pause during expansion stops it part-way: expand again (it never adds a message twice) unless it finished.
+      const finished = await tx.query.auditLog.findFirst({ columns: { id: true }, where: and(eq(schema.auditLog.action, 'email.campaign.expanded'), eq(schema.auditLog.entityId, id)) });
+      expandAgain = !finished;
+      await tx.update(c).set({ status: expanded ? 'sending' : 'approved', pausedReason: '', updatedAt: now }).where(eq(c.id, id));
+    } else {
+      if (['sent', 'cancelled'].includes(current.status)) throw new AppError('CONFLICT', 'This campaign has already finished.');
+      await tx.update(c).set({ status: 'cancelled', updatedAt: now }).where(eq(c.id, id));
+      await tx
+        .update(m)
+        .set({ status: 'cancelled', statusMessage: 'Campaign cancelled.', updatedAt: now })
+        .where(and(eq(m.campaignId, id), inArray(m.status, ['draft', 'approved', 'queued']), isNull(m.submittedAt)));
+    }
+  });
+  if (expandAgain) await createTrackedJob({ type: 'email.campaign.expand', payload: { campaignId: id }, singletonKey: `campaign-expand:${id}` });
   await writeAudit({ userId: user.id, action: `email.campaign.${action}`, entityType: 'email_campaign', entityId: id });
   return { campaign: toCampaignDto(await loadCampaign(id)) };
 }

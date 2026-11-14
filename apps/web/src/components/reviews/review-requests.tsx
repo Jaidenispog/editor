@@ -2,7 +2,7 @@
 
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useState } from 'react';
-import { addDaysToDate, formatDateTime, melbourneDateOf } from '@studio/core';
+import { REVIEW_REQUEST_STATUS_WORDS, addDaysToDate, formatDateTime, melbourneDateOf } from '@studio/core';
 import { AutomationCard } from '@/components/email/automation-card';
 import { MessageDialog } from '@/components/email/message-views';
 import type { AutomationDto, ClientDto, EmailTemplateDto, ReviewRequestDto } from '@/components/email/types';
@@ -28,7 +28,7 @@ export interface ReviewsData {
   googleProfile: { state: string; label: string; message: string };
 }
 
-const STATUS_WORDS: Record<string, string> = { pending_approval: 'Waiting for approval', scheduled: 'Scheduled', sent: 'Sent', skipped: 'Skipped', cancelled: 'Cancelled', failed: 'Failed' };
+const STATUS_WORDS: Record<string, string> = REVIEW_REQUEST_STATUS_WORDS;
 
 /** "Send a request" without Square: the owner confirms the visit went ahead (the explicit completed flag). */
 function ManualRequestDialog({ clients, open, onClose, onDone }: { clients: ClientDto[]; open: boolean; onClose: () => void; onDone: () => void }) {

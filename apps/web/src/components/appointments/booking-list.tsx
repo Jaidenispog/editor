@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { CalendarDays } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -32,6 +33,13 @@ export function BookingCard({ booking, onOpen, showAttendance, onMarked }: { boo
         ) : null}
         {booking.missingFromSquare ? <p className="mt-2 text-xs text-amber-800">Not found in Square any more — it may have been deleted there.</p> : null}
       </button>
+      {booking.reviewRequest ? (
+        <p className="mt-2">
+          <Link href="/reviews" className="inline-flex rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={`${booking.reviewRequest.label}. Open Reviews`}>
+            <StatusPill status={booking.reviewRequest.status} label={booking.reviewRequest.label} />
+          </Link>
+        </p>
+      ) : null}
       {showAttendance ? (
         <div className="mt-3 border-t border-charcoal-100 pt-3">
           <AttendanceControl booking={booking} {...(onMarked ? { onMarked } : {})} />

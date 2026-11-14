@@ -17,3 +17,4 @@ export {
   type WorkerStatus,
 } from './worker-heartbeats.js';
 export { probeDatabase } from './client.js';
+export { genuinelyCompletedBookingWhere } from './completion.js';
