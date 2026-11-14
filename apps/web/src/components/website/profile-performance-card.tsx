@@ -40,7 +40,7 @@ export function ProfilePerformanceCard({ initial }: { initial: ProfilePerformanc
     }
   }, []);
   useEffect(() => {
-    if (data.state !== 'syncing') return;
+    if (data.state !== 'syncing' && data.state !== 'checking') return;
     const t = setInterval(() => void load(range), 5000);
     return () => clearInterval(t);
   }, [data.state, range, load]);
@@ -118,10 +118,13 @@ export function ProfilePerformanceCard({ initial }: { initial: ProfilePerformanc
         </div>
       );
       break;
+    case 'checking':
+      body = <p className="text-sm text-charcoal-600">Checking whether Google lets this project read your Business Profile numbers (read-only)…</p>;
+      break;
     case 'not_checked':
       body = (
         <div className="space-y-3">
-          <p className="text-sm text-charcoal-600">Checking whether Google lets this project read your Business Profile numbers (read-only)…</p>
+          <p className="text-sm text-charcoal-600">Not checked yet: Google hasn&apos;t been asked whether this project can read your Business Profile numbers. Press Check again (read-only).</p>
           {checkAgain}
         </div>
       );

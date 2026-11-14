@@ -143,5 +143,8 @@ describe('module registration', () => {
     expect(moduleRefIdFor('reviews.gbp.sync', { reason: 'daily' })).toBe('google_business_profile');
     expect(moduleRefIdFor('search.sync', { source: 'business_profile', reason: 'daily' })).toBe('google_business_profile');
     expect(moduleRefIdFor('search.sync', { source: 'search_console', reason: 'daily' })).toBe('google_search_console');
+    // The Performance probe lands on the Business Profile card, like the Performance sync.
+    expect(moduleRefIdFor('website.connection_check', { provider: 'business_profile_performance', reason: 'daily' })).toBe('google_business_profile');
+    expect(moduleRefIdFor('website.connection_check', { provider: 'google_search_console', reason: 'daily' })).toBe('google_search_console');
   });
 });

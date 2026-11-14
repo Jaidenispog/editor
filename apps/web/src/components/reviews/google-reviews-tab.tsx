@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { BUSINESS_PROFILE_AWAITING_APPROVAL_MESSAGE, formatDate, formatDateTime } from '@studio/core';
 import { Alert } from '@/components/ui/alert';
 import { Button, buttonClasses } from '@/components/ui/button';
@@ -12,6 +12,9 @@ import { apiRequest } from '@/lib/client/api-client';
 import type { GoogleReviewsDto } from '@/lib/shared/business-profile-dto';
 
 const CONNECT_HREF = '/api/integrations/google/connect?product=business_profile';
+/** While a check runs the tab asks again every 5 seconds, for at most 5 minutes (then Check again is the way on). */
+const POLL_MS = 5000;
+const POLL_MAX = 60;
 
 /** The pill for each tab state (shared status words; Google's own review states are shown separately, as Google's). */
 function pillFor(state: GoogleReviewsDto['state']): { status: string; label: string } {
@@ -24,6 +27,8 @@ function pillFor(state: GoogleReviewsDto['state']): { status: string; label: str
       return { status: 'manual_step_required', label: 'Choose location' };
     case 'checking':
       return { status: 'processing', label: 'Checking' };
+    case 'not_checked':
+      return { status: 'manual_step_required', label: 'Not checked yet' };
     case 'needs_reauth':
       return { status: 'needs_reauth', label: 'Reconnect' };
     case 'error':
@@ -66,9 +71,20 @@ export function GoogleReviewsTab({ initial, fallback, canEdit }: { initial: Goog
       // Keep what is shown; the next action tries again.
     }
   }, []);
+  const polls = useRef(0);
   useEffect(() => {
-    if (data?.state !== 'checking') return;
-    const t = setInterval(() => void load(), 5000);
+    if (data?.state !== 'checking') {
+      polls.current = 0;
+      return;
+    }
+    const t = setInterval(() => {
+      polls.current += 1;
+      if (polls.current > POLL_MAX) {
+        clearInterval(t);
+        return;
+      }
+      void load();
+    }, POLL_MS);
     return () => clearInterval(t);
   }, [data?.state, load]);
   const act = async (key: string, fn: () => Promise<unknown>, done: string) => {
@@ -121,7 +137,20 @@ export function GoogleReviewsTab({ initial, fallback, canEdit }: { initial: Goog
       );
       break;
     case 'checking':
-      body = <p>Signed in. Checking your Business Profile with Google (read-only)…</p>;
+      body = (
+        <div className="space-y-3">
+          <p>Signed in. Checking your Business Profile with Google (read-only)…</p>
+          {checkAgain}
+        </div>
+      );
+      break;
+    case 'not_checked':
+      body = (
+        <div className="space-y-3">
+          <p>Signed in. Google hasn&apos;t been asked about your Business Profile yet, or the first check didn&apos;t finish. Press Check again to ask Google now (read-only).</p>
+          {checkAgain}
+        </div>
+      );
       break;
     case 'awaiting_approval':
       body = (
@@ -187,6 +216,7 @@ export function GoogleReviewsTab({ initial, fallback, canEdit }: { initial: Goog
             {data.totalReviewCount !== null ? `. Google lists ${data.totalReviewCount} review${data.totalReviewCount === 1 ? '' : 's'}` : ''}
             {data.averageRating !== null ? `, average ${data.averageRating.toFixed(1)} ★` : ''}.
           </p>
+          {data.limited ? <p className="text-xs text-charcoal-500">Showing the newest {data.reviews.length} reviews stored from Google.</p> : null}
           {data.reviews.length === 0 ? (
             <EmptyState title="No Google reviews yet" description="Reviews appear here after Google lists them." />
           ) : (

@@ -117,7 +117,7 @@ describe.skipIf(skip)('Business Profile module on a real database with a fake Go
       expect(result).toMatchObject({ outcome: 'synced', full: true, stored: 3, pages: 2 });
       const row = await conn();
       expect(row.config).toMatchObject({ account: 'accounts/111', location: 'locations/222', locationTitle: 'Ivanhoe Barber Co' });
-      expect(row.capabilities).toMatchObject({ apiAccess: 'available', totalReviewCount: 3, averageRating: 4.5 });
+      expect(row.capabilities).toMatchObject({ apiAccess: 'available', totalReviewCount: 3, averageRating: 4.5, reviewStatsLocation: 'locations/222' });
       const rows = await storedReviews();
       expect(rows.map((r) => [r.externalReviewId, r.rating, r.reviewerName, r.replyText])).toEqual([
         ['r1', 5, 'Sam', 'Thanks Sam'],
@@ -148,6 +148,11 @@ describe.skipIf(skip)('Business Profile module on a real database with a fake Go
       google.fetch.calls.length = 0;
       expect((await handleReviewsGbpSync(ctx, fakeRun(), { reason: 'daily' })).stored).toBe(0);
       expect(reviewCalls()).toBe(1);
+      // Google's totals are never kept from an earlier sync: when Google leaves them out, they are cleared (R12).
+      google.state.omitTotals = true;
+      await handleReviewsGbpSync(ctx, fakeRun(), { reason: 'daily' });
+      expect((await conn()).capabilities).toMatchObject({ totalReviewCount: null, averageRating: null, reviewStatsLocation: 'locations/222' });
+      google.state.omitTotals = false;
     });
 
     it("the weekly full sync picks up a review Google's page-2 issue left out of the incremental syncs", async () => {
@@ -174,6 +179,25 @@ describe.skipIf(skip)('Business Profile module on a real database with a fake Go
       // Restore the one-location set-up for the Performance tests.
       google.state.locations.pop();
       await handleReviewsGbpSync(ctx, fakeRun(), { reason: 'daily' });
+      expect((await conn()).config['location']).toBe('locations/222');
+    });
+
+    it('a location the owner chooses while discovery runs is kept, not reset by the older view (R14)', async () => {
+      const t = schema.integrationConnections;
+      google.state.locations.push({ name: 'locations/333', title: 'Second shop' });
+      await handle.db.update(t).set({ config: {} }).where(eq(t.provider, 'google_business_profile'));
+      google.state.beforeLocations = async () => {
+        google.state.beforeLocations = null;
+        await handle.db.update(t).set({ config: { account: 'accounts/111', location: 'locations/333', locationTitle: 'Second shop' } }).where(eq(t.provider, 'google_business_profile'));
+      };
+      const result = await handleReviewsGbpSync(ctx, fakeRun(), { reason: 'daily' });
+      expect(result.outcome).toBe('synced');
+      expect((await conn()).config).toMatchObject({ account: 'accounts/111', location: 'locations/333', locationTitle: 'Second shop' });
+      expect(((await conn()).config['locations'] as unknown[]).length).toBe(2);
+      // Restore the one-location set-up for the Performance tests.
+      google.state.locations.pop();
+      await handle.db.update(t).set({ config: { account: 'accounts/111', location: 'locations/222', locationTitle: 'Ivanhoe Barber Co' } }).where(eq(t.provider, 'google_business_profile'));
+      await handleReviewsGbpSync(ctx, fakeRun(), { reason: 'weekly_full' });
       expect((await conn()).config['location']).toBe('locations/222');
     });
   });
@@ -257,5 +281,39 @@ describe.skipIf(skip)('Business Profile module on a real database with a fake Go
     await handleWebsiteConnectionCheck(ctx, fakeRun(), { provider: 'business_profile_performance', reason: 'manual' }, deps);
     expect(google.fetch.calls).toHaveLength(0);
     google.state.grant = 'ok';
+  });
+
+  it('a disconnect (deleting the data) between two pages of a sync: nothing is written back, the row stays disconnected and Google is asked to revoke (R10)', async () => {
+    const t = schema.integrationConnections;
+    await handle.db
+      .update(t)
+      .set({ status: 'connected', lastError: null, config: { account: 'accounts/111', location: 'locations/222', locationTitle: 'Ivanhoe Barber Co' }, capabilities: { apiAccess: 'available' }, tokenExpiresAt: new Date(Date.now() - 1000) })
+      .where(eq(t.provider, 'google_business_profile'));
+    google.state.reviews = [
+      { reviewId: 'd1', starRating: 'FIVE', comment: 'One', displayName: 'Ana', createTime: '2026-11-01T01:00:00Z', updateTime: '2026-11-01T01:00:00Z' },
+      { reviewId: 'd2', starRating: 'FOUR', comment: 'Two', displayName: 'Ben', createTime: '2026-11-02T01:00:00Z', updateTime: '2026-11-02T01:00:00Z' },
+      { reviewId: 'd3', starRating: 'FIVE', comment: 'Three', displayName: 'Cal', createTime: '2026-11-03T01:00:00Z', updateTime: '2026-11-03T01:00:00Z' },
+    ];
+    const id = (await conn()).id;
+    // What the web app's disconnect with "delete the data" does, landing while the sync reads page 2.
+    google.state.beforeReviewsPage = async (offset) => {
+      if (offset === 0) return;
+      google.state.beforeReviewsPage = null;
+      await handle.db.transaction(async (tx) => {
+        await tx.update(t).set({ status: 'disconnected', lastError: null }).where(eq(t.id, id));
+        await tx.delete(schema.reviews).where(eq(schema.reviews.provider, 'google_business_profile'));
+        await tx.delete(schema.searchMetrics).where(eq(schema.searchMetrics.source, 'business_profile'));
+      });
+    };
+    const result = await handleReviewsGbpSync(ctx, fakeRun(), { reason: 'weekly_full' });
+    expect(result.outcome).toBe('not_connected');
+    expect(await storedReviews()).toHaveLength(0);
+    const row = await conn();
+    expect(row.status).toBe('disconnected');
+    // The disconnect job still sees "disconnected", so it revokes and wipes the tokens.
+    const { handleGoogleDisconnect } = await import('../src/handlers/google-disconnect.js');
+    await handleGoogleDisconnect(ctx, fakeRun(), { connectionId: id });
+    expect(google.state.revoked).toBe(1);
+    expect(await conn()).toMatchObject({ status: 'disconnected', refreshTokenEncrypted: null, accessTokenEncrypted: null });
   });
 });

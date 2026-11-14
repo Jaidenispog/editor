@@ -159,8 +159,8 @@ describe('Google OAuth', () => {
 
   it('enqueues the follow-up job each owning module registered', () => {
     // The Business Profile module (WP9) registers the reviews sync; the website module (WP8) the Search Console check.
-    expect(googleFollowUpJob('business_profile')).toEqual({ type: 'reviews.gbp.sync', payload: { reason: 'connect' } });
-    expect(googleFollowUpJob('search_console')).toEqual({ type: 'website.connection_check', payload: { provider: 'google_search_console', reason: 'connect' } });
+    expect(googleFollowUpJob('business_profile')).toEqual({ type: 'reviews.gbp.sync', payload: { reason: 'connect' }, singletonKey: 'gbp-sync' });
+    expect(googleFollowUpJob('search_console')).toEqual({ type: 'website.connection_check', payload: { provider: 'google_search_console', reason: 'connect' }, singletonKey: 'website-check:google_search_console' });
   });
 });
 

@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, notInArray, sql } from 'drizzle-orm';
 import type { Env } from '@studio/config';
 import type { ConnectionCapabilities, ConnectionProvider, ConnectionStatus } from '@studio/core';
 import { schema, type Database } from '@studio/db';
@@ -81,9 +81,16 @@ export interface ConnectionCheckResult {
 
 /**
  * Records a read-only check's outcome on the provider's row: status, merged capabilities, last error and the check
- * time. Returns the updated row, or null when the provider has no row (nothing is created).
+ * time. Returns the updated row, or null when the provider has no row (nothing is created) or, with
+ * `unlessDisconnected`, when the owner has disconnected it.
  */
-export async function recordConnectionCheck(db: Database | DbTransaction, provider: ConnectionProvider, result: ConnectionCheckResult, now: Date = new Date()): Promise<ConnectionRow | null> {
+export async function recordConnectionCheck(
+  db: Database | DbTransaction,
+  provider: ConnectionProvider,
+  result: ConnectionCheckResult,
+  now: Date = new Date(),
+  options: { unlessDisconnected?: boolean } = {},
+): Promise<ConnectionRow | null> {
   const t = schema.integrationConnections;
   const rows = await db
     .update(t)
@@ -95,7 +102,8 @@ export async function recordConnectionCheck(db: Database | DbTransaction, provid
       lastSyncAt: now,
       updatedAt: now,
     })
-    .where(eq(t.provider, provider))
+    // With `unlessDisconnected`, a job still running when the owner disconnected cannot switch the row back.
+    .where(options.unlessDisconnected ? and(eq(t.provider, provider), notInArray(t.status, ['disconnected', 'not_configured'])) : eq(t.provider, provider))
     .returning();
   return rows[0] ?? null;
 }

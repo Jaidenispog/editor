@@ -37,6 +37,8 @@ export const websiteModule: WorkerModule = {
       case 'website.copy_draft':
         return typeof payload['editId'] === 'string' ? payload['editId'] : null;
       case 'website.connection_check':
+        // The Performance probe belongs on the Business Profile card (it shares that connection).
+        if (payload['provider'] === 'business_profile_performance') return 'google_business_profile';
         return typeof payload['provider'] === 'string' ? payload['provider'] : null;
       case 'search.sync':
         return payload['source'] === 'business_profile' ? 'google_business_profile' : 'google_search_console';

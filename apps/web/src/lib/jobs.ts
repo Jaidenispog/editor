@@ -18,6 +18,7 @@ import { squareRefId } from './jobs/square.js';
 import { trendsRefId } from './jobs/trends.js';
 import type { RefIdResolver } from './jobs/types.js';
 import { websiteRefId } from './jobs/website.js';
+import { settleStoppedSelfTest, withdrawChangeOfCancelledJob } from './square/stopped.js';
 
 /** Statuses that mean a job is still waiting or working. */
 export const ACTIVE_JOB_STATUSES = ['queued', 'running'] as const;
@@ -226,6 +227,13 @@ export async function settleCancelledQueuedJob(job: Pick<JobRow, 'type' | 'paylo
         .update(schema.musicTracks)
         .set({ status: 'uploaded', statusMessage: MUSIC_ANALYSIS_CANCELLED_MESSAGE, updatedAt: now })
         .where(and(eq(schema.musicTracks.id, String(payload['trackId'])), inArray(schema.musicTracks.status, ['uploaded', 'processing'])));
+      return;
+    case 'square.booking_change':
+      // The worker never saw it, so nothing was sent to Square.
+      await withdrawChangeOfCancelledJob(db, String(payload['changeId']), now);
+      return;
+    case 'square.self_test':
+      await settleStoppedSelfTest(db, String(payload['selfTestId']), now, true);
       return;
     default:
       return;

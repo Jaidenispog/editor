@@ -6,7 +6,7 @@ import { loadConnection } from '../../lib/connections.js';
 import { fetchDailyMetrics, fetchMonthlyKeywords, keywordMonths, performanceWindows, probeWindow, type DailyMetricRow, type KeywordRow } from '../../lib/google/business-profile-performance.js';
 import type { TrackedRun } from '../../lib/job-tracker.js';
 import { enqueueTracked } from '../../lib/jobs.js';
-import { PROVIDER, chosenLocation, handleProfileError, isUsable, profileAccessToken } from './connection.js';
+import { PROVIDER, ProfileStoppedError, chosenLocation, handleProfileError, isUsable, profileAccessToken, signedInRow, whileSignedIn } from './connection.js';
 
 /**
  * Business Profile Performance (website design §7.3, §8), on the shared `google_business_profile` connection and
@@ -23,7 +23,7 @@ async function setPerformanceCapabilities(ctx: Pick<WorkerContext, 'db'>, caps: 
   await ctx.db
     .update(t)
     .set({ capabilities: sql`${t.capabilities} || ${JSON.stringify(caps)}::jsonb`, updatedAt: now })
-    .where(eq(t.provider, PROVIDER));
+    .where(signedInRow());
 }
 
 /**
@@ -107,6 +107,10 @@ export async function syncProfilePerformance(ctx: WorkerContext, run: TrackedRun
       stored += await replaceMonthKeywords(ctx, location.location, month, rows, now());
     }
   } catch (err) {
+    if (err instanceof ProfileStoppedError) {
+      await run.progress(1, err.message);
+      return { stored, outcome: 'skipped' };
+    }
     await handleProfileError(ctx, err, 'performanceApi');
     await run.progress(1, "Waiting for Google's approval of API access");
     return { stored, outcome: 'awaiting_approval' };
@@ -116,44 +120,49 @@ export async function syncProfilePerformance(ctx: WorkerContext, run: TrackedRun
   return { stored, outcome: 'synced' };
 }
 
-/** Upserts daily values on (source, property, granularity, day, kind, key); a missing value is stored as NULL. */
+/**
+ * Upserts daily values on (source, property, granularity, day, kind, key); a missing value is stored as NULL. Only
+ * while the row is still signed in with this location (otherwise ProfileStoppedError, and nothing is stored).
+ */
 export async function upsertDailyMetrics(ctx: Pick<WorkerContext, 'db'>, location: string, rows: DailyMetricRow[], fetchedAt: Date): Promise<number> {
   const m = schema.searchMetrics;
   const unique = [...new Map(rows.map((r) => [`${r.date}|${r.metric}`, r])).values()];
-  for (let i = 0; i < unique.length; i += UPSERT_BATCH) {
-    await ctx.db
-      .insert(m)
-      .values(
-        unique.slice(i, i + UPSERT_BATCH).map((r) => ({
-          id: newId(),
-          source: 'business_profile' as const,
-          property: location,
-          granularity: 'day' as const,
-          periodStart: r.date,
-          kind: 'metric' as const,
-          key: r.metric,
-          value: r.value,
-          valueThreshold: null,
-          fetchedAt,
-        })),
-      )
-      .onConflictDoUpdate({
-        target: [m.source, m.property, m.granularity, m.periodStart, m.kind, m.key],
-        set: { value: sql`excluded.value`, fetchedAt: sql`excluded.fetched_at` },
-      });
-  }
+  await whileSignedIn(ctx, location, async (tx) => {
+    for (let i = 0; i < unique.length; i += UPSERT_BATCH) {
+      await tx
+        .insert(m)
+        .values(
+          unique.slice(i, i + UPSERT_BATCH).map((r) => ({
+            id: newId(),
+            source: 'business_profile' as const,
+            property: location,
+            granularity: 'day' as const,
+            periodStart: r.date,
+            kind: 'metric' as const,
+            key: r.metric,
+            value: r.value,
+            valueThreshold: null,
+            fetchedAt,
+          })),
+        )
+        .onConflictDoUpdate({
+          target: [m.source, m.property, m.granularity, m.periodStart, m.kind, m.key],
+          set: { value: sql`excluded.value`, fetchedAt: sql`excluded.fetched_at` },
+        });
+    }
+  });
   return unique.length;
 }
 
 /**
  * Replaces one month's keywords in a transaction (a keyword Google no longer lists for that month disappears), so a
- * re-run gives identical rows.
+ * re-run gives identical rows. Only while the row is still signed in with this location.
  */
 export async function replaceMonthKeywords(ctx: Pick<WorkerContext, 'db'>, location: string, month: string, rows: KeywordRow[], fetchedAt: Date): Promise<number> {
   const m = schema.searchMetrics;
   const periodStart = `${month}-01`;
   const unique = [...new Map(rows.map((r) => [r.keyword, r])).values()];
-  await ctx.db.transaction(async (tx) => {
+  await whileSignedIn(ctx, location, async (tx) => {
     await tx
       .delete(m)
       .where(and(eq(m.source, 'business_profile'), eq(m.property, location), eq(m.granularity, 'month'), eq(m.periodStart, periodStart), eq(m.kind, 'keyword')));

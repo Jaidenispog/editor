@@ -292,6 +292,17 @@ suite('Website routes (database-backed)', () => {
     expect(chosen.json.job.type).toBe('search.sync');
     await getDb().update(schema.jobs).set({ status: 'succeeded' }).where(eq(schema.jobs.type, 'search.sync'));
     expect((await call(perf.GET, 'GET', '/api/website/search-performance')).json).toMatchObject({ state: 'no_data', groups: null });
+    // A Business Profile Performance sync on the same queue neither shows Search Console as syncing nor blocks its
+    // refresh (R11): only Search Console's own syncs count.
+    await getDb().update(schema.jobs).set({ createdAt: new Date(Date.now() - 20 * 60_000) }).where(eq(schema.jobs.type, 'search.sync'));
+    await getDb().insert(schema.jobs).values({ id: randomUUID(), type: 'search.sync', payload: { source: 'business_profile', reason: 'manual' }, status: 'queued' });
+    expect((await call(perf.GET, 'GET', '/api/website/search-performance')).json).toMatchObject({ state: 'no_data' });
+    const sync = await import('../src/app/api/website/search-performance/sync/route');
+    const refreshed = await call(sync.POST, 'POST', '/api/website/search-performance/sync', { source: 'search_console' });
+    expect(refreshed.status).toBe(202);
+    expect(refreshed.json.job).toMatchObject({ type: 'search.sync', refId: 'google_search_console' });
+    expect((await call(perf.GET, 'GET', '/api/website/search-performance')).json).toMatchObject({ state: 'syncing' });
+    await getDb().update(schema.jobs).set({ status: 'succeeded' }).where(eq(schema.jobs.type, 'search.sync'));
     const p = 'sc-domain:ivanhoebarber.example.com.au';
     const row = (d: string, kind: 'total' | 'query', key: string, clicks: number, impressions: number, position: number) => ({
       id: randomUUID(),

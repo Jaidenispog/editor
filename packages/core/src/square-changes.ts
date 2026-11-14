@@ -5,6 +5,7 @@ import {
   type SquareServiceLabel,
   type SquareTier1Status,
 } from './square.js';
+import { formatDateTime, melbourneZoneLabel } from './time.js';
 
 /**
  * Square booking changes (Tier 1, WP6b; design `docs/design/square-appointments.md` §4.5–4.6, §5.3, §6.3). Every
@@ -145,14 +146,19 @@ export function squareNotificationSentence(answer: SquareCapabilities['squareNot
   return 'Square decides whether the client is notified.';
 }
 
-/** Why a change cannot be made right now, or null when the checklist allows it (shared by the web app and worker). */
-export function writeGateReason(input: { tier1: SquareTier1Status; selfTest: boolean }): string | null {
+/**
+ * Why a change cannot be made right now, or null when the checklist allows it (shared by the web app and worker).
+ * Line 3 (a bookable service) is about booking a service, so it does not apply to a cancel: a cancel never books
+ * anything, and the self-test's clean-up cancel must still be sent after Square refused the move for the only
+ * confirmed service (design §4.5.1 step 8).
+ */
+export function writeGateReason(input: { tier1: SquareTier1Status; selfTest: boolean; kind?: BookingChangeKind | undefined }): string | null {
   const t = input.tier1;
   if (!t.available) return 'Booking changes from Studio Assistant aren’t available yet. Make changes in Square.';
   if (t.suspendedReason) return suspensionWords(t.suspendedReason);
   if (t.checklist.plan !== 'ok') return 'Your Square Appointments plan doesn’t allow apps to change bookings.';
   if (t.checklist.scopes !== 'ok') return 'Studio Assistant doesn’t have permission to change bookings. Press “Give permission” in Settings → Integrations → Square.';
-  if (t.checklist.bookableService !== 'ok') return 'No service is confirmed as free of no-show fees yet.';
+  if (t.checklist.bookableService !== 'ok' && input.kind !== 'cancel') return 'No service is confirmed as free of no-show fees yet.';
   if (input.selfTest) return null;
   if (t.checklist.selfTest !== 'ok') return 'The self-test hasn’t passed on this Square account yet.';
   if (t.checklist.switch !== 'ok') return 'Booking changes are switched off in Settings → Integrations → Square.';
@@ -237,4 +243,58 @@ export function selfTestChangeId(selfTestId: string, kind: BookingChangeKind): s
 /** True when the stored self-test belongs to this connection (it counts only for the same account and environment). */
 export function selfTestIsCurrent(c: SquareCapabilities, environment: SquareEnvironmentName, merchantId: string | null): boolean {
   return c.selfTestEnvironment === environment && c.selfTestMerchantId === merchantId;
+}
+
+/** The words of each self-test step ("Booking failed: …", "Moving failed: …", "Cancelling failed: …"). */
+export const SELF_TEST_STEP_WORDS: Record<BookingChangeKind, string> = { create: 'Booking', reschedule: 'Moving', cancel: 'Cancelling' };
+
+/** What the self-test summary needs from one step row. */
+export interface SelfTestStepFacts {
+  kind: BookingChangeKind;
+  status: string;
+  statusMessage: string;
+  /** The step's start time (the booked time for the create, the target time for the move). */
+  startAt: string | null;
+}
+
+/**
+ * The outcome of a self-test from its three step rows (shared by the worker, which records it, and the web app, which
+ * closes a test whose job was stopped): the first step that was not confirmed (null when all three were), and every
+ * time a test booking may still be in Square. While the cancel is not confirmed, a booking that was made (or may have
+ * been made) is still there: at the moved time once the move was confirmed, at either time while the move's outcome is
+ * not known, otherwise at the booked time.
+ */
+export function selfTestSummary(steps: readonly SelfTestStepFacts[]): { failedStep: BookingChangeKind | null; failedMessage: string; leftoverAt: string[] } {
+  const of = (kind: BookingChangeKind) => steps.find((s) => s.kind === kind) ?? null;
+  const create = of('create');
+  const move = of('reschedule');
+  const cancel = of('cancel');
+  const failed = SELF_TEST_STEPS.map(of).find((s) => s?.status !== 'confirmed');
+  const failedStep = failed === undefined ? null : (failed?.kind ?? SELF_TEST_STEPS.find((k) => !of(k)) ?? 'create');
+  const maybe = (s: SelfTestStepFacts | null) => s?.status === 'unknown' || s?.status === 'submitted';
+  let leftoverAt: Array<string | null | undefined> = [];
+  if (cancel?.status !== 'confirmed') {
+    if (create?.status === 'confirmed') {
+      if (move?.status === 'confirmed') leftoverAt = [move.startAt];
+      else if (maybe(move)) leftoverAt = [create.startAt, move?.startAt];
+      else leftoverAt = [create.startAt];
+    } else if (maybe(create)) leftoverAt = [create?.startAt];
+  }
+  const times = [...new Set(leftoverAt.filter((x): x is string => typeof x === 'string' && !Number.isNaN(Date.parse(x))).map((x) => new Date(x).toISOString()))];
+  return { failedStep, failedMessage: failed?.statusMessage ?? '', leftoverAt: times };
+}
+
+/** The owner's sentence for a failed self-test, with the time(s) a test booking may still be in Square. */
+export function selfTestFailureText(failedStep: BookingChangeKind, message: string, leftoverAt: readonly string[]): string {
+  const label = (at: string) => {
+    const when = new Date(at);
+    return `${formatDateTime(when)} ${melbourneZoneLabel(when)}`;
+  };
+  const leftover =
+    leftoverAt.length === 0
+      ? ''
+      : leftoverAt.length === 1
+        ? ` A test booking may still be in Square for ${label(leftoverAt[0] ?? '')}. Cancel it in Square.`
+        : ` A test booking may still be in Square, for ${leftoverAt.map(label).join(' or ')} (the move may or may not have gone through). Cancel it in Square.`;
+  return `${SELF_TEST_STEP_WORDS[failedStep]} failed: ${message || 'Square didn’t confirm it.'}${leftover}`;
 }

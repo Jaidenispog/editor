@@ -484,4 +484,104 @@ describe.skipIf(skip)('Square booking changes (Tier 1) with a fake Square API', 
     expect(caps['selfTestStatus']).toBe('failed');
     expect(String(caps['selfTestFailure'])).toMatch(/^Cancelling failed: .*A test booking may still be in Square for .* (AEDT|AEST)\. Cancel it in Square\.$/);
   });
+
+  // ---- Review fixes (G5 round 1) -------------------------------------------------------------------------------
+
+  it('self-test: a 400 on the move for the only confirmed service still sends the clean-up cancel (R1)', async () => {
+    // VAR_BEARD carries a no-show fee in the fake, so VAR_FADE is the only bookable service.
+    fake.scenario.availabilities = [fakeSlot({ startAt: at(0) }), fakeSlot({ startAt: at(HOUR) })];
+    await setUp({ selfTestStatus: 'none', writesEnabled: false });
+    const selfTestId = await makeSelfTest(at(0));
+    fake.scenario.failNextWrite = { kind: 'update', error: { status: 400, code: 'INVALID_VALUE', detail: 'Not allowed for this service' } };
+    await handleSquareSelfTest(ctx, fakeRun(), { selfTestId }, ON);
+    expect((await change(selfTestChangeId(selfTestId, 'reschedule'))).status).toBe('rejected');
+    // The move's refusal marked the only confirmed service "Book in Square", yet the cancel is still sent.
+    expect(parseSquareConfig((await conn()).config).serviceWriteRejections['VAR_FADE']).toBeDefined();
+    expect(await change(selfTestChangeId(selfTestId, 'cancel'))).toMatchObject({ status: 'confirmed' });
+    expect(writes().filter((w) => w.path.endsWith('/cancel'))).toHaveLength(1);
+    expect(fake.scenario.bookings.filter((b) => b['source'] === 'API').map((b) => b['status'])).toEqual(['CANCELLED_BY_SELLER']);
+    const caps = (await conn()).capabilities;
+    expect(caps['selfTestStatus']).toBe('failed');
+    expect(String(caps['selfTestFailure'])).toMatch(/^Moving failed: Square refused the change\./);
+    expect(String(caps['selfTestFailure'])).not.toMatch(/may still be in Square/);
+  });
+
+  it('self-test: stopped by the owner, it is closed and recorded instead of staying "running" (R2)', async () => {
+    fake.scenario.availabilities = [fakeSlot({ startAt: at(0) }), fakeSlot({ startAt: at(HOUR) })];
+    await setUp({ selfTestStatus: 'none', writesEnabled: false });
+    const selfTestId = await makeSelfTest(at(0));
+    const run = fakeRun({ willRetry: true });
+    run.abort();
+    await expect(handleSquareSelfTest(ctx, run, { selfTestId }, ON)).rejects.toThrow();
+    for (const kind of ['create', 'reschedule', 'cancel'] as const) {
+      expect(await change(selfTestChangeId(selfTestId, kind))).toMatchObject({ status: 'cancelled', submittedAt: null });
+    }
+    const caps = (await conn()).capabilities;
+    expect(caps).toMatchObject({ selfTestStatus: 'failed', selfTestId });
+    expect(String(caps['selfTestFailure'])).toMatch(/^Booking failed: Stopped before anything was sent to Square\.$/);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it('self-test: stopped after the booking was made, it reports the booking left in Square (R2)', async () => {
+    fake.scenario.availabilities = [fakeSlot({ startAt: at(0) }), fakeSlot({ startAt: at(HOUR) })];
+    await setUp({ selfTestStatus: 'none', writesEnabled: false });
+    const selfTestId = await makeSelfTest(at(0));
+    // The booking is made, then the owner stops the test while it moves it.
+    const run = fakeRun({ willRetry: false });
+    const progress = run.progress;
+    run.progress = async (fraction, message) => {
+      if (message === 'Moving…') run.abort();
+      return progress(fraction, message);
+    };
+    await expect(handleSquareSelfTest(ctx, run, { selfTestId }, ON)).rejects.toThrow();
+    expect((await change(selfTestChangeId(selfTestId, 'create'))).status).toBe('confirmed');
+    expect((await change(selfTestChangeId(selfTestId, 'reschedule'))).status).toBe('cancelled');
+    expect((await change(selfTestChangeId(selfTestId, 'cancel'))).status).toBe('cancelled');
+    const caps = (await conn()).capabilities;
+    expect(caps['selfTestStatus']).toBe('failed');
+    expect(String(caps['selfTestFailure'])).toMatch(/^Moving failed: .*A test booking may still be in Square for .* (AEDT|AEST)\. Cancel it in Square\.$/);
+  });
+
+  it('settling an unknown cancel: a client cancel online is not reported as ours (R6)', async () => {
+    fake.scenario.bookings = [fakeBooking({ id: 'BK_GONE', startAt: at(0), customerId: 'CUST_JORDAN', version: 3, status: 'CANCELLED_BY_CUSTOMER' })];
+    const id = await makeChange('cancel', { expectedVersion: 2 }, { squareBookingId: 'BK_GONE' });
+    await handle.db.update(schema.squareBookingChanges).set({ status: 'unknown', submittedAt: new Date() }).where(eq(schema.squareBookingChanges.id, id));
+    const s = await openSquare(ctx, fakeRun());
+    if ('skip' in s) throw new Error(s.skip);
+    expect(await settleUnknownChanges(ctx, s)).toBe(0);
+    expect(await change(id)).toMatchObject({ status: 'changed_in_square', statusMessage: 'The client cancelled this in Square.' });
+    // A seller cancel at a later version is ours.
+    fake.scenario.bookings = [fakeBooking({ id: 'BK_SELLER', startAt: at(0), customerId: 'CUST_JORDAN', version: 3, status: 'CANCELLED_BY_SELLER' })];
+    const ours = await makeChange('cancel', { expectedVersion: 2 }, { squareBookingId: 'BK_SELLER' });
+    await handle.db.update(schema.squareBookingChanges).set({ status: 'unknown', submittedAt: new Date() }).where(eq(schema.squareBookingChanges.id, ours));
+    expect(await settleUnknownChanges(ctx, s)).toBe(1);
+    expect(await change(ours)).toMatchObject({ status: 'confirmed', statusMessage: 'Cancelled in Square. (Square shows it, so it was made.)' });
+  });
+
+  it('a disconnect after submitted_at but before the call sends nothing (R7)', async () => {
+    fake.scenario.availabilities = [fakeSlot({ startAt: at(0) })];
+    const id = await makeChange('create', createRequest(at(0)));
+    const run = fakeRun();
+    const progress = run.progress;
+    run.progress = async (fraction, message) => {
+      if (message === 'Sending to Square…') await handle.db.update(schema.integrationConnections).set({ status: 'disconnected' }).where(eq(schema.integrationConnections.provider, 'square'));
+      return progress(fraction, message);
+    };
+    await runBookingChange(ctx, run, id, ON);
+    expect(await change(id)).toMatchObject({ status: 'not_allowed' });
+    expect((await change(id)).statusMessage).toMatch(/disconnected or switched.*Nothing was sent/);
+    expect(writes()).toHaveLength(0);
+    expect((await handle.db.select().from(schema.auditLog).where(and(eq(schema.auditLog.entityId, id), eq(schema.auditLog.action, 'booking.change_submitted')))).length).toBe(0);
+  });
+
+  it('a 404 on a create is rejected without marking the service "Book in Square" (R8)', async () => {
+    fake.scenario.availabilities = [fakeSlot({ startAt: at(0) })];
+    fake.scenario.failNextWrite = { kind: 'create', error: { status: 404, code: 'NOT_FOUND', detail: 'Customer not found' } };
+    const id = await makeChange('create', createRequest(at(0)));
+    await runBookingChange(ctx, fakeRun(), id, ON);
+    const row = await change(id);
+    expect(row).toMatchObject({ status: 'rejected', httpStatus: 404 });
+    expect(row.statusMessage).not.toMatch(/Book in Square/);
+    expect(parseSquareConfig((await conn()).config).serviceWriteRejections).toEqual({});
+  });
 });

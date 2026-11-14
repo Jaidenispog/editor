@@ -13,6 +13,7 @@ import {
   parseSquareCapabilities,
   parseSquareConfig,
   selfTestAllowed,
+  selfTestChangeId,
   selfTestIsCurrent,
   squareIntegrationState,
   squareNotificationSentence,
@@ -32,6 +33,7 @@ import { createTrackedJob } from '../jobs.js';
 import { missingEnv } from '../integrations/types.js';
 import type { BookingChangeDto, SelfTestDto, SquareRevokeDto, SquareServiceDto, SquareStatusDto, Tier1LineDto } from '../shared/square-dto.js';
 import { toChangeDto } from './change-dto.js';
+import { settleStoppedSelfTest } from './stopped.js';
 
 /** The stored `square` connection row, or null. */
 export async function loadSquareConnection(db: Database = getDb()) {
@@ -136,6 +138,21 @@ export async function squareRevokeOutcome(db: Database, conn: { id: string; stat
   return null;
 }
 
+/**
+ * True when the owner can be asked "Did the client receive a confirmation from Square for the test booking?": the
+ * current self-test (this account, live Square) really made a test booking (its create step was confirmed by Square).
+ * Otherwise there was no booking to be notified about, and the dialogs keep "Square decides whether the client is
+ * notified."
+ */
+export async function selfTestMadeLiveBooking(db: Database, conn: { externalAccountId: string | null; capabilities: Record<string, unknown> | null }, environment: 'sandbox' | 'production'): Promise<boolean> {
+  const caps = parseSquareCapabilities(conn.capabilities);
+  if (environment !== 'production' || caps.selfTestStatus === 'running' || caps.selfTestStatus === 'none' || !caps.selfTestId) return false;
+  if (!selfTestIsCurrent(caps, 'production', conn.externalAccountId)) return false;
+  const t = schema.squareBookingChanges;
+  const create = (await db.select({ status: t.status, environment: t.environment, merchantId: t.merchantId }).from(t).where(eq(t.id, selfTestChangeId(caps.selfTestId, 'create'))).limit(1))[0];
+  return create?.status === 'confirmed' && create.environment === 'production' && create.merchantId === conn.externalAccountId;
+}
+
 /** Test-only options: `tier1Available` overrides `SQUARE_TIER1_AVAILABLE` (production code never passes it). */
 export interface Tier1Options {
   tier1Available?: boolean | undefined;
@@ -164,7 +181,10 @@ export function enableReason(t: SquareTier1Status): string | null {
 /** Everything the Square card and the Appointments header show (never tokens or secrets). */
 export async function getSquareStatus(user: SessionUser, db: Database = getDb(), now: Date = new Date(), opts: Tier1Options = {}): Promise<SquareStatusDto> {
   const env = getEnv();
-  const conn = await loadSquareConnection(db);
+  let conn = await loadSquareConnection(db);
+  // A self-test whose job stopped (cancelled, or the worker died on its last attempt) is closed, not shown running.
+  const before = parseSquareCapabilities(conn?.capabilities);
+  if (conn && before.selfTestStatus === 'running' && (await settleStoppedSelfTest(db, before.selfTestId, now))) conn = await loadSquareConnection(db);
   const missing = missingEnv(env, ['SQUARE_APPLICATION_ID', 'SQUARE_APPLICATION_SECRET']);
   const r = squareIntegrationState({
     envPresent: missing.length === 0,
@@ -204,7 +224,8 @@ export async function getSquareStatus(user: SessionUser, db: Database = getDb(),
     canRun: owner && runWhy === null,
     runReason: owner ? runWhy : 'Only the owner can run the self-test.',
     notifies: caps.squareNotifiesApiBookings,
-    askNotification: owner && selfTestCurrent && caps.selfTestEnvironment === 'production' && caps.selfTestStatus !== 'running' && caps.selfTestStatus !== 'none' && caps.squareNotifiesApiBookings === 'unknown',
+    // Only after the current test really made a booking on live Square: otherwise there was nothing to be notified about.
+    askNotification: owner && connected && caps.squareNotifiesApiBookings === 'unknown' && conn !== null && (await selfTestMadeLiveBooking(db, conn, r.environment)),
     steps: hasData ? await selfTestSteps(db, caps.selfTestId, config, now) : [],
   };
   return {
@@ -235,7 +256,8 @@ export async function getSquareStatus(user: SessionUser, db: Database = getDb(),
       enableReason: enableWhy,
       switchOn: caps.writesEnabled,
       canGivePermission: owner && connected && r.tier1.available && r.tier1.checklist.scopes !== 'ok',
-      notificationSentence: squareNotificationSentence(caps.squareNotifiesApiBookings),
+      // The owner's answer counts only for the live account it was given for (never a sandbox answer).
+      notificationSentence: squareNotificationSentence(selfTestCurrent && caps.selfTestEnvironment === 'production' ? caps.squareNotifiesApiBookings : 'unknown'),
     },
     selfTest,
     services: serviceDtos(config),
@@ -292,8 +314,9 @@ export async function updateSquareSettings(
     const service = config.snapshot?.services.find((s) => s.variationId === variationId);
     if (!service) throw new AppError('VALIDATION', 'That service is not in your Square catalogue.');
     const entry = { version: service.version, confirmedBy: user.id, confirmedAt: new Date().toISOString() };
+    // Confirming again also clears an earlier refusal by Square for this service (the "Book in Square" label it set).
     const next = confirmed
-      ? sql`jsonb_set(${t.config}, '{serviceConfirmations}', coalesce(${t.config}->'serviceConfirmations', '{}'::jsonb) || ${JSON.stringify({ [variationId]: entry })}::jsonb)`
+      ? sql`jsonb_set(jsonb_set(${t.config}, '{serviceConfirmations}', coalesce(${t.config}->'serviceConfirmations', '{}'::jsonb) || ${JSON.stringify({ [variationId]: entry })}::jsonb), '{serviceWriteRejections}', coalesce(${t.config}->'serviceWriteRejections', '{}'::jsonb) - ${variationId}::text)`
       : sql`jsonb_set(${t.config}, '{serviceConfirmations}', coalesce(${t.config}->'serviceConfirmations', '{}'::jsonb) - ${variationId}::text)`;
     await db.update(t).set({ config: next, updatedAt: new Date() }).where(eq(t.id, conn.id));
     await writeAudit({ userId: user.id, action: confirmed ? 'integration.square.service_confirmed' : 'integration.square.service_unconfirmed', entityType: 'integration_connection', entityId: conn.id, data: { variationId, version: service.version } });

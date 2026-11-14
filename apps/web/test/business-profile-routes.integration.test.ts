@@ -156,8 +156,24 @@ suite('Business Profile routes (database-backed)', () => {
         { id: randomUUID(), provider: 'google_business_profile', externalReviewId: 'a', rating: 5, reviewerName: 'Sam', comment: 'Great fade', raw: { location: 'locations/2', reviewReplyState: 'REPLY_PUBLISHED' }, reviewCreatedAt: new Date('2026-11-01T00:00:00Z'), reviewUpdatedAt: new Date('2026-11-01T00:00:00Z') },
         { id: randomUUID(), provider: 'google_business_profile', externalReviewId: 'b', rating: 4, reviewerName: 'Anonymous', raw: { location: 'locations/2' }, reviewCreatedAt: new Date('2026-11-05T00:00:00Z'), reviewUpdatedAt: new Date('2026-11-05T00:00:00Z') },
       ]);
+    // Google's totals stored before the choice belonged to no chosen listing: they are cleared, not shown as this
+    // location's (R12), until the sync for the chosen location stores its own.
+    const before = await call(reviews.GET, 'GET', '/api/reviews/google');
+    expect(before.json.profile).toMatchObject({ state: 'connected', totalReviewCount: null, averageRating: null, syncedAt: null });
+    const caps = (await getDb().query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.id, connId) }))!.capabilities;
+    expect(caps).toMatchObject({ totalReviewCount: null, averageRating: null, reviewsSyncedAt: null });
+    // Totals stored for another location are never shown for this one.
+    await getDb()
+      .update(schema.integrationConnections)
+      .set({ capabilities: { ...caps, totalReviewCount: 57, averageRating: 4.8, reviewsSyncedAt: '2026-11-14T03:00:00.000Z', reviewStatsLocation: 'locations/3' } })
+      .where(eq(schema.integrationConnections.id, connId));
+    expect((await call(reviews.GET, 'GET', '/api/reviews/google')).json.profile).toMatchObject({ totalReviewCount: null, averageRating: null });
+    await getDb()
+      .update(schema.integrationConnections)
+      .set({ capabilities: { ...caps, totalReviewCount: 2, averageRating: 4.5, reviewsSyncedAt: '2026-11-14T03:00:00.000Z', reviewStatsLocation: 'locations/2' } })
+      .where(eq(schema.integrationConnections.id, connId));
     const list = await call(reviews.GET, 'GET', '/api/reviews/google');
-    expect(list.json.profile).toMatchObject({ state: 'connected', location: { name: 'locations/2', title: 'Ivanhoe Barber Co' }, totalReviewCount: 2, averageRating: 4.5, locations: [] });
+    expect(list.json.profile).toMatchObject({ state: 'connected', location: { name: 'locations/2', title: 'Ivanhoe Barber Co' }, totalReviewCount: 2, averageRating: 4.5, locations: [], limited: false });
     expect(list.json.profile.reviews.map((r: { reviewerName: string; replyState: string | null }) => [r.reviewerName, r.replyState])).toEqual([
       ['Anonymous', null],
       ['Sam', 'Reply published'],
@@ -172,12 +188,15 @@ suite('Business Profile routes (database-backed)', () => {
     const { schema } = await import('@studio/db');
     const { eq } = await import('drizzle-orm');
     const perf = await import('../src/app/api/website/business-profile-performance/route');
+    // "Checking" only while the probe queued by the location choice is waiting or running (R13); afterwards, with no
+    // answer recorded, "not checked yet".
+    expect((await call(perf.GET, 'GET', '/api/website/business-profile-performance')).json).toMatchObject({ state: 'checking', totals: null });
+    await getDb().update(schema.jobs).set({ status: 'succeeded' });
     expect((await call(perf.GET, 'GET', '/api/website/business-profile-performance')).json).toMatchObject({ state: 'not_checked', totals: null });
     await getDb()
       .update(schema.integrationConnections)
-      .set({ capabilities: { apiAccess: 'available', performanceApi: 'available' } })
+      .set({ capabilities: { apiAccess: 'available', performanceApi: 'available', totalReviewCount: 2, averageRating: 4.5, reviewStatsLocation: 'locations/2' } })
       .where(eq(schema.integrationConnections.id, connId));
-    await getDb().update(schema.jobs).set({ status: 'succeeded' });
     expect((await call(perf.GET, 'GET', '/api/website/business-profile-performance')).json).toMatchObject({ state: 'no_data', totals: null, canRefresh: true });
     const metric = (d: string, key: string, value: number | null) => ({ id: randomUUID(), source: 'business_profile' as const, property: 'locations/2', granularity: 'day' as const, periodStart: d, kind: 'metric' as const, key, value });
     await getDb()
@@ -197,19 +216,45 @@ suite('Business Profile routes (database-backed)', () => {
       viewParts: { search: { mobile: null, desktop: 30 }, maps: { mobile: null, desktop: null } },
     });
     expect(shown.json.keywords.month).toBe('2026-10');
-    const refreshed = await call(perf.POST, 'POST', '/api/website/business-profile-performance', {});
+    // The Search Console route refreshes Business Profile numbers too (L2), with the same 15-minute limit.
+    const searchSync = await import('../src/app/api/website/search-performance/sync/route');
+    const refreshed = await call(searchSync.POST, 'POST', '/api/website/search-performance/sync', { source: 'business_profile' });
     expect(refreshed.status).toBe(202);
-    expect(refreshed.json.job.type).toBe('search.sync');
+    expect(refreshed.json.job).toMatchObject({ type: 'search.sync', refId: 'google_business_profile' });
     expect((await call(perf.POST, 'POST', '/api/website/business-profile-performance', {})).status).toBe(429);
+    expect((await call(searchSync.POST, 'POST', '/api/website/search-performance/sync', { source: 'business_profile' })).status).toBe(429);
 
     const disconnect = await import('../src/app/api/integrations/google-business-profile/route');
     expect((await call(disconnect.DELETE, 'DELETE', '/api/integrations/google-business-profile?deleteData=true')).status).toBe(202);
     const row = await getDb().query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.id, connId) });
     expect(row?.status).toBe('disconnected');
+    // Google's totals are cleared, and the Performance sync still waiting is cancelled (R10, R12).
+    expect(row?.capabilities).toMatchObject({ totalReviewCount: null, averageRating: null, reviewStatsLocation: null });
+    expect((await getDb().select().from(schema.jobs).where(eq(schema.jobs.id, refreshed.json.job.id)))[0]?.status).toBe('cancelled');
     expect(await getDb().select().from(schema.reviews)).toHaveLength(0);
     expect(await getDb().select().from(schema.searchMetrics).where(eq(schema.searchMetrics.source, 'business_profile'))).toHaveLength(0);
     expect((await getDb().select().from(schema.jobs).where(eq(schema.jobs.type, 'google.disconnect'))).length).toBe(1);
     const reviews = await import('../src/app/api/reviews/google/route');
     expect((await call(reviews.GET, 'GET', '/api/reviews/google')).json.profile).toMatchObject({ state: 'not_connected', reviews: [] });
+  });
+
+  it('signed in but never answered: "checking" only while a check is queued or running, otherwise "not checked yet" (R13, R15)', async () => {
+    const { getDb } = await import('../src/lib/db');
+    const { schema } = await import('@studio/db');
+    const { eq } = await import('drizzle-orm');
+    await getDb().update(schema.jobs).set({ status: 'succeeded' });
+    await getDb().update(schema.integrationConnections).set({ status: 'connected', capabilities: {}, config: {} }).where(eq(schema.integrationConnections.id, connId));
+    const reviews = await import('../src/app/api/reviews/google/route');
+    const perf = await import('../src/app/api/website/business-profile-performance/route');
+    expect((await call(reviews.GET, 'GET', '/api/reviews/google')).json.profile.state).toBe('not_checked');
+    expect((await call(perf.GET, 'GET', '/api/website/business-profile-performance')).json.state).toBe('not_checked');
+    // Check again queues the read-only sync: now it really is checking.
+    const check = await import('../src/app/api/integrations/google-business-profile/check/route');
+    expect((await call(check.POST, 'POST', '/api/integrations/google-business-profile/check', {})).status).toBeLessThan(300);
+    expect((await call(reviews.GET, 'GET', '/api/reviews/google')).json.profile.state).toBe('checking');
+    // The Website card never says "not connected" while signed in.
+    expect((await call(perf.GET, 'GET', '/api/website/business-profile-performance')).json.state).toBe('checking');
+    await getDb().update(schema.jobs).set({ status: 'failed' }).where(eq(schema.jobs.type, 'reviews.gbp.sync'));
+    expect((await call(reviews.GET, 'GET', '/api/reviews/google')).json.profile.state).toBe('not_checked');
   });
 });

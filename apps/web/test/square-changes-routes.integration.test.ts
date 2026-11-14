@@ -334,17 +334,132 @@ suite('Square booking changes in the web app (database-backed)', () => {
     expect(await code(updateSquareSettings(owner, { writesEnabled: false }, d, ON))).toBe('ok');
   });
 
-  it('answers the client-notification question only after a self-test, and the dialog sentence follows it', async () => {
+  it('asks and accepts the client-notification answer only after a self-test made a booking on live Square (R5)', async () => {
     const notify = await import('../src/app/api/integrations/square/self-test/notification/route');
+    const { getSquareStatus } = await import('../src/lib/square/status');
+    const { eq } = await import('drizzle-orm');
+    const d = await db();
+    const s = await schema();
+    const post = (answer: string) => call(notify.POST, 'POST', '/api/integrations/square/self-test/notification', {}, { answer });
     signIn(owner);
     await connect({ ...readyCaps, selfTestStatus: 'none' });
-    expect((await call(notify.POST, 'POST', '/api/integrations/square/self-test/notification', {}, { answer: 'yes' })).status).toBe(409);
-    await connect(readyCaps);
-    const r = await call(notify.POST, 'POST', '/api/integrations/square/self-test/notification', {}, { answer: 'no' });
-    expect(r.status).toBe(200);
-    expect(r.json.tier1.notificationSentence).toBe('Square didn’t send a confirmation for the test booking, so let the client know yourself.');
-    signIn(staff);
-    expect((await call(notify.POST, 'POST', '/api/integrations/square/self-test/notification', {}, { answer: 'yes' })).status).toBe(403);
+    expect((await post('yes')).status).toBe(409);
+    // A sandbox self-test never asks, and its answer is refused.
+    await connect({ ...readyCaps, selfTestId: 'st-sandbox' });
+    expect((await getSquareStatus(owner, d, new Date(), ON)).selfTest.askNotification).toBe(false);
+    expect((await post('no')).status).toBe(409);
+
+    process.env.SQUARE_ENVIRONMENT = 'production';
+    try {
+      const liveCaps = { ...readyCaps, selfTestStatus: 'failed', selfTestEnvironment: 'production', selfTestId: 'st-live' };
+      await connect(liveCaps);
+      await d.update(s.integrationConnections).set({ config: { environment: 'production', locationId: 'LOC_1', snapshot, serviceConfirmations: {} } }).where(eq(s.integrationConnections.provider, 'square'));
+      const createStep = (status: string) => ({
+        id: 'st-live-create',
+        kind: 'create',
+        environment: 'production',
+        merchantId: 'MERCHANT_FAKE_1',
+        request: { locationId: 'LOC_1', startAt: slotAt },
+        idempotencyKey: 'sabc_st-live-create',
+        selfTestId: 'st-live',
+        status,
+      });
+      // The test failed before any booking was made: nothing to ask about, and the dialogs keep the neutral sentence.
+      await d.insert(s.squareBookingChanges).values(createStep('slot_unavailable') as never);
+      expect((await getSquareStatus(owner, d, new Date(), ON)).selfTest.askNotification).toBe(false);
+      const refused = await post('no');
+      expect(refused.status).toBe(409);
+      expect((await getSquareStatus(owner, d, new Date(), ON)).tier1.notificationSentence).toBe('Square decides whether the client is notified.');
+      // Square confirmed the test booking on live Square: the owner is asked, and the answer is used.
+      await d.update(s.squareBookingChanges).set({ status: 'confirmed' }).where(eq(s.squareBookingChanges.id, 'st-live-create'));
+      expect((await getSquareStatus(owner, d, new Date(), ON)).selfTest.askNotification).toBe(true);
+      const r = await post('no');
+      expect(r.status).toBe(200);
+      expect(r.json.tier1.notificationSentence).toBe('Square didn’t send a confirmation for the test booking, so let the client know yourself.');
+      signIn(staff);
+      expect((await post('yes')).status).toBe(403);
+    } finally {
+      process.env.SQUARE_ENVIRONMENT = 'sandbox';
+    }
+  });
+
+  it('a self-test whose job failed or was cancelled is closed, not left "running" (R2, L1)', async () => {
+    const { requestSelfTest } = await import('../src/lib/square/changes');
+    const { getSquareStatus } = await import('../src/lib/square/status');
+    const { cancelJob } = await import('../src/lib/jobs');
+    const { eq } = await import('drizzle-orm');
+    const d = await db();
+    const s = await schema();
+    const caps = async () => (await d.select().from(s.integrationConnections).where(eq(s.integrationConnections.provider, 'square')))[0]!.capabilities;
+    const input = { customerId: ids.customer, serviceVariationId: 'VAR_FADE', teamMemberId: 'TM_SAM', startAt: slotAt, availabilitySearchId: ids.search, acknowledgeLive: false };
+    await connect({ ...readyCaps, selfTestStatus: 'none', writesEnabled: false });
+    // The worker died on the last attempt while checking the booking step (restart recovery marked the job failed).
+    const first = await requestSelfTest(input, owner, d, ON);
+    await d.update(s.squareBookingChanges).set({ status: 'checking' }).where(eq(s.squareBookingChanges.id, `${first.selfTestId}-create`));
+    await d.update(s.jobs).set({ status: 'failed' }).where(eq(s.jobs.id, first.jobId));
+    const st = await getSquareStatus(owner, d, new Date(), ON);
+    expect(st.selfTest).toMatchObject({ status: 'failed', canRun: true });
+    expect(st.selfTest.failure).toBe('Booking failed: Stopped before anything was sent to Square.');
+    expect(st.selfTest.steps.map((x) => x.status)).toEqual(['cancelled', 'cancelled', 'cancelled']);
+    // A new test is no longer refused as "already running"; cancelling it before it starts closes it at once.
+    await freshSearch(ids.search, null);
+    const second = await requestSelfTest(input, owner, d, ON);
+    expect((await caps())['selfTestStatus']).toBe('running');
+    await cancelJob(second.jobId);
+    expect((await caps())).toMatchObject({ selfTestStatus: 'failed', selfTestId: second.selfTestId });
+    const rows = await d.select().from(s.squareBookingChanges).where(eq(s.squareBookingChanges.selfTestId, second.selfTestId));
+    expect(rows.map((r) => r.status)).toEqual(['cancelled', 'cancelled', 'cancelled']);
+  });
+
+  it('a change left "checking" by a failed job is closed, and no longer blocks the booking (R3)', async () => {
+    const { requestBookingChange, getBookingChange } = await import('../src/lib/square/changes');
+    const { eq } = await import('drizzle-orm');
+    const d = await db();
+    const s = await schema();
+    const first = await requestBookingChange({ kind: 'cancel', bookingId: ids.future, expectedVersion: 2 }, owner, d, ON);
+    await d.update(s.squareBookingChanges).set({ status: 'checking' }).where(eq(s.squareBookingChanges.id, first.change.id));
+    await d.update(s.jobs).set({ status: 'failed' }).where(eq(s.jobs.id, first.jobId));
+    expect(await getBookingChange(first.change.id, d)).toMatchObject({ status: 'failed', statusMessage: 'Stopped before anything was sent to Square.', done: true });
+    // Another stuck one, closed by the next request for the same booking instead of refusing it.
+    const second = await requestBookingChange({ kind: 'cancel', bookingId: ids.future, expectedVersion: 2 }, owner, d, ON);
+    await d.update(s.squareBookingChanges).set({ status: 'checking' }).where(eq(s.squareBookingChanges.id, second.change.id));
+    await d.update(s.jobs).set({ status: 'cancelled' }).where(eq(s.jobs.id, second.jobId));
+    const third = await requestBookingChange({ kind: 'cancel', bookingId: ids.future, expectedVersion: 2 }, owner, d, ON);
+    expect(third.change.status).toBe('queued');
+    expect((await d.select().from(s.squareBookingChanges).where(eq(s.squareBookingChanges.id, second.change.id)))[0]).toMatchObject({ status: 'cancelled', statusMessage: 'Stopped before anything was sent to Square.' });
+    // A change still being checked by a running job keeps blocking.
+    await d.update(s.squareBookingChanges).set({ status: 'checking' }).where(eq(s.squareBookingChanges.id, third.change.id));
+    await d.update(s.jobs).set({ status: 'running' }).where(eq(s.jobs.id, third.jobId));
+    await expect(requestBookingChange({ kind: 'cancel', bookingId: ids.future, expectedVersion: 2 }, owner, d, ON)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('cancelling a queued change’s job closes the change at once (L1)', async () => {
+    const { requestBookingChange } = await import('../src/lib/square/changes');
+    const { cancelJob } = await import('../src/lib/jobs');
+    const { eq } = await import('drizzle-orm');
+    const d = await db();
+    const s = await schema();
+    const r = await requestBookingChange({ kind: 'cancel', bookingId: ids.future, expectedVersion: 2 }, owner, d, ON);
+    await cancelJob(r.jobId);
+    expect((await d.select().from(s.squareBookingChanges).where(eq(s.squareBookingChanges.id, r.change.id)))[0]).toMatchObject({ status: 'cancelled', statusMessage: 'Stopped before anything was sent to Square.' });
+  });
+
+  it('confirming a service again clears Square’s refusal, whose label does not claim a no-show fee (R4)', async () => {
+    const { updateSquareSettings, getSquareStatus } = await import('../src/lib/square/status');
+    const { eq } = await import('drizzle-orm');
+    const d = await db();
+    const s = await schema();
+    const c = (await d.select().from(s.integrationConnections).where(eq(s.integrationConnections.provider, 'square')))[0]!;
+    await d
+      .update(s.integrationConnections)
+      .set({ config: { ...c.config, serviceWriteRejections: { VAR_FADE: { changeId: 'c1', code: 'INVALID_VALUE', at: new Date().toISOString() } } } })
+      .where(eq(s.integrationConnections.provider, 'square'));
+    const fade = async () => (await getSquareStatus(owner, d, new Date(), ON)).services.find((x) => x.variationId === 'VAR_FADE')!;
+    expect(await fade()).toMatchObject({ label: 'book_in_square', labelReason: 'Book in Square — Square refused a change for this service (code INVALID_VALUE). Check it in Square, then confirm it again.' });
+    await updateSquareSettings(owner, { serviceConfirmation: { variationId: 'VAR_FADE', confirmed: true } }, d, ON);
+    expect(await fade()).toMatchObject({ label: 'bookable' });
+    const after = (await d.select().from(s.integrationConnections).where(eq(s.integrationConnections.provider, 'square')))[0]!;
+    expect((after.config as { serviceWriteRejections: Record<string, unknown> }).serviceWriteRejections).toEqual({});
   });
 
   it('closes a queued change whose job was cancelled, and withdraws queued changes on disconnect', async () => {

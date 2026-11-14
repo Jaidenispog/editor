@@ -41,10 +41,12 @@ export interface GoogleReviewsDto {
   averageRating: number | null;
   syncedAt: string | null;
   canRefresh: boolean;
+  /** True when more stored reviews exist than the tab lists (it shows the newest ones). */
+  limited: boolean;
 }
 
 /** The Business Profile performance card's states (website design §4.6). */
-export type ProfilePanelState = 'not_configured' | 'not_connected' | 'choose_location' | 'needs_reauth' | 'error' | ProfilePerformanceState | 'syncing' | 'no_data' | 'connected';
+export type ProfilePanelState = 'not_configured' | 'not_connected' | 'checking' | 'choose_location' | 'needs_reauth' | 'error' | ProfilePerformanceState | 'syncing' | 'no_data' | 'connected';
 
 /** One month's search keywords, grouped like Search Console queries. */
 export interface ProfileKeywordDto {

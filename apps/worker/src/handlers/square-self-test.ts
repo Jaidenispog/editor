@@ -2,24 +2,22 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import {
   CancelledError,
   NonRetryableError,
+  SELF_TEST_STEP_WORDS,
   availabilityRange,
-  formatDateTime,
   melbourneDateOf,
-  melbourneZoneLabel,
   selfTestChangeId,
+  selfTestFailureText,
+  selfTestSummary,
   type BookingChangeKind,
   type JobPayload,
 } from '@studio/core';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import { writeWorkerAudit } from '../lib/audit.js';
-import type { TrackedRun } from '../lib/job-tracker.js';
+import { stopOutcome, type TrackedRun } from '../lib/job-tracker.js';
 import { SquareApiError, isMalformedBooking } from '../square/api.js';
 import { runBookingChange, type BookingChangeOptions, type BookingChangeRow } from '../square/change.js';
 import { openSquare } from '../square/client.js';
-
-/** The words of each step on the progress line ("Booking… Moving… Cancelling…"). */
-const STEP_WORDS: Record<BookingChangeKind, string> = { create: 'Booking', reschedule: 'Moving', cancel: 'Cancelling' };
 
 /**
  * `square.self_test` (design §4.5.1): the owner-approved test that books one appointment, moves it by one free slot
@@ -27,56 +25,63 @@ const STEP_WORDS: Record<BookingChangeKind, string> = { create: 'Booking', resch
  * never run by a sync, a connect or a schedule. The three step rows are created by the web app when the owner
  * approves (fixed ids), so a test interrupted by a crash resumes at its first unfinished step. Even when the move
  * fails, the cancel is still attempted; a test booking that may be left in Square is reported with its time.
- * The outcome is stored in the connection's capabilities and only counts for this account and environment.
+ * A test stopped by the owner, or failing on its last attempt, is closed and recorded as failed (never left
+ * "running"). The outcome is stored in the connection's capabilities and only counts for this account and environment.
  */
 export async function handleSquareSelfTest(ctx: WorkerContext, run: TrackedRun, payload: JobPayload<'square.self_test'>, opts: BookingChangeOptions = {}): Promise<void> {
+  try {
+    await runSelfTest(ctx, run, payload.selfTestId, opts);
+  } catch (err) {
+    // Nothing will resume this test: the steps not sent are withdrawn, a step sent without an answer is `unknown`,
+    // and the outcome is recorded (with the time of a test booking that may still be in Square).
+    const outcome = err instanceof CancelledError ? await stopOutcome(run) : retryable(run, err) ? 'resume' : 'failed';
+    if (outcome !== 'resume') {
+      await closeStoppedSteps(ctx, payload.selfTestId, outcome === 'cancelled' ? 'Stopped before anything was sent to Square.' : 'Not run: the self-test stopped with an error before this step was sent.');
+      await record(ctx, run, payload.selfTestId);
+    }
+    throw err;
+  }
+}
+
+async function runSelfTest(ctx: WorkerContext, run: TrackedRun, selfTestId: string, opts: BookingChangeOptions): Promise<void> {
   const t = schema.squareBookingChanges;
-  const rows = await ctx.db.select().from(t).where(eq(t.selfTestId, payload.selfTestId));
-  const step = (kind: BookingChangeKind) => rows.find((r) => r.id === selfTestChangeId(payload.selfTestId, kind)) ?? null;
-  const create = step('create');
-  if (!create || !step('reschedule') || !step('cancel')) {
+  const rows = await ctx.db.select().from(t).where(eq(t.selfTestId, selfTestId));
+  const step = (kind: BookingChangeKind) => rows.find((r) => r.id === selfTestChangeId(selfTestId, kind)) ?? null;
+  if (!step('create') || !step('reschedule') || !step('cancel')) {
     await run.progress(1, 'This self-test no longer exists.');
     return;
   }
-  const results: Partial<Record<BookingChangeKind, BookingChangeRow>> = {};
   const runStep = async (kind: BookingChangeKind, fraction: number) => {
-    await run.progress(fraction, `${STEP_WORDS[kind]}…`);
-    const r = await runBookingChange(ctx, run, selfTestChangeId(payload.selfTestId, kind), opts);
-    if (r) results[kind] = r;
-    return r;
+    await run.progress(fraction, `${SELF_TEST_STEP_WORDS[kind]}…`);
+    return runBookingChange(ctx, run, selfTestChangeId(selfTestId, kind), opts);
   };
 
   // 1. Book.
   const created = await runStep('create', 0.1);
   if (created?.status !== 'confirmed' || !created.squareBookingId) {
-    await withdraw(ctx, payload.selfTestId, ['reschedule', 'cancel'], 'Not run: the test booking wasn’t made.');
-    const maybeMade = created?.status === 'unknown' || created?.status === 'submitted';
-    return record(ctx, run, payload.selfTestId, created, 'create', maybeMade ? (created?.request.startAt ?? null) : null);
+    await withdraw(ctx, selfTestId, ['reschedule', 'cancel'], 'Not run: the test booking wasn’t made.');
+    return record(ctx, run, selfTestId);
   }
   const bookingId = created.squareBookingId;
 
   // 2. Move by one free slot (the target is chosen now, from Square's own free times for that booking).
   try {
-    await prepareStep(ctx, run, payload.selfTestId, 'reschedule', bookingId);
+    await prepareStep(ctx, run, selfTestId, 'reschedule', bookingId);
   } catch (err) {
     if (retryable(run, err)) throw err;
-    await withdraw(ctx, payload.selfTestId, ['reschedule'], 'Not run: Square didn’t answer when looking for a free time to move the test booking to.', 'failed');
+    await withdraw(ctx, selfTestId, ['reschedule'], 'Not run: Square didn’t answer when looking for a free time to move the test booking to.', 'failed');
   }
-  const moved = await runStep('reschedule', 0.4);
+  await runStep('reschedule', 0.4);
 
   // 3. Cancel, whatever happened to the move.
-  let cancelled: BookingChangeRow | null = null;
   try {
-    await prepareStep(ctx, run, payload.selfTestId, 'cancel', bookingId);
-    cancelled = await runStep('cancel', 0.7);
+    await prepareStep(ctx, run, selfTestId, 'cancel', bookingId);
+    await runStep('cancel', 0.7);
   } catch (err) {
     if (retryable(run, err)) throw err;
-    await withdraw(ctx, payload.selfTestId, ['cancel'], 'Not run: Square didn’t answer when reading the test booking.', 'failed');
-    cancelled = (await ctx.db.select().from(t).where(eq(t.id, selfTestChangeId(payload.selfTestId, 'cancel'))))[0] ?? null;
+    await withdraw(ctx, selfTestId, ['cancel'], 'Not run: Square didn’t answer when reading the test booking.', 'failed');
   }
-  const failedStep: BookingChangeKind | null = moved?.status !== 'confirmed' ? 'reschedule' : cancelled?.status !== 'confirmed' ? 'cancel' : null;
-  const leftover = cancelled?.status === 'confirmed' ? null : (moved?.status === 'confirmed' ? moved.request.startAt : created.request.startAt) ?? null;
-  return record(ctx, run, payload.selfTestId, failedStep === 'reschedule' ? moved : failedStep === 'cancel' ? cancelled : null, failedStep, leftover);
+  return record(ctx, run, selfTestId);
 }
 
 /**
@@ -144,14 +149,36 @@ async function withdraw(ctx: WorkerContext, selfTestId: string, kinds: BookingCh
     .where(and(inArray(t.id, kinds.map((k) => selfTestChangeId(selfTestId, k))), eq(t.status, 'queued')));
 }
 
-/** Stores the outcome on the connection (only for the account and environment the test ran on) and audits it. */
-async function record(ctx: WorkerContext, run: TrackedRun, selfTestId: string, failedRow: BookingChangeRow | null | undefined, failedStep: BookingChangeKind | null, leftoverAt: string | null): Promise<void> {
+/**
+ * Closes the steps of a test that will not resume: a step not sent yet is withdrawn (nothing was sent), a step sent
+ * without an answer becomes `unknown` (the next sync settles it). Finished steps are left as they are.
+ */
+async function closeStoppedSteps(ctx: WorkerContext, selfTestId: string, notSentMessage: string): Promise<void> {
+  const t = schema.squareBookingChanges;
+  const now = new Date();
+  const ids = (['create', 'reschedule', 'cancel'] as const).map((k) => selfTestChangeId(selfTestId, k));
+  await ctx.db
+    .update(t)
+    .set({ status: 'cancelled', statusMessage: notSentMessage, finishedAt: now, updatedAt: now })
+    .where(and(inArray(t.id, ids), inArray(t.status, ['queued', 'checking']), sql`${t.submittedAt} is null`));
+  await ctx.db
+    .update(t)
+    .set({ status: 'unknown', statusMessage: 'Stopped after sending to Square. Square may or may not have made this change; Studio Assistant checks at the next sync.', finishedAt: now, updatedAt: now })
+    .where(and(inArray(t.id, ids), eq(t.status, 'submitted')));
+}
+
+/**
+ * Stores the outcome on the connection (only for the account and environment the test ran on) and audits it. The
+ * outcome comes from the three step rows as they now stand (core `selfTestSummary`).
+ */
+async function record(ctx: WorkerContext, run: TrackedRun, selfTestId: string): Promise<void> {
   const t = schema.integrationConnections;
-  const first = (await ctx.db.select().from(schema.squareBookingChanges).where(eq(schema.squareBookingChanges.id, selfTestChangeId(selfTestId, 'create'))).limit(1))[0];
-  const passed = failedStep === null;
-  const when = leftoverAt ? new Date(leftoverAt) : null;
-  const leftover = when ? ` A test booking may still be in Square for ${formatDateTime(when)} ${melbourneZoneLabel(when)}. Cancel it in Square.` : '';
-  const failure = passed ? '' : `${STEP_WORDS[failedStep ?? 'create']} failed: ${failedRow?.statusMessage || 'Square didn’t confirm it.'}${leftover}`;
+  const steps: BookingChangeRow[] = await ctx.db.select().from(schema.squareBookingChanges).where(eq(schema.squareBookingChanges.selfTestId, selfTestId));
+  const first = steps.find((r) => r.kind === 'create');
+  const summary = selfTestSummary(steps.map((r) => ({ kind: r.kind, status: r.status, statusMessage: r.statusMessage, startAt: r.request.startAt ?? null })));
+  const failedRow = steps.find((r) => r.kind === summary.failedStep) ?? null;
+  const passed = summary.failedStep === null;
+  const failure = summary.failedStep === null ? '' : selfTestFailureText(summary.failedStep, summary.failedMessage, summary.leftoverAt);
   const patch = {
     selfTestStatus: passed ? 'passed' : 'failed',
     selfTestId,
@@ -171,7 +198,7 @@ async function record(ctx: WorkerContext, run: TrackedRun, selfTestId: string, f
       action: passed ? 'integration.square.self_test_passed' : 'integration.square.self_test_failed',
       entityType: 'integration_connection',
       entityId: null,
-      data: { selfTestId, environment: first?.environment ?? null, step: failedStep, code: failedRow?.errorCode ?? null, leftover: leftoverAt !== null },
+      data: { selfTestId, environment: first?.environment ?? null, step: summary.failedStep, code: failedRow?.errorCode ?? null, leftover: summary.leftoverAt.length > 0 },
     },
     ctx.logger,
   );
