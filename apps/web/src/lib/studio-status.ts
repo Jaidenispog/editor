@@ -19,6 +19,7 @@ const GENERATION_LIMIT = 20;
  */
 export async function buildStudioStatus(project: Project): Promise<StudioStatusDto> {
   const db = getDb();
+  const env = getEnv();
   const [assets, tracks, generations, jobs, settings] = await Promise.all([
     db.query.mediaAssets.findMany({ where: and(eq(schema.mediaAssets.projectId, project.id), isNull(schema.mediaAssets.deletedAt)) }),
     db.query.musicTracks.findMany({
@@ -60,7 +61,8 @@ export async function buildStudioStatus(project: Project): Promise<StudioStatusD
       versions,
       jobs: jobs.map((j) => toJobDto(j)),
       settings,
-      maxUploadBytes: getEnv().MAX_UPLOAD_BYTES,
+      maxUploadBytes: env.MAX_UPLOAD_BYTES,
+      mediaLinkTtlSeconds: env.MEDIA_LINK_TTL_SECONDS,
       partSize: UPLOAD_PART_SIZE,
     },
     sign,

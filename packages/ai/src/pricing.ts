@@ -6,6 +6,7 @@ export interface ModelRates {
   cacheWritePerMTok: number;
 }
 
+/** Rates keyed by model id. */
 export type RateTable = Readonly<Record<string, ModelRates>>;
 
 /**
@@ -28,6 +29,7 @@ export interface TokenCounts {
   cacheWriteTokens: number;
 }
 
+/** Result of a cost estimate. */
 export interface CostEstimate {
   estimatedCostUsdCents: number;
   /** False when the model is not in the rate table; the cost is then reported as 0. */

@@ -4,11 +4,10 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { AppError, CancelledError, SEGMENT_LABELS, type SegmentLabel } from '@studio/core';
 import type { Logger } from 'pino';
 import { DEFAULT_MODEL_RATES, type RateTable } from '../pricing.js';
-import type { AiCallOptions, FrameForLabelling, LabelShotsInput, LabelShotsResult, ShotLabelResult, VisionLabeler } from '../types.js';
+import type { AiCallOptions, FrameForLabelling, LabelShotsInput, LabelShotsResult, ShotFraming, ShotLabelResult, VisionLabeler } from '../types.js';
 import { mapAnthropicError, usageFrom, type AnthropicMessagesClient, type StructuredResponse } from './client.js';
 import { LABELER_SYSTEM_PROMPT, buildLabelerIntro } from './prompts.js';
 import { FRAMING_VALUES, LabelWireSchema, type LabelWire } from './schemas.js';
-import type { ShotFraming } from '../types.js';
 
 /** Frames per request (well inside the API's image limits and cheap to retry). */
 export const MAX_FRAMES_PER_REQUEST = 16;
@@ -19,6 +18,7 @@ const SENSITIVE_MIN_CONFIDENCE = 0.75;
 const MIN_CONFIDENCE = 0.3;
 const MAX_DESCRIPTION_WORDS = 20;
 
+/** Settings for AnthropicVisionLabeler. */
 export interface AnthropicVisionLabelerOptions {
   client: AnthropicMessagesClient;
   model: string;

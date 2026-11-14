@@ -38,6 +38,7 @@ export interface FrameForLabelling {
   height: number;
 }
 
+/** How tightly a shot is framed. */
 export type ShotFraming = 'closeup' | 'medium' | 'wide' | 'unknown';
 
 /** What the labeller concluded about one shot. */
@@ -60,11 +61,13 @@ export interface LabelShotsContext {
   clipCount: number;
 }
 
+/** Frames of one clip to label, with the clip's context. */
 export interface LabelShotsInput {
   frames: FrameForLabelling[];
   context: LabelShotsContext;
 }
 
+/** Labels per shot and the cost of producing them. */
 export interface LabelShotsResult {
   results: ShotLabelResult[];
   usage: AiUsage | null;
@@ -110,6 +113,7 @@ export interface PlannerInput {
   previousErrors?: PlanIssue[];
 }
 
+/** What a planner returns. */
 export interface PlannerResult {
   /** Unvalidated plan: the caller must run validateEditPlan before rendering. */
   plan: unknown;
@@ -124,12 +128,14 @@ export interface EditPlanner {
   planEdit(input: PlannerInput, opts?: AiCallOptions): Promise<PlannerResult>;
 }
 
+/** Timed transcript of one clip's speech. */
 export interface TranscriptionResult {
   provider: string;
   language: string | null;
   segments: TranscriptSegment[];
 }
 
+/** Options for one transcription. */
 export interface TranscribeOptions extends AiCallOptions {
   /** ISO-639-1 hint such as "en"; omitted lets the provider detect it. */
   language?: string;

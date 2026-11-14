@@ -14,6 +14,7 @@ function oneOf(values: readonly string[], description?: string) {
   return z.string().describe(`${description ? `${description}. ` : ''}One of: ${values.join(', ')}`);
 }
 
+/** Allowed framing values for a labelled shot. */
 export const FRAMING_VALUES = ['closeup', 'medium', 'wide', 'unknown'] as const;
 
 const WireSegment = z.object({
@@ -56,6 +57,7 @@ const WireCaption = z.object({
   endSec: z.number().describe('Output time in seconds'),
 });
 
+/** The edit plan as the model returns it (checked afterwards by validateEditPlan). */
 export const PlannerWireSchema = z.object({
   styleId: oneOf(STYLE_IDS),
   title: z.string().describe('At most 80 characters'),
@@ -85,8 +87,10 @@ export const PlannerWireSchema = z.object({
   }),
   colourPreset: oneOf(COLOUR_PRESETS),
 });
+/** Parsed planner reply. */
 export type PlannerWire = z.infer<typeof PlannerWireSchema>;
 
+/** One label per frame, as the vision model returns it. */
 export const LabelWireSchema = z.object({
   frames: z.array(
     z.object({
@@ -103,4 +107,5 @@ export const LabelWireSchema = z.object({
     }),
   ),
 });
+/** Parsed labeller reply. */
 export type LabelWire = z.infer<typeof LabelWireSchema>;

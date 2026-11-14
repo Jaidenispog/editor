@@ -16,6 +16,7 @@ export interface StructuredResponse {
   };
 }
 
+/** Per-request options passed to the SDK (cancellation). */
 export interface RequestOptions {
   signal?: AbortSignal;
 }

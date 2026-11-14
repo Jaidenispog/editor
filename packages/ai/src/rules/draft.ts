@@ -239,6 +239,7 @@ export function shrinkAll(drafts: Draft[], needed: number, level: 'soft' | 'hard
   return needed - remaining;
 }
 
+/** How fitDuration may change an edit to hit the target length. */
 export interface FitOptions {
   target: number;
   /** Accepted distance from the target in seconds. */

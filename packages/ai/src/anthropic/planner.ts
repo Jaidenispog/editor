@@ -9,10 +9,12 @@ import { mapAnthropicError, usageFrom, type AnthropicMessagesClient, type Struct
 import { PLANNER_SYSTEM_PROMPT, buildPlannerUserContent } from './prompts.js';
 import { PlannerWireSchema, type PlannerWire } from './schemas.js';
 
+/** Output limit for a planning call (fits the SDK's non-streaming limit). */
 export const PLANNER_MAX_TOKENS = 16_000;
 /** Second attempt when the first reply was cut off; sent as a stream (required by the SDK at this size). */
 export const PLANNER_RETRY_MAX_TOKENS = 32_000;
 
+/** Settings for AnthropicPlanner. */
 export interface AnthropicPlannerOptions {
   client: AnthropicMessagesClient;
   model: string;

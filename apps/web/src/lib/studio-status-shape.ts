@@ -19,6 +19,7 @@ export interface StudioStatusRows {
   settings: AppSettings;
   maxUploadBytes: number;
   partSize: number;
+  mediaLinkTtlSeconds: number;
   now?: Date;
 }
 
@@ -228,7 +229,7 @@ export async function shapeStudioStatus(rows: StudioStatusRows, sign: LinkSigner
       captions: prefs.captions,
       preferredStyles: prefs.preferredStyles,
     },
-    limits: { maxUploadBytes: rows.maxUploadBytes, partSize: rows.partSize },
+    limits: { maxUploadBytes: rows.maxUploadBytes, partSize: rows.partSize, mediaLinkTtlSeconds: rows.mediaLinkTtlSeconds },
     busy: isStudioBusy(partial),
     generatedAt: (rows.now ?? new Date()).toISOString(),
   };

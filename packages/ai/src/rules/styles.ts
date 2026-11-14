@@ -38,6 +38,7 @@ export interface Recipe {
   exact: boolean;
 }
 
+/** A style's first draft plus the recipe to grow, shrink and label it. */
 export interface BuildResult {
   drafts: Draft[];
   recipe: Recipe;
@@ -157,6 +158,15 @@ function holdDraft(
     keep: 'end',
     slot: o.slot,
   });
+}
+
+/** Tries candidates in order and returns the first draft that fits. */
+function firstThatFits(cands: readonly Candidate[], make: (c: Candidate) => Draft | null): Draft | null {
+  for (const c of cands) {
+    const d = make(c);
+    if (d) return d;
+  }
+  return null;
 }
 
 /** Window start that puts transcribed speech on screen (process story keeps the talking). */
@@ -310,9 +320,13 @@ function buildBeatMontage(ctx: BuildContext): BuildResult {
       if (d) break;
     }
     if (!d) {
-      const cand = body1[pointer % Math.max(1, body1.length)] ?? hookCand;
+      const preferred = body1[pointer % Math.max(1, body1.length)];
       pointer++;
-      d = exactWindow(cand, p, 1, ctx.rng(), 'body', 'centre', true);
+      const byLength = [...all].sort((x, y) => lengthOf(y) - lengthOf(x));
+      for (const cand of preferred ? [preferred, ...byLength] : byLength) {
+        d = exactWindow(cand, p, 1, ctx.rng(), 'body', 'centre', true);
+        if (d) break;
+      }
       reused = true;
     }
     if (!d) throw unsupported('There is not enough usable footage for a beat-synced montage of this length. Add more clips or choose a shorter length.');
@@ -371,16 +385,11 @@ function buildCinematicReveal(ctx: BuildContext): BuildResult {
   const neutral = withLabels(c, NEUTRAL_LABELS);
   const support = process.length > 0 ? process : neutral;
   const ranked = prioritise(rotate(byScore(support), s.attempt), s);
-  const opening = s.opening ? byScore(withLabels(c, [s.opening])).find((x) => x !== finalCand) : s.attempt === 0 ? bySource(prioritise(support, s))[0] : ranked[0];
+  const opening = (s.opening ? byScore(withLabels(c, [s.opening])).find((x) => x !== finalCand) : undefined) ?? (s.attempt === 0 ? bySource(prioritise(support, s))[0] : ranked[0]);
 
-  const hold = holdDraft(ctx, finalCand, [], {
-    want: clamp(s.target * 0.3, 3, 5),
-    min: 3,
-    max: 5,
-    allowSlow: true,
-    zoom: { from: 1.06, to: 1 },
-    slot: 'final',
-  });
+  const hold = firstThatFits(results, (cand) =>
+    holdDraft(ctx, cand, [], { want: clamp(s.target * 0.3, 3, 5), min: 3, max: 5, allowSlow: true, zoom: { from: 1.06, to: 1 }, slot: 'final' }),
+  );
   if (!hold) throw unsupported('The finished-result shot is too short for a cinematic reveal.');
   if (hold.speed < 1) ctx.notes.push('The reveal plays in gentle slow motion so the finished cut can be held for three seconds.');
 
@@ -457,25 +466,30 @@ function buildBeforeAfter(ctx: BuildContext): BuildResult {
     throw unsupported('Before and after needs a shot tagged "Before" and a shot tagged "Result". Tag those clips and try again.');
   }
   const holdWant = clamp(s.target * 0.3, 3, 6);
-  const r1 = holdDraft(ctx, results[0], [], { want: holdWant, min: 3, max: 6, allowSlow: false, zoom: s.attempt % 2 ? { from: 1, to: 1.05 } : null, slot: 'reveal' });
+  const r1 = firstThatFits(results, (cand) =>
+    holdDraft(ctx, cand, [], { want: holdWant, min: 3, max: 6, allowSlow: false, zoom: s.attempt % 2 ? { from: 1, to: 1.05 } : null, slot: 'reveal' }),
+  );
   if (!r1) throw unsupported('The finished-result shot is too short for a before-and-after edit.');
   const resultBlock: Draft[] = [r1];
   if (play(r1) < 3 - 0.05) {
-    const other = results.find((x) => x !== results[0] && largestFree(x, resultBlock) >= 0.8) ?? results[0];
+    const other = results.find((x) => x !== r1.cand && largestFree(x, resultBlock) >= 0.8) ?? r1.cand;
     const r2 = holdDraft(ctx, other, resultBlock, { want: Math.min(holdWant - play(r1), 3), min: 1, max: 3, allowSlow: false, zoom: null, slot: 'hold2' });
     if (r2) resultBlock.push(r2);
   }
   const beforeLen = clamp(2.5 * s.pacing, 2, 3);
-  const before = makeDraft(ctx, befores[0], resultBlock, {
-    play: beforeLen,
-    anchor: s.attempt % 2 ? 0.3 : 0.08,
-    softMin: Math.min(2, beforeLen),
-    softMax: 3.2,
-    pinned: true,
-    weight: 10,
-    keep: 'start',
-    slot: 'before',
-  });
+  const before = firstThatFits(befores, (cand) =>
+    makeDraft(ctx, cand, resultBlock, {
+      play: beforeLen,
+      anchor: s.attempt % 2 ? 0.3 : 0.08,
+      softMin: Math.min(2, beforeLen),
+      softMax: 3.2,
+      pinned: true,
+      weight: 10,
+      keep: 'start',
+      slot: 'before',
+      minPlay: 1,
+    }),
+  );
   if (!before) throw unsupported('The "Before" shot is too short for a before-and-after edit.');
 
   const bridgeList = prioritise(rotate(byScore(withLabels(c, PROCESS_LABELS)), s.attempt), s);
@@ -564,24 +578,31 @@ function buildCleanPromo(ctx: BuildContext): BuildResult {
   const shotLen = clamp(2 * s.pacing, 1.5, 2.5);
   const softMin = clamp(1.4 * s.pacing, 1.2, 2);
   const softMax = clamp(2.6 * s.pacing, 2, 3.2);
-  const openPool = s.opening ? withLabels(pool, [s.opening]) : process.length ? process : pool.filter((x) => x.label !== 'result');
-  const openList = prioritise(rotate(bySteadiness(openPool.length ? openPool : results), s.attempt), s);
+  const requested = s.opening ? withLabels(pool, [s.opening]) : [];
+  const openPool = [requested, process, pool.filter((x) => x.label !== 'result'), results].find((l) => l.length > 0) ?? pool;
+  const openList = prioritise(rotate(bySteadiness(openPool), s.attempt), s);
   const closeList = rotate(bySteadiness(results.length ? results : process), s.attempt);
-  const open = openList[0]!;
-  const close = closeList.find((x) => x !== open) ?? closeList[0] ?? open;
 
-  const closing = holdDraft(ctx, close, [], { want: clamp(2.6 * s.pacing, 2, 3), min: 1.5, max: 3.2, allowSlow: false, zoom: { from: 1, to: 1.04 }, slot: 'final' });
+  const closing = firstThatFits(
+    [...closeList.filter((x) => x !== openList[0]), ...closeList.filter((x) => x === openList[0])],
+    (cand) => holdDraft(ctx, cand, [], { want: clamp(2.6 * s.pacing, 2, 3), min: 1.5, max: 3.2, allowSlow: false, zoom: { from: 1, to: 1.04 }, slot: 'final' }),
+  );
   if (!closing) throw unsupported('The clips are too short for a clean promo. Add longer clips and try again.');
-  const opening = makeDraft(ctx, open, [closing], {
-    play: shotLen * 1.1,
-    anchor: 0.3 + 0.2 * (s.attempt % 2),
-    softMin,
-    softMax,
-    pinned: true,
-    weight: 10,
-    slot: 'open',
-  });
+  const opening = firstThatFits([...openList, ...bySteadiness(pool).filter((x) => !openList.includes(x))], (cand) =>
+    makeDraft(ctx, cand, [closing], {
+      play: shotLen * 1.1,
+      anchor: 0.3 + 0.2 * (s.attempt % 2),
+      softMin,
+      softMax,
+      pinned: true,
+      weight: 10,
+      slot: 'open',
+      minPlay: 1,
+    }),
+  );
   if (!opening) throw unsupported('The clips are too short for a clean promo. Add longer clips and try again.');
+  const open = opening.cand;
+  const close = closing.cand;
 
   const middleList = prioritise(rotate(bySteadiness(pool.filter((x) => x !== open && x !== close)), s.attempt), s);
   const want = Math.max(0, Math.round((s.target - 0.5) / (shotLen - 0.5)) - 2);
@@ -650,21 +671,29 @@ function buildProcessStory(ctx: BuildContext): BuildResult {
   const softMin = clamp(1.1 * s.pacing, 1, 1.8);
   const softMax = clamp(2.6 * s.pacing, 1.8, 3.2);
 
-  const hold = holdDraft(ctx, results[0], [], { want: clamp(2.8 * s.pacing, 2.2, 3.5), min: 2, max: 3.8, allowSlow: false, zoom: null, slot: 'final' });
+  const hold = firstThatFits(results, (cand) =>
+    holdDraft(ctx, cand, [], { want: clamp(2.8 * s.pacing, 2.2, 3.5), min: 2, max: 3.8, allowSlow: false, zoom: null, slot: 'final' }),
+  );
   if (!hold) throw unsupported('The finished-result shot is too short for a process story.');
   const useBefore = befores.length > 0 && s.attempt % 2 === 0;
-  const openCand = useBefore ? befores[Math.floor(s.attempt / 2) % befores.length]! : process[0]!;
-  const open = makeDraft(ctx, openCand, [hold], {
-    play: useBefore ? clamp(2 * s.pacing, 1.5, 2.5) : segLen,
-    ...(speechStart(openCand) !== undefined ? { startAt: speechStart(openCand)! } : { anchor: 0 }),
-    softMin,
-    softMax,
-    pinned: true,
-    weight: 10,
-    keep: useBefore ? 'start' : 'centre',
-    slot: 'open',
+  const openOrder = useBefore ? [...rotate(befores, Math.floor(s.attempt / 2)), ...process] : process;
+  const open = firstThatFits(openOrder, (cand) => {
+    const start = speechStart(cand);
+    const isBefore = cand.label === 'before';
+    return makeDraft(ctx, cand, [hold], {
+      play: isBefore ? clamp(2 * s.pacing, 1.5, 2.5) : segLen,
+      ...(start !== undefined ? { startAt: start } : { anchor: 0 }),
+      softMin,
+      softMax,
+      pinned: true,
+      weight: 10,
+      keep: isBefore ? 'start' : 'centre',
+      slot: 'open',
+      minPlay: 0.8,
+    });
   });
   if (!open) throw unsupported('The opening shot is too short for a process story.');
+  const openCand = open.cand;
 
   const neutral = chron.filter((x) => NEUTRAL_LABELS.includes(x.label));
   const pool = prioritise([...process.filter((x) => x !== openCand), ...(process.length < 3 ? neutral : [])], s).sort((x, y) => x.order - y.order);
@@ -732,6 +761,7 @@ function buildProcessStory(ctx: BuildContext): BuildResult {
   return { drafts, recipe };
 }
 
+/** One builder per style. */
 export const STYLE_BUILDERS: Record<StyleId, (ctx: BuildContext) => BuildResult> = {
   beat_montage: buildBeatMontage,
   cinematic_reveal: buildCinematicReveal,

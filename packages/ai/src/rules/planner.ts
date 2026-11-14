@@ -38,6 +38,15 @@ const ROLE_TEXT: Record<SegmentLabel, string> = {
 /** Fraction of the target the rules planner aims to land within. */
 const TARGET_SLACK = 0.05;
 
+/** One factual sentence per style for the plan's rationale. */
+const STYLE_RATIONALE: Record<PlannerInput['styleId'], string> = {
+  beat_montage: 'Opens on the strongest detail shot, cuts through the work on the beat and holds the finished cut at the end.',
+  cinematic_reveal: 'Builds slowly through the cut with gentle push-ins, then reveals the finished look and holds it.',
+  before_after: 'Opens on the untouched hair, bridges briefly through the cut and reveals the finished look.',
+  clean_promo: 'Uses the steadiest, best-exposed shots with soft transitions and the business name up front.',
+  process_story: 'Shows the cut in the order it happened: the start, the work and the finished result.',
+};
+
 /**
  * Deterministic edit planner with no network access. It is the fallback whenever the AI planner is not
  * configured or fails, so it builds all five styles from real shots only, cuts to the beat grid, fits the
@@ -70,7 +79,8 @@ export class RulesPlanner implements EditPlanner {
     let attempt = base.attempt;
     let plan: EditPlan | null = null;
     for (let take = 0; take < 3; take++) {
-      const s: EffectiveSettings = { ...base, attempt, notes: [...base.notes], emphasise: [...base.emphasise], deemphasise: [...base.deemphasise] };
+      const intro = [STYLE_RATIONALE[input.styleId], ...(attempt > 0 && !base.revising ? [`Take ${attempt + 1} uses different shots and timing from the earlier takes.`] : [])];
+      const s: EffectiveSettings = { ...base, attempt, notes: [...intro, ...base.notes], emphasise: [...base.emphasise], deemphasise: [...base.deemphasise] };
       plan = buildPlan(input, s, footage);
       const isRegenerate = !s.revising && previous && attempt > 0;
       if (!isRegenerate || signature(plan) !== signature(previous)) return plan;

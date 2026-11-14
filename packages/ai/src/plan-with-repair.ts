@@ -1,12 +1,14 @@
 import { AppError, CancelledError, errorMessage, type EditPlan, type PlanIssue, type PlanValidationResult } from '@studio/core';
 import type { AiUsage, EditPlanner, PlannerInput } from './types.js';
 
+/** Options for planWithRepair. */
 export interface PlanWithRepairOptions {
   /** How many times the primary planner may be asked to fix its own plan (default 2). */
   maxRepairs?: number;
   signal?: AbortSignal;
 }
 
+/** A validated plan and how it was obtained. */
 export interface PlanWithRepairOutcome {
   plan: EditPlan;
   validation: PlanValidationResult;

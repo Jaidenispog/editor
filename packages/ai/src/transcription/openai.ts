@@ -5,6 +5,7 @@ import { AppError, CancelledError, type TranscriptSegment } from '@studio/core';
 import type { Logger } from 'pino';
 import type { TranscribeOptions, Transcriber, TranscriptionResult } from '../types.js';
 
+/** OpenAI's speech-to-text endpoint. */
 export const OPENAI_TRANSCRIPTION_URL = 'https://api.openai.com/v1/audio/transcriptions';
 /** The endpoint's upload limit; the worker sends a compressed mono speech track well under it. */
 export const OPENAI_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -30,6 +31,7 @@ const VerboseJsonSchema = z.object({
     .optional(),
 });
 
+/** Settings for OpenAiTranscriber. */
 export interface OpenAiTranscriberOptions {
   apiKey: string;
   model?: string;

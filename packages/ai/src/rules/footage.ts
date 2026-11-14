@@ -1,13 +1,16 @@
 import type { AssetAnalysis, LabelSource, PlanAssetInfo, SegmentLabel, TranscriptSegment } from '@studio/core';
 
-/** Minimum quality score and length for a shot to be used by the rules planner. */
+/** Minimum quality score for a shot to be used by the rules planner. */
 export const USABLE_SCORE = 0.35;
+/** Minimum shot length (seconds) for the rules planner. */
 export const USABLE_LENGTH_SEC = 0.6;
 /** Looser thresholds used only when the strict ones leave almost nothing to work with. */
 const RELAXED_SCORE = 0.15;
 const RELAXED_LENGTH_SEC = 0.5;
 
+/** Labels that show the haircut being done. */
 export const PROCESS_LABELS: readonly SegmentLabel[] = ['cutting', 'fade_detail', 'styling'];
+/** Labels that say nothing about the haircut. */
 export const NEUTRAL_LABELS: readonly SegmentLabel[] = ['environment', 'other', 'unknown'];
 
 /** A shot (or the bounds of a previous plan's segment) the planner can cut a window from. */
@@ -31,6 +34,7 @@ export interface Candidate {
   speech: TranscriptSegment[];
 }
 
+/** The footage of a project as the rules planner sees it. */
 export interface Footage {
   /** Shots that passed the usability filter, in chronological order. */
   candidates: Candidate[];

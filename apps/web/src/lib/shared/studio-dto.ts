@@ -22,7 +22,7 @@ export interface StudioStatusDto {
   generations: GenerationDto[];
   jobs: JobDto[];
   defaults: { durationSec: number; keepOriginalSound: 'auto' | 'always' | 'never'; captions: 'auto' | 'never'; preferredStyles: StyleId[] };
-  limits: { maxUploadBytes: number; partSize: number };
+  limits: { maxUploadBytes: number; partSize: number; mediaLinkTtlSeconds: number };
   /** True while anything is queued or working, so the page polls faster. */
   busy: boolean;
   generatedAt: string;

@@ -22,6 +22,7 @@ export interface AiEnv {
   OPENAI_TRANSCRIPTION_MODEL: string;
 }
 
+/** Optional replacements for tests and special deployments. */
 export interface AiProviderOverrides {
   /** Use this client instead of creating one from ANTHROPIC_API_KEY (tests, proxies). */
   anthropicClient?: AnthropicMessagesClient;
@@ -29,6 +30,7 @@ export interface AiProviderOverrides {
   rates?: RateTable;
 }
 
+/** Which providers and models are active (no secrets). */
 export interface AiProviderSummary {
   plannerName: string;
   plannerModel: string | null;
@@ -36,6 +38,7 @@ export interface AiProviderSummary {
   transcriberName: string;
 }
 
+/** Everything the worker needs from this package. */
 export interface AiProviders {
   /** AnthropicPlanner when AI_PROVIDER=anthropic, otherwise the same instance as `rulesPlanner`. */
   planner: EditPlanner;
