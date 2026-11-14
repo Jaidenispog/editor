@@ -82,7 +82,7 @@ the top, centre, lower and caption boxes.
 | --- | --- | --- |
 | Video | libx264 veryfast, CRF 27, High | libx264 slow, CRF 18, High, level 4.1 (≤ 30 fps) or 4.2 (60 fps), `-maxrate 20M -bufsize 40M` (24M/48M at 60 fps, 12M/24M over 90 s) |
 | Both | yuv420p, progressive, `-r F -fps_mode cfr`, closed 2 s GOP (`-g 2F -keyint_min 2F -sc_threshold 0 -flags +cgop`), `-bf 2`, BT.709 primaries/transfer/matrix, TV range | |
-| Audio | AAC-LC 192 kbit/s, 48 kHz, stereo (or `-an` when nothing makes a sound) | same |
+| Audio | AAC-LC 128 kbit/s, 48 kHz, stereo (or `-an` when nothing makes a sound) | same |
 | Container | MP4, `-movflags +faststart` | same, then `verifyExport` |
 
 Graph shape (one input per segment, music last):
@@ -102,7 +102,7 @@ Graph shape (one input per segment, music last):
 -c:v libx264 (preview: veryfast/crf 27; export: slow/crf 18/maxrate/level 4.1 or 4.2) -pix_fmt yuv420p
       -field_order progressive -r F -fps_mode cfr -g 2F -keyint_min 2F -sc_threshold 0 -flags +cgop
       -bf 2 bt709 tags -color_range tv
--c:a aac -profile:a aac_low 192k 48 kHz stereo -movflags +faststart -t <total>
+-c:a aac -profile:a aac_low 128k 48 kHz stereo -movflags +faststart -t <total>
 ```
 
 Timing: every segment chain is quantised to whole frames at a `1/F` timebase and `xfade` offsets

@@ -237,15 +237,6 @@ describe.skipIf(skip)('publishing on synthetic footage with a fake Graph API', (
     await handleGenerateEdits(ctx, makeRun(newId()), { generationId, projectId });
     await handleRender(ctx, makeRun(newId()), { editVersionId: v1, projectId }, 'preview');
     await handleRender(ctx, makeRun(newId()), { editVersionId: v1, projectId, variant: 'standard' }, 'export');
-    // The memo §5 export preset is AAC at 128 kbps and Instagram's Reels spec allows at most 128 kbps, but the Stage A
-    // renderer still writes 192 kbps (packages/media/src/render/command.ts, not this package's file; the change is
-    // requested from the integrator). Until then the fixture export's sound is re-encoded at 128 kbps, video untouched.
-    const exported = (await handle.db.query.editVersions.findFirst({ where: eq(schema.editVersions.id, v1) }))!;
-    const src = resolve(exported.exportKey!);
-    const fixed = path.join(root, 'export-128k.mp4');
-    await execa('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', src, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', fixed]);
-    await ctx.store.putFile(exported.exportKey!, fixed, { contentType: 'video/mp4' });
-    await handle.db.update(schema.editVersions).set({ exportByteSize: (await stat(fixed)).size }).where(eq(schema.editVersions.id, v1));
     queue.length = 0;
     // The Meta connection as the web callback stores it (token encrypted at rest).
     metaConnId = newId();
@@ -347,6 +338,10 @@ describe.skipIf(skip)('publishing on synthetic footage with a fake Graph API', (
       expect(feedback).toHaveLength(1);
       expect(feedback[0]?.data).toMatchObject({ platform: 'instagram', method: 'instagram_api', variant: 'standard' });
       expect(feedback[0]?.data['planFacts']).toBeTruthy();
+      // The new feedback event queues the debounced preferences recompute.
+      expect(queue.filter((j) => j.type === 'preferences.recompute')).toEqual([
+        expect.objectContaining({ payload: { reason: 'feedback' }, options: expect.objectContaining({ singletonKey: 'preferences:recompute', startAfterSeconds: 10 }) }),
+      ]);
       const usage = await handle.db.query.musicUsage.findMany({ where: and(eq(schema.musicUsage.editVersionId, v1), eq(schema.musicUsage.purpose, 'publish')) });
       expect(usage).toHaveLength(1);
       expect(usage[0]).toMatchObject({ platform: 'instagram', trackId });

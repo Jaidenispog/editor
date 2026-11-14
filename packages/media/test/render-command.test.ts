@@ -97,7 +97,7 @@ describe('buildRenderCommand', () => {
     expect(fc).not.toContain('[o_3]');
     const { args } = command;
     expect(args).toContain('[aout]');
-    expect(args.slice(args.indexOf('[aout]') + 1, args.indexOf('[aout]') + 11)).toEqual(['-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '192k', '-ar', '48000', '-ac', '2']);
+    expect(args.slice(args.indexOf('[aout]') + 1, args.indexOf('[aout]') + 11)).toEqual(['-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '128k', '-ar', '48000', '-ac', '2']);
     expect(command.hasAudio).toBe(true);
     expect(args).not.toContain('-an');
   });

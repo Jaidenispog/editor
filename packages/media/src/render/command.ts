@@ -80,8 +80,9 @@ export function assertRenderableDuration(totalDurationSec: number): void {
   }
 }
 
-/** Audio encoder settings for both qualities: AAC-LC, 192 kbit/s, 48 kHz, stereo. */
-export const AUDIO_CODEC_ARGS: readonly string[] = ['-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '192k', '-ar', '48000', '-ac', '2'];
+/** Audio encoder settings for both qualities: AAC-LC, 128 kbit/s (memo §5 export preset; Instagram Reels allow at most
+ * 128 kbps), 48 kHz, stereo. */
+export const AUDIO_CODEC_ARGS: readonly string[] = ['-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '128k', '-ar', '48000', '-ac', '2'];
 
 /**
  * Turns a validated plan into one FFmpeg invocation. Pure: nothing is read or written.
