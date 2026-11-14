@@ -6,6 +6,7 @@ import { QUEUE_SETTINGS } from '@studio/queue';
 import { getDb } from './db.js';
 import { getLogger } from './logger.js';
 import { getQueue } from './queue.js';
+import type { JobDto } from './shared/dto.js';
 
 /** Statuses that mean a job is still waiting or working. */
 export const ACTIVE_JOB_STATUSES = ['queued', 'running'] as const;
@@ -189,4 +190,24 @@ export async function cancelProjectJobs(projectId: string): Promise<number> {
     }
   }
   return cancelled;
+}
+
+/** Converts a job row to the browser-facing shape (dates as ISO strings, payload omitted). */
+export function toJobDto(job: JobRow, projectTitle?: string | null): JobDto {
+  return {
+    id: job.id,
+    type: job.type,
+    projectId: job.projectId,
+    ...(projectTitle !== undefined ? { projectTitle } : {}),
+    refId: job.refId,
+    status: job.status,
+    progress: job.progress,
+    message: job.message,
+    attempts: job.attempts,
+    maxAttempts: job.maxAttempts,
+    error: job.error,
+    cancelRequested: job.cancelRequested,
+    createdAt: job.createdAt.toISOString(),
+    updatedAt: job.updatedAt.toISOString(),
+  };
 }

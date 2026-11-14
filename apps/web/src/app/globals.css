@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+/*
+ * Studio Assistant design tokens: charcoal and white with one configurable accent.
+ * The root layout injects --accent, --accent-foreground and --accent-soft from Settings → Branding.
+ */
+:root {
+  --accent: #c8a24a;
+  --accent-foreground: #17181a;
+  --accent-soft: rgba(200, 162, 74, 0.14);
+}
+
+@theme {
+  --font-sans: "Inter", "Inter Display", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Inter Display", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --color-charcoal-50: #f6f6f7;
+  --color-charcoal-100: #ececee;
+  --color-charcoal-200: #d9dadd;
+  --color-charcoal-300: #b9bbc0;
+  --color-charcoal-400: #8e9198;
+  --color-charcoal-500: #6b6e76;
+  --color-charcoal-600: #52555c;
+  --color-charcoal-700: #3d3f45;
+  --color-charcoal-800: #27292d;
+  --color-charcoal-900: #1c1d20;
+  --color-charcoal-950: #121315;
+
+  --radius-card: 1rem;
+  --radius-control: 0.625rem;
+
+  --shadow-card: 0 1px 2px rgba(18, 19, 21, 0.04), 0 4px 16px rgba(18, 19, 21, 0.05);
+}
+
+@theme inline {
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-charcoal-50 text-charcoal-900 antialiased;
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11", "ss01";
+  }
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    letter-spacing: -0.015em;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--accent-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
