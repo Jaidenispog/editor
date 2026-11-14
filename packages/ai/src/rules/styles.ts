@@ -96,9 +96,13 @@ export function makeDraft(ctx: BuildContext, cand: Candidate, occupied: readonly
   if (o.startAt !== undefined) anchor = len - wantSrc > 0.01 ? (o.startAt - cand.startSec) / (len - wantSrc) : 0;
   let win = placeWindow(cand, occupied, wantSrc, anchor);
   if (!win && !o.exact) {
-    const free = largestFree(cand, occupied);
+    // A shorter window from what is left of the shot, keeping clear of other windows when possible.
     const minSrc = Math.max(MIN_PLAY_SEC, o.softMin * 0.6) * speed;
-    if (free >= minSrc) win = placeWindow(cand, occupied, free, anchor);
+    for (const spaced of [true, false]) {
+      const free = largestFree(cand, occupied, undefined, spaced);
+      if (free >= minSrc) win = placeWindow(cand, occupied, free - 1e-6, anchor);
+      if (win) break;
+    }
   }
   if (!win && o.allowReuse) win = placeWindow(cand, occupied, wantSrc, anchor, { allowReuse: true });
   if (!win) return null;

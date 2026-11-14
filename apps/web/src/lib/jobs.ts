@@ -98,6 +98,7 @@ export async function getJob(id: string): Promise<JobRow> {
  */
 export async function cancelJob(id: string): Promise<JobRow> {
   const job = await getJob(id);
+  if (job.status === 'cancelled') throw new AppError('CONFLICT', 'This job has already been cancelled.');
   if (job.status !== 'queued' && job.status !== 'running') {
     throw new AppError('CONFLICT', 'This job has already finished, so there is nothing to cancel.');
   }

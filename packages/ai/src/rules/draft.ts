@@ -103,9 +103,9 @@ export function freeIntervals(cand: Candidate, drafts: readonly Draft[], exclude
   return pieces.filter(([s, e]) => e - s > 0.01);
 }
 
-/** Longest free stretch (source seconds) left in a candidate. */
-export function largestFree(cand: Candidate, drafts: readonly Draft[], exclude?: Draft): number {
-  return freeIntervals(cand, drafts, exclude).reduce((m, [s, e]) => Math.max(m, e - s), 0);
+/** Longest free stretch (source seconds) left in a candidate; with `spaced` it keeps clear of other windows. */
+export function largestFree(cand: Candidate, drafts: readonly Draft[], exclude?: Draft, spaced = false): number {
+  return freeIntervals(cand, drafts, exclude, spaced ? WINDOW_MARGIN_SEC : 0).reduce((m, [s, e]) => Math.max(m, e - s), 0);
 }
 
 /**
@@ -120,7 +120,8 @@ export function placeWindow(
   anchor: number,
   opts: { allowReuse?: boolean; exclude?: Draft } = {},
 ): { inSec: number; outSec: number } | null {
-  const len = Math.min(sourceLen, lengthOf(cand));
+  if (sourceLen > lengthOf(cand) + 1e-6) return null;
+  const len = sourceLen;
   if (len <= 0.05) return null;
   const desiredStart = cand.startSec + clamp(anchor, 0, 1) * (lengthOf(cand) - len);
   const attempts: Array<Array<[number, number]>> = [

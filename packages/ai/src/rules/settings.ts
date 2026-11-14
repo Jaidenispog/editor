@@ -141,6 +141,7 @@ export function chooseTransition(
   let options = [...preferred];
   if (s.transitions === 'calm') {
     options = options.filter((t) => CALM_TRANSITIONS.includes(t));
+    if (options.length === 0) options = s.style.transitions.filter((t) => CALM_TRANSITIONS.includes(t));
     if (options.length === 0) options = ['dissolve', 'fade'];
   }
   const type = options[((variant % options.length) + options.length) % options.length]!;
