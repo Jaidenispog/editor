@@ -1118,3 +1118,29 @@ branch, merged after G2. These stay with the package that owns the file:
 - **WP2:** genres typed in the music upload are dropped (already listed above under WP2).
 - **WP7:** the email card still names Resend (Stage A wording); WP7 switches it to Postmark as the memo decides, and
   drops the "Needs setup:" prefix.
+
+### 10.2 Carried into Stage C (G4 onwards, lead, 2026-11-14)
+
+Merged since G2 and binding on every Stage C package:
+
+- **Migrations** continue after `0006_worker_heartbeats` (the worker-liveness change). Generate yours with your own
+  name; the integrator renumbers in merge order.
+- **Settings writes:** `saveSettings` / `updateSettings` are gone. The web app writes settings only through
+  `updateSettingsLocked(change)` in `apps/web/src/lib/settings.ts` (row lock; the worker writes learned preferences
+  with `jsonb_set`). Never write the whole settings object outside that lock.
+- **Jobs:** throw `NonRetryableError` (`packages/core/src/errors.ts`) for owner-fixable failures (revoked token,
+  consent missing, appointment not completed); keep retries for transient provider errors. Every new job type needs
+  a handler registered in the worker (it refuses to start otherwise) and queue settings with the 30 s heartbeat.
+- **Worker liveness:** the worker records a heartbeat in `worker_heartbeats`; the web shows "The background worker
+  isn't running" from it. Long work stays in jobs, never in a web request.
+- **Integration cards:** use the shared `state` union and `IntegrationStatus.stateLabel` / `pillStatus` only when the
+  state alone would mislead (see the music cards); never start a message with "Needs setup:" (the pill says it).
+- **Test hooks for provider fakes** follow `META_DIALOG_BASE_URL`: an optional base URL in `packages/config` read
+  through `testOnlyBaseUrl`, ignored unless `NODE_ENV=test`, documented in `.env.example`, `docs/testing.md` and
+  `docs/deployment.md`. Fakes live next to the package's tests and may be reused by a browser test like
+  `apps/web/e2e/fake-meta.ts`. Never send a real email, booking change or review request in a test or to "check a
+  connection".
+- **WP7:** the email card switches from Resend to Postmark as the memo decides (plan §10.1).
+- **Browser tests:** `bash apps/web/e2e/run-stage-a.sh` must stay 51/51 with `E2E_SCREENSHOT_DIR` set (44 without)
+  and `bash apps/web/e2e/run-stage-b.sh` 77/77. Run them on their own ports/databases when another is running
+  (`E2E_PORT`, `E2E_DB`).
