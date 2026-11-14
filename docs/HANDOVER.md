@@ -112,6 +112,17 @@ History of the background runs:
    - Next: merge worker liveness (item 10) once its review passes, then G4 (Stage C: WP6 Square ∥ WP7
      email/reviews ∥ WP8 website).
 
+12. Worker liveness merged and pushed (8a37eb9; 821 unit tests, integration 12/12, Stage A 51/51, Stage B 77/77):
+    migration `0006_worker_heartbeats`; the worker waits for the database (one plain line, capped backoff) and
+    exits 78 only for real configuration errors; `scripts/dev.sh` runs the worker without watch mode and restarts it
+    (stops both on exit 78 or 5 crashes in 5 minutes; `--watch` for developers); the project page and dashboard show
+    "The background worker isn't running" from the heartbeat; `/api/health` has `worker: { alive, lastSeenAt }`.
+    Reproduced on the showcase (worker stopped → notice within about a minute → worker started → clip analysed).
+    - Plan §10.2 lists what Stage C builds on. The group script's integrator now also runs `run-stage-b.sh` (77/77).
+    - **G4 started** (run `wf_9f6293cb-cb0`): WP6 square ∥ WP7 email_reviews ∥ WP8 website. Then G5.
+    - Preview/showcase processes: process-group ids are in `preview-run/{web,worker}.pgid` and
+      `showcase/{web,worker}.pgid` in the scratchpad; stop them with `kill -TERM -- -<pgid>`.
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
