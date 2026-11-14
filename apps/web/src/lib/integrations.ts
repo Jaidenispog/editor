@@ -20,6 +20,8 @@ type EnvLike = Pick<
   | 'AI_PLANNER_MODEL'
   | 'AI_VISION_MODEL'
   | 'TRANSCRIPTION_PROVIDER'
+  | 'DEEPGRAM_API_KEY'
+  | 'DEEPGRAM_MODEL'
   | 'OPENAI_API_KEY'
   | 'OPENAI_TRANSCRIPTION_MODEL'
   | 'STORAGE_DRIVER'
@@ -77,20 +79,32 @@ export function buildIntegrationStatuses(env: EnvLike, facts: ConnectionFacts): 
     ...(aiOn ? { detail: `Planner: ${env.AI_PLANNER_MODEL} · Vision: ${env.AI_VISION_MODEL}` } : {}),
   });
 
-  // --- Transcription (captions)
-  const trMissing = env.TRANSCRIPTION_PROVIDER === 'openai' ? missing(env, ['OPENAI_API_KEY']) : ['TRANSCRIPTION_PROVIDER', ...missing(env, ['OPENAI_API_KEY'])];
-  const trOn = env.TRANSCRIPTION_PROVIDER === 'openai' && trMissing.length === 0;
+  // --- Transcription (captions). Deepgram is the recommended provider; OpenAI whisper-1 stays optional until
+  // OpenAI shuts it down on 26 February 2027.
+  const trProvider = env.TRANSCRIPTION_PROVIDER;
+  const trMissing =
+    trProvider === 'deepgram'
+      ? missing(env, ['DEEPGRAM_API_KEY'])
+      : trProvider === 'openai'
+        ? missing(env, ['OPENAI_API_KEY'])
+        : ['TRANSCRIPTION_PROVIDER', ...missing(env, ['DEEPGRAM_API_KEY'])];
+  const trOn = trProvider !== 'none' && trMissing.length === 0;
+  const trName = trProvider === 'openai' ? 'OpenAI' : 'Deepgram';
   out.push({
     id: 'transcription',
-    name: 'Speech captions',
+    name: trProvider === 'none' ? 'Speech captions' : `Speech captions (${trName})`,
     areas: ['video'],
     configured: trOn,
     connected: trOn,
     missingEnv: trOn ? [] : trMissing,
     message: trOn
-      ? 'Speech in your clips is transcribed so captions use the exact words spoken.'
-      : 'Captions are switched off because no transcription service is set up. Set TRANSCRIPTION_PROVIDER=openai and OPENAI_API_KEY on the server to caption spoken words. Edits never show invented dialogue.',
-    ...(trOn ? { detail: `Model: ${env.OPENAI_TRANSCRIPTION_MODEL}` } : {}),
+      ? trProvider === 'openai'
+        ? 'Speech in your clips is transcribed by OpenAI so captions use the exact words spoken. OpenAI is retiring this model on 26 February 2027, so switch to Deepgram before then.'
+        : 'Speech in your clips is transcribed by Deepgram so captions use the exact words spoken, timed to when they were said.'
+      : trProvider === 'none'
+        ? 'Captions are switched off because no transcription service is set up. Set TRANSCRIPTION_PROVIDER=deepgram and DEEPGRAM_API_KEY on the server to caption spoken words. Edits never show invented dialogue.'
+        : `Captions are switched off because ${envSentence(trMissing)} is missing on the server. Edits never show invented dialogue.`,
+    ...(trOn ? { detail: `Model: ${trProvider === 'openai' ? env.OPENAI_TRANSCRIPTION_MODEL : env.DEEPGRAM_MODEL}` } : {}),
   });
 
   // --- Storage

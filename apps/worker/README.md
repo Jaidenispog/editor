@@ -40,8 +40,10 @@ etc.), the storage driver and the temp root. It refuses to start if any job type
     attempt the row, asset or version is marked failed with a plain "please retry" message instead.
 - **Crash recovery.** A worker killed outright stops heart-beating. Every 30 s (and at start-up) the worker sweeps
   `running` rows whose heartbeat is older than 45 s back to `queued` with the message above (or `failed` when
-  pg-boss has already given up on the job). pg-boss itself fails the attempt once its own 60 s heartbeat lapses
-  (checked by its supervisor every 60 s) and retries after `retryDelay × (1 + random)` (15–30 s for ingest). A
+  pg-boss has already given up on the job). pg-boss itself fails the attempt once its own 30 s heartbeat lapses
+  (`heartbeatSeconds: 30` on every queue, refreshed every 15 s, checked by the worker's supervisor every 30 s via
+  `superviseIntervalSeconds`) and retries after `retryDelay × (1 + random)` (15–30 s for ingest). The worker
+  also updates queues created by an older version to these settings when it starts. A
   live worker whose row was swept while the database was briefly unreachable puts its row back to `running` on
   its next heartbeat.
 - **Graceful stop.** SIGTERM/SIGINT → pg-boss stops fetching and waits up to 30 s for active jobs; anything still
@@ -65,8 +67,10 @@ etc.), the storage driver and the temp root. It refuses to start if any job type
   the row read `running` until the sweep at 63 s set it to `queued` ("will resume automatically"); pg-boss marked
   the attempt for retry at about the same time (60 s heartbeat + supervisor pass), started attempt 2 at 87 s
   (24 s backoff) and the job succeeded at 91 s (an earlier run without the sweep: 95 s). Expect roughly 75–150 s
-  of recovery delay plus the job's own run time; shortening `heartbeatSeconds`/`superviseIntervalSeconds` in
-  `@studio/queue` would shrink it.
+  of recovery delay plus the job's own run time with those settings. Since then `@studio/queue` uses a 30 s
+  heartbeat and a 30 s supervisor pass (previously 60 s and 60 s), so pg-boss should mark a crashed attempt for
+  retry after about 30–60 s instead of 60–120 s; expect roughly 45–90 s plus the retry delay and the job's own run
+  time (not yet re-measured).
 
 ## Tests
 

@@ -55,8 +55,10 @@ describe('buildIntegrationStatuses', () => {
     ANTHROPIC_API_KEY: undefined,
     AI_PLANNER_MODEL: 'claude-opus-5-5',
     AI_VISION_MODEL: 'claude-haiku-5-5',
-    TRANSCRIPTION_PROVIDER: 'none' as const,
-    OPENAI_API_KEY: undefined,
+    TRANSCRIPTION_PROVIDER: 'none' as 'none' | 'deepgram' | 'openai',
+    DEEPGRAM_API_KEY: undefined as string | undefined,
+    DEEPGRAM_MODEL: 'nova-3',
+    OPENAI_API_KEY: undefined as string | undefined,
     OPENAI_TRANSCRIPTION_MODEL: 'whisper-1',
     STORAGE_DRIVER: 'local' as const,
     S3_BUCKET: undefined,
@@ -98,5 +100,24 @@ describe('buildIntegrationStatuses', () => {
     const on = buildIntegrationStatuses({ ...baseEnv, AI_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'sk-test' }, { connections: [], socialAccounts: [] });
     expect(on.find((i) => i.id === 'ai')).toMatchObject({ configured: true, connected: true, missingEnv: [] });
     expect(JSON.stringify(on)).not.toContain('sk-test');
+  });
+
+  it('shows Deepgram captions as configured or missing without revealing the key', () => {
+    const off = buildIntegrationStatuses(baseEnv, { connections: [], socialAccounts: [] }).find((i) => i.id === 'transcription');
+    expect(off).toMatchObject({ configured: false, connected: false, missingEnv: ['TRANSCRIPTION_PROVIDER', 'DEEPGRAM_API_KEY'] });
+    expect(off?.message).toMatch(/TRANSCRIPTION_PROVIDER=deepgram and DEEPGRAM_API_KEY/);
+
+    const noKey = buildIntegrationStatuses({ ...baseEnv, TRANSCRIPTION_PROVIDER: 'deepgram' }, { connections: [], socialAccounts: [] }).find((i) => i.id === 'transcription');
+    expect(noKey).toMatchObject({ configured: false, connected: false, missingEnv: ['DEEPGRAM_API_KEY'] });
+
+    const list = buildIntegrationStatuses({ ...baseEnv, TRANSCRIPTION_PROVIDER: 'deepgram', DEEPGRAM_API_KEY: 'dg-secret' }, { connections: [], socialAccounts: [] });
+    expect(list.find((i) => i.id === 'transcription')).toMatchObject({ name: 'Speech captions (Deepgram)', configured: true, connected: true, missingEnv: [], detail: 'Model: nova-3' });
+    expect(JSON.stringify(list)).not.toContain('dg-secret');
+  });
+
+  it('warns about the whisper-1 shutdown when OpenAI is the transcription provider', () => {
+    const tr = buildIntegrationStatuses({ ...baseEnv, TRANSCRIPTION_PROVIDER: 'openai', OPENAI_API_KEY: 'sk-x' }, { connections: [], socialAccounts: [] }).find((i) => i.id === 'transcription');
+    expect(tr).toMatchObject({ configured: true, detail: 'Model: whisper-1' });
+    expect(tr?.message).toMatch(/26 February 2027/);
   });
 });

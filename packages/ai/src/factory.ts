@@ -4,6 +4,7 @@ import { AnthropicVisionLabeler } from './anthropic/labeler.js';
 import { AnthropicPlanner } from './anthropic/planner.js';
 import type { RateTable } from './pricing.js';
 import { RulesPlanner } from './rules/planner.js';
+import { DeepgramTranscriber } from './transcription/deepgram.js';
 import { OpenAiTranscriber } from './transcription/openai.js';
 import type { EditPlanner, Transcriber, VisionLabeler } from './types.js';
 
@@ -17,7 +18,10 @@ export interface AiEnv {
   AI_PLANNER_MODEL: string;
   AI_PLANNER_EFFORT: 'low' | 'medium' | 'high';
   AI_VISION_MODEL: string;
-  TRANSCRIPTION_PROVIDER: 'none' | 'openai';
+  TRANSCRIPTION_PROVIDER: 'none' | 'deepgram' | 'openai';
+  DEEPGRAM_API_KEY?: string | undefined;
+  /** Deepgram model; nova-3 when unset. */
+  DEEPGRAM_MODEL?: string | undefined;
   OPENAI_API_KEY?: string | undefined;
   OPENAI_TRANSCRIPTION_MODEL: string;
 }
@@ -54,7 +58,8 @@ export interface AiProviders {
 
 /**
  * Builds the planner, labeller and transcriber from the environment. Without an Anthropic key the app runs on
- * the rules planner and heuristic labels; without an OpenAI key there is no transcription. Secrets stay here.
+ * the rules planner and heuristic labels; without a key for the chosen speech-to-text provider (Deepgram, or the
+ * optional OpenAI whisper-1 until its 26 February 2027 shutdown) there is no transcription. Secrets stay here.
  */
 export function createAiProviders(env: AiEnv, logger?: Logger, overrides: AiProviderOverrides = {}): AiProviders {
   const rulesPlanner = new RulesPlanner();
@@ -83,7 +88,17 @@ export function createAiProviders(env: AiEnv, logger?: Logger, overrides: AiProv
   }
 
   let transcriber: Transcriber | null = null;
-  if (env.TRANSCRIPTION_PROVIDER === 'openai') {
+  if (env.TRANSCRIPTION_PROVIDER === 'deepgram') {
+    if (env.DEEPGRAM_API_KEY) {
+      transcriber = new DeepgramTranscriber({
+        apiKey: env.DEEPGRAM_API_KEY,
+        ...(env.DEEPGRAM_MODEL ? { model: env.DEEPGRAM_MODEL } : {}),
+        ...(logger ? { logger } : {}),
+      });
+    } else {
+      logger?.warn('TRANSCRIPTION_PROVIDER=deepgram but DEEPGRAM_API_KEY is missing; transcription is off');
+    }
+  } else if (env.TRANSCRIPTION_PROVIDER === 'openai') {
     if (env.OPENAI_API_KEY) {
       transcriber = new OpenAiTranscriber({ apiKey: env.OPENAI_API_KEY, model: env.OPENAI_TRANSCRIPTION_MODEL, ...(logger ? { logger } : {}) });
     } else {
