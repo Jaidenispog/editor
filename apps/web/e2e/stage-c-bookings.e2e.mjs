@@ -207,9 +207,40 @@ async function textOf(locator) {
   return ((await locator.innerText()) ?? '').replace(/\s+/g, ' ').trim();
 }
 
-/** A Card (components/ui/card.tsx) by its title. */
+/** A Card (components/ui/card.tsx, marked `data-card`) by its title. */
 function cardByTitle(page, title) {
-  return page.locator('div[class*="radius-card"]', { has: page.getByRole('heading', { level: 2, name: title, exact: true }) }).last();
+  return page.locator('[data-card]', { has: page.getByRole('heading', { level: 2, name: title, exact: true }) }).last();
+}
+
+/** Secret-looking keys in JSON the browser receives (encrypted tokens, secrets, access or refresh tokens). */
+function secretKeysIn(value, found = []) {
+  if (Array.isArray(value)) for (const v of value) secretKeysIn(v, found);
+  else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (/encrypted|secret|access_?token|refresh_?token|server_?token|password/i.test(k)) found.push(k);
+      secretKeysIn(v, found);
+    }
+  }
+  return found;
+}
+
+/** Fetches the status APIs the browser reads, as `page`'s user, and reports any secret value or secret key in them. */
+async function secretsInStatusApis(page, secretValues) {
+  const problems = [];
+  for (const urlPath of ['/api/integrations/square', '/api/email/status']) {
+    const res = await page.request.get(`${BASE_URL}${urlPath}`);
+    const text = await res.text();
+    for (const v of secretValues) if (text.includes(v)) problems.push(`${urlPath} contains ${v}`);
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      problems.push(`${urlPath} answered ${res.status()} without JSON`);
+    }
+    for (const k of secretKeysIn(json)) problems.push(`${urlPath} has a "${k}" field`);
+    if (res.status() !== 200 && res.status() !== 403) problems.push(`${urlPath} answered ${res.status()}`);
+  }
+  return problems;
 }
 
 async function openSettings(page, tab) {
@@ -418,7 +449,17 @@ async function sandboxPhase({ browser, q, owner, staff, expectError, watch }) {
     await owner.getByRole('tab', { selected: true }).waitFor();
     return false;
   }, { timeoutMs: 90_000, intervalMs: 3000 });
-  check((await owner.getByText('No bookings are copied until you choose. Only your studio’s location is shown.').count()) === 1, 'with two Square locations nothing is copied until the owner chooses one');
+  check((await owner.getByText('No bookings are copied until you choose. Only your studio’s location is shown.').count()) === 1, 'with two Square locations the card asks the owner to choose one first');
+  // The connect sync has finished (it stopped at "choose your location"); count only then. Clients are Square's
+  // merchant-wide directory and are copied on connect by design (design §6); bookings are per location.
+  await waitFor('the connect sync to finish', async () => {
+    const s = (await apiJson(owner, 'GET', '/api/integrations/square')).json;
+    if (s?.sync?.status === 'failed') throw fatal(`the sync failed: ${s.sync.message}`);
+    return s?.sync && !['queued', 'running'].includes(s.sync.status) ? s : null;
+  }, { timeoutMs: 90_000, intervalMs: 1000 });
+  const copiedBefore = (await q('select count(*)::int as n from bookings'))[0].n;
+  const listedBefore = await apiJson(owner, 'GET', '/api/appointments?view=upcoming');
+  check(copiedBefore === 0 && listedBefore.status === 200 && listedBefore.json.bookings.length === 0, 'no booking is stored or listed until the owner chooses a location', `${copiedBefore} stored / ${listedBefore.status} ${listedBefore.json?.bookings?.length} listed`);
   const chosenAt = Date.now();
   await submit(owner, () => locationSelect.selectOption({ label: 'Ivanhoe' }), /^\/api\/integrations\/square$/, 'Location saved');
   const synced = await waitForSquareSync(owner, 'the first sync for the chosen location', chosenAt);
@@ -428,12 +469,17 @@ async function sandboxPhase({ browser, q, owner, staff, expectError, watch }) {
   const cardAfter = await textOf(cardByTitle(owner, 'Square Appointments'));
   check(/Sandbox \(test\)/.test(cardAfter) && /Square’s test environment: test bookings and test clients only\./.test(cardAfter), 'the Square card labels the connection as the sandbox (test)', cardAfter.slice(0, 240));
   check(!/fake-square-sandbox-access|fake-square-sandbox-refresh|fake-square-secret/.test(await owner.content()), 'no Square token or secret reaches the browser');
+  const squareSecrets = ['fake-square-sandbox-access', 'fake-square-sandbox-refresh', 'fake-square-secret', 'fake-postmark-token', SQUARE_KEY, HOOK_PASSWORD];
+  const ownerLeaks = await secretsInStatusApis(owner, squareSecrets);
+  const staffLeaks = await secretsInStatusApis(staff, squareSecrets);
+  check(ownerLeaks.length === 0 && staffLeaks.length === 0, 'the Square and email status APIs give the owner and a barber no token, secret or encrypted field', [...ownerLeaks, ...staffLeaks].join('; '));
 
   // ---- a. Appointments in Melbourne time with the sandbox label. ---------------------------------------------------
   log('Appointments (sandbox)');
   const upcoming = await openTab(owner, `${BASE_URL}/appointments`, 'Upcoming');
-  await owner.getByText('Sandbox — these are Square test bookings and test clients, not real ones.').waitFor({ timeout: 30_000 });
-  check(true, 'Appointments shows the sandbox warning');
+  const sandboxWarning = owner.getByText('Sandbox — these are Square test bookings and test clients, not real ones.');
+  await sandboxWarning.waitFor({ timeout: 30_000 });
+  check(await sandboxWarning.isVisible(), 'Appointments shows the sandbox warning');
   check((await owner.getByText('Sandbox (test)', { exact: true }).count()) > 0, 'the header pill says "Sandbox (test)"');
   const tessCard = bookingCard(upcoming, 'Tess Tester');
   await tessCard.waitFor({ timeout: 30_000 });
@@ -576,8 +622,9 @@ async function sandboxPhase({ browser, q, owner, staff, expectError, watch }) {
   const created = (await q('select (select count(*)::int from review_requests where booking_id = $1) as r, (select count(*)::int from email_messages where booking_id = $1) as m', [sbPast.id]))[0];
   check(created.r === 0 && created.m === 0, 'the automation sweep created no follow-up and no review request for it', JSON.stringify(created));
   await owner.goto(`${BASE_URL}/reviews`);
-  await owner.getByText('No review requests yet').waitFor({ timeout: 30_000 });
-  check(true, 'Reviews shows no review request');
+  const noRequests = owner.getByText('No review requests yet');
+  await noRequests.waitFor({ timeout: 30_000 });
+  check((await noRequests.isVisible()) && (await owner.getByRole('button', { name: 'Open' }).count()) === 0, 'Reviews shows no review request');
   const approveTab = await openTab(owner, `${BASE_URL}/emails?tab=approve`, /^To approve/);
   check(/Nothing waiting/.test(await textOf(approveTab)), 'Emails has nothing waiting for approval');
 
@@ -659,6 +706,9 @@ async function productionPhase({ browser, q, owner, staff, watch }) {
   await submit(owner, () => locationSelect.selectOption({ label: 'Ivanhoe' }), /^\/api\/integrations\/square$/, 'Location saved');
   const synced = await waitForSquareSync(owner, 'the first live sync', chosenAt);
   check(synced.dataEnvironment === 'production' && synced.liveMode === 'live', 'the connection is now live Square', `${synced.dataEnvironment} / ${synced.liveMode}`);
+  const liveSecrets = ['fake-square-live-access', 'fake-square-live-refresh', 'fake-square-secret', 'fake-postmark-token', SQUARE_KEY, HOOK_PASSWORD];
+  const leaks = [...(await secretsInStatusApis(owner, liveSecrets)), ...(await secretsInStatusApis(staff, liveSecrets))];
+  check(leaks.length === 0, 'after the live reconnect the status APIs still give the owner and a barber no token or secret', leaks.join('; '));
   const upcoming = await openTab(owner, `${BASE_URL}/appointments`, 'Upcoming');
   const caseyCard = bookingCard(upcoming, fullName(LIVE.casey));
   await caseyCard.waitFor({ timeout: 30_000 });
@@ -709,7 +759,17 @@ async function productionPhase({ browser, q, owner, staff, watch }) {
   const requestRow = owner.locator('li', { has: owner.getByText(fullName(LIVE.riley), { exact: true }) }).filter({ has: owner.getByRole('button', { name: 'Open' }) });
   await requestRow.waitFor({ timeout: 30_000 });
   check(/Waiting for approval/.test(await textOf(requestRow)), 'Reviews lists the review request for Riley as "Waiting for approval"', await textOf(requestRow));
-  check((await fakeState()).postmark.counts.email === 0, 'nothing was sent before the owner approved');
+  // Run the dispatch (normally every minute) and let any send it queued finish, so an email that skipped the
+  // approval would have reached the fake by now.
+  await runJob(q, 'email.dispatch');
+  await waitFor('every queued send to settle', async () => (await q("select count(*)::int as n from jobs where type = 'email.send' and status in ('queued', 'running')"))[0].n === 0, { timeoutMs: 60_000 });
+  check((await fakeState()).postmark.counts.email === 0, 'nothing was sent before the owner approved, even after a dispatch');
+  const waiting = await q("select m.purpose, m.status, m.approved_at, r.status as request_status from email_messages m left join review_requests r on r.email_message_id = m.id where m.booking_id = $1 order by m.purpose", [liveBooking.id]);
+  check(
+    waiting.length === 2 && waiting.every((m) => m.status === 'draft' && m.approved_at === null) && waiting.find((m) => m.purpose === 'review_request')?.request_status === 'pending_approval',
+    'the follow-up and the review request are both stored as drafts awaiting approval',
+    JSON.stringify(waiting),
+  );
   const approveTab = await openTab(owner, `${BASE_URL}/emails?tab=approve`, /^To approve/);
   const followUpRow = approveTab.locator('li', { hasText: fullName(LIVE.riley) });
   check((await followUpRow.count()) === 1, 'Emails → To approve holds the follow-up email for the same visit, waiting for approval', (await textOf(approveTab)).slice(0, 200));
@@ -738,6 +798,13 @@ async function productionPhase({ browser, q, owner, staff, watch }) {
   const reviewUrl = (send.text.match(new RegExp(`${BASE_URL.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}/r/[A-Za-z0-9_-]+`)) ?? [])[0];
   check(Boolean(unsubscribeUrl) && send.stream === 'broadcast', 'it is sent on the Broadcast stream with an unsubscribe link to this app', `${send.stream} ${unsubscribeUrl}`);
   check(Boolean(reviewUrl) && !send.text.includes(REVIEW_LINK) && !GATING_WORDS.test(`${send.subject} ${send.text}`), 'the review link goes through the app’s redirect and the wording offers nothing in return', `${reviewUrl} | ${send.subject}`);
+  // Opened the way the client would (not signed in, no cookies), without following the redirect.
+  const clicks = async () => (await q("select click_count from review_requests where email_message_id = $1", [msg.id]))[0]?.click_count;
+  const opened = await fetch(reviewUrl, { redirect: 'manual' });
+  check(opened.status === 302 && opened.headers.get('location') === REVIEW_LINK && (await clicks()) === 1, 'opening the email’s review link redirects to exactly the saved Google review link and counts the open', `${opened.status} → ${opened.headers.get('location')}, ${await clicks()} click(s)`);
+  // Every token goes to the same place (no branching on who clicked, memo §7); an unknown one counts for nobody.
+  const unknown = await fetch(`${BASE_URL}/r/${'x'.repeat(43)}`, { redirect: 'manual' });
+  check(unknown.status === 302 && unknown.headers.get('location') === REVIEW_LINK && (await clicks()) === 1, 'an unknown review token goes to the same link and counts for no request', `${unknown.status} → ${unknown.headers.get('location')}, ${await clicks()} click(s)`);
   await owner.goto(`${BASE_URL}/reviews`);
   const rowAfter = owner.locator('li', { has: owner.getByText(fullName(LIVE.riley), { exact: true }) }).filter({ has: owner.getByRole('button', { name: 'Open' }) });
   await rowAfter.waitFor();
@@ -970,7 +1037,10 @@ async function main() {
     const staffContext = await browser.newContext({ viewport: DESKTOP });
     const staff = await signIn(staffContext, STAFF_EMAIL, STAFF_PASSWORD);
     watch(staff);
-    check(true, `owner and barber signed in (${PHASE})`);
+    // Each has a current session, and an owner-only write is refused for the barber (403, not 401).
+    const currentSession = async (page) => ((await apiJson(page, 'GET', '/api/auth/sessions')).json?.sessions ?? []).some((x) => x.current);
+    const staffOwnerOnly = await apiJson(staff, 'PATCH', '/api/integrations/square', {});
+    check((await currentSession(owner)) && (await currentSession(staff)) && staffOwnerOnly.status === 403, `owner and barber signed in, with the barber's role enforced (${PHASE})`, String(staffOwnerOnly.status));
 
     if (PHASE === 'sandbox') await sandboxPhase({ browser, q, owner, staff, expectError, watch });
     else await productionPhase({ browser, q, owner, staff, watch });

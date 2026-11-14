@@ -357,8 +357,9 @@ failure or with `E2E_KEEP=1`). Other settings: `E2E_PG_URL`, `E2E_DB`, `E2E_PORT
 account is added with `apps/web/e2e/add-staff-user.ts` (the app has no screen for that yet), and scheduled jobs the
 test does not want to wait for (`email.automation.sweep`, `email.dispatch`, a repeated `email.send`) are sent through
 the app's own queue by `apps/web/e2e/enqueue-job.ts`. Every wait is on a real state (a job row finished, a status in
-the API, a send held at the fake), never on a fixed delay. A passing run prints `118 checks passed, 0 failed` (57 in
-the sandbox phase); three consecutive runs on 2026-11-14 took 134, 117 and 116 s including the restart (plus the build).
+the API, a send held at the fake), never on a fixed delay. A passing run prints `124 checks passed, 0 failed` (59 in
+the sandbox phase); three consecutive runs on 2026-11-14 reported 79, 86 and 78 s of test time (plus the build and
+the restart).
 
 **What the fakes replace.**
 - Square (`apps/worker/test/fakes/square-server.ts`, the same model the worker's database tests use): the authorise
@@ -370,7 +371,9 @@ the sandbox phase); three consecutive runs on 2026-11-14 took 134, 117 and 116 s
   it), the outbound message search and suppressions. Reached through `POSTMARK_API_BASE_URL`, the one configuration
   hook added for this test: like the other base URLs it is read through `testOnlyBaseUrl` and ignored unless
   `NODE_ENV=test`, so a deployment always calls `https://api.postmarkapp.com` (unit tests in
-  `apps/worker/test/email.test.ts` and `packages/config/test/env.test.ts`).
+  `apps/worker/test/email.test.ts` and `packages/config/test/env.test.ts`). A unit test in `email.test.ts` also runs
+  `PostmarkProvider` (check, send, findSent, suppress) against this HTTP fake, so its answers cannot drift from what
+  the provider parses.
 - Google Places is not faked: without `GOOGLE_MAPS_API_KEY` the rating card must show its setup state and no number.
 
 **What it covers** (database rows are read only where the UI cannot show them):
@@ -378,7 +381,10 @@ the sandbox phase); three consecutive runs on 2026-11-14 took 134, 117 and 116 s
 - Square sandbox: Settings → Integrations shows Square "Not connected" and Appointments the "nothing here is
   simulated" overview; Connect Square goes through the real connect route, the fake authorise page and the callback,
   asking for read scopes only (`session=false`, the registered callback); tokens are stored encrypted and never reach
-  the page. With two Square locations nothing is copied until the owner chooses one; the first sync then lists
+  the page or the status APIs (`/api/integrations/square`, `/api/email/status`, read as the owner and as a barber:
+  no token value and no encrypted or secret field). With two Square locations no booking is copied (none stored, none
+  listed by `/api/appointments`; clients are Square's merchant-wide directory and are copied on connect) until the
+  owner chooses one; the first sync then lists
   tomorrow's booking as "10:00 am – 10:45 am" under tomorrow's Melbourne date, with "Sandbox — these are Square test
   bookings and test clients, not real ones." and the "Sandbox (test)" pill; the other location's booking is not
   shown. The owner sees a client's email and phone; a barber sees names only (Clients tab, booking dialog and both
@@ -408,10 +414,14 @@ the sandbox phase); three consecutive runs on 2026-11-14 took 134, 117 and 116 s
   permission" for the fifth; the ledger keeps the method.
 - Review request: the owner marks the live booking attended (stored as `owner_marked`); the sweep prepares a review
   request, listed in Reviews as "Waiting for approval" (and the follow-up waits in Emails → To approve; Emails' own
-  queue leaves review requests to the Reviews page by design); nothing is sent before approval. After "Approve and
+  queue leaves review requests to the Reviews page by design); after an `email.dispatch` and every queued send has
+  finished, the fake has still received nothing and both messages are drafts with no approval. After "Approve and
   send" the fake receives exactly one email for Riley, on the Broadcast stream, with the sender identification footer
   (business name, street address, phone and email), an unsubscribe link to `/u/…` and the review link through the
-  app's `/r/…` redirect, and no incentive or selective wording. Reviews then shows "Sent" and Emails → Sent lists it.
+  app's `/r/…` redirect, and no incentive or selective wording. Opened without a session and without following the
+  redirect, that `/r/…` link answers 302 to exactly the saved review link and counts one open; an unknown token goes to
+  the same link (every token does, so nothing branches on who clicked) and counts for nobody. Reviews then shows "Sent"
+  and Emails → Sent lists it.
   Running `email.send` for the same message and `email.dispatch` again sends nothing more.
 - Unsubscribe: opening and reloading `/u/<token>` only asks ("Unsubscribe r•••@example.com …?") and records nothing;
   the button confirms "You’re unsubscribed", which stays after a reload, and Emails → Clients shows "Unsubscribed".
