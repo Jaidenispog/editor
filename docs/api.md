@@ -117,6 +117,33 @@ marked failed with the reason and the job ends without a retry. A successful sta
 
 ## Trends (Stage B, WP3 and WP5)
 
+Settings → Trends shows three groups that are never mixed: **live signals** (official APIs only; each item has its
+source and fetch time in Melbourne time and goes "Out of date" after 48 h), **noted by staff** and **curated
+references** (sourced, dated barber formats). Every item's `label` comes from `trendLabel` (`packages/core/src/
+trend-label.ts`) and never says "trending" or "viral". No trend data is ever passed to an edit planner.
+
+| Method | Route | Notes |
+| --- | --- | --- |
+| GET | `/api/trends` | Signed in. `{ live: [{ watch, items }], noted: TrendItemDto[], curated: TrendItemDto[], sources: [{ provider, status, watch }], viewer: { id, isOwner } }`. `TrendItemDto` has `kind` (`curated`, `noted`, `live`), `label`, `dueForReview` (curated, 180 days), `editorSuggestion` (no source link), `sources`, `stale` and the YouTube row fields (`channelTitle`, `categoryName`, `position`) |
+| POST / PUT / DELETE | `/api/trends` | Owner. Curated references only (`sourceKind` cannot be set by clients; noted and live rows give 404). PUT `markVerified: true` = "Mark reviewed" |
+| POST | `/api/trends/notes` | Signed in. `{ title, summary?, platform: tiktok\|instagram\|youtube\|in_person\|other, sourceUrl? (http/https), seenOn: YYYY-MM-DD (not in the future), category? }` → 201 `{ trend }` labelled "Noted by <name> on <date> · seen on <platform>"; audit `trends.noted` |
+| DELETE | `/api/trends/notes/[id]` | The owner, or the person who noted it (otherwise 403); audit `trends.note_deleted` |
+| POST | `/api/trends/watches` | Owner. `{ provider: 'youtube_chart' }` → `{ watch, jobId }` and queues `trends.refresh` (the first read is the capability check); already on → `jobId: null`. 422 `INTEGRATION_NOT_CONFIGURED` without `YOUTUBE_API_KEY`; `{ provider: 'instagram_hashtag' }` → 422 `UNSUPPORTED` until WP5. Audit `trends.watch_added` |
+| DELETE | `/api/trends/watches/[id]` | Owner. Turns the source off and deletes its items; the row stays 7 days (hashtag budget). Audit `trends.watch_removed` |
+| POST | `/api/trends/watches/[id]/refresh` | Owner. `{ jobId }`; reuses a queued or running read. 429 `RATE_LIMITED` (with `details.nextRefreshAt`) within 6 h of the last query, or 5 min after a failed one |
+
+`GET /api/integrations/status` has a `youtube_chart` entry: `not_configured` without the key (names
+`YOUTUBE_API_KEY` only), otherwise `not_connected` with `liveMode: 'read_only'`; the list there does not read the
+watch, so the chart's own state (`connected`, `error` for quota or a bad key) is in the `sources` of `GET /api/trends`.
+
+Job `trends.refresh` `{ watchId: string | null }`: null (the daily 5:41 am Melbourne schedule, key `daily`) queues one
+read per enabled watch. One read: `GET https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&
+regionCode=AU&maxResults=20` (1 quota unit, 15 s limit). 200 → items upserted on `(watch_id, external_id)`, items
+missing from the result deleted, watch `ok`. `quotaExceeded`/`dailyLimitExceeded` → `quota`; 400 (`keyInvalid`,
+`badRequest`) → "The YouTube API key isn't valid."; `accessNotConfigured` → "Turn on YouTube Data API v3 in your Google
+Cloud project."; 5xx/429/network → one retry after 5 minutes, then `error`. `maintenance.cleanup` deletes live items
+fetched over 7 days ago and turned-off watches last queried over 7 days ago.
+
 ## Publishing (Stage B, WP4 and WP10)
 
 ## Square appointments (Stage C, WP6 and WP6b)

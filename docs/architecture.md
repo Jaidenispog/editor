@@ -102,6 +102,26 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   (`ACCEPTED` and a `payment` or `owner_marked` source with `completed_at`); `customers.square_email_unsubscribed`
   exists from migration `0001_foundations`.
 
+## Trends (Stage B, WP3)
+
+- **Three groups, never mixed** (memo §11): `trend_references.source_kind` is `live` (fetched by a `trend_watches`
+  row), `noted` ("Note a trend", any signed-in user; TikTok has no permitted trend API) or `curated` (static, dated,
+  sourced formats; `apps/web/src/lib/seed-trends.ts`, re-sourced once by the marker `trends.curated_sources_v2`,
+  which only touches rows still carrying the first seed's source name and title).
+- **Labels** come only from `trendLabel` (`packages/core/src/trend-label.ts`); typed text that would put
+  "trending"/"viral" into a label is replaced by neutral wording. `validateEditPlan` rejects on-screen text overlays
+  matching `\b(trending|viral|goes viral|blowing up)\b` (`TEXT_UNSUPPORTED_CLAIM`), so neither planner can put such
+  a claim into a video.
+- **Live sources.** `trends.refresh` (worker `handlers/trends.ts`) dispatches by `trend_watches.provider` to a
+  source refresher (`modules/trends/sources.ts`). WP3 builds the YouTube AU popular chart
+  (`modules/trends/youtube.ts`, `lib/youtube-client.ts`); WP5 adds the Instagram hashtag watch to `TREND_SOURCES`.
+  A read records `last_queried_at` first, then replaces the watch's items in one transaction; refusals keep the old
+  items and set the watch's `status` (`quota`, `error`, …) with a plain message. Read-only towards every service.
+- **Isolation from the planners.** Nothing outside the trends module reads the trend tables (a worker test scans the
+  worker and `packages/ai` sources and checks `buildPlannerInput`). "Use as idea" copies the card's own text to the
+  clipboard for the Studio's Instructions box.
+- Google Trends and TikTok Creative Center are plain links the owner opens with their own logins.
+
 ## Stages
 
 - **A** (this milestone): upload, analysis, five previews, revise/regenerate with history, full-quality export.

@@ -79,6 +79,21 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
 - **Backups** keep deleted data until they expire (see `docs/deployment.md`). Include that in any privacy
   statement.
 
+## Trends (Stage B, WP3)
+
+- `YOUTUBE_API_KEY` is a server setting used only by the worker, sent only in the request URL to
+  `www.googleapis.com`; `lib/http.ts` redacts the `key` parameter in logs (a test checks the logs) and status DTOs show
+  only that it is set. Restrict the key to YouTube Data API v3 in Google Cloud.
+- Stored from YouTube: video id, title (≤ 160 characters, control characters removed), channel title and category id.
+  No thumbnails, descriptions or statistics. Items are deleted 7 days after they were fetched. YouTube's caching
+  and display rules were not retrieved (memo §11); confirm them before go-live.
+- Links to other services open in a new tab with `rel="noopener noreferrer"`; noted links must be http(s).
+- Owner only: turning sources on/off, manual refresh (at most every 6 h), curated references. Anyone signed in may note
+  a trend; only the owner or the person who noted it may delete a note. Audit actions: `trends.watch_added`,
+  `trends.watch_removed`, `trends.noted`, `trends.note_deleted`, and `trends.source_<status>` from the worker when a
+  source changes state.
+- No trend data reaches a model or an edit plan.
+
 ## Not done yet (known gaps)
 
 - **Rate limiting** applies to sign-in only. Uploads and other API routes have none beyond requiring a session.

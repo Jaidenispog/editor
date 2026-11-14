@@ -23,3 +23,5 @@ export * from './music-catalogue.js';
 export * from './spotify-link.js';
 export * from './jobs/music.js';
 export * from './settings/music.js';
+export * from './trend-label.js';
+export * from './jobs/trends.js';

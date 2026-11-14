@@ -40,6 +40,18 @@ export interface PlanValidationResult {
 }
 
 export const MIN_SEGMENT_PLAY_SEC = 0.3;
+
+/**
+ * On-screen words that claim popularity the app cannot prove (research memo §11, brief §2: never call anything
+ * trending without evidence or promise viral results). Text overlays containing them are rejected, so neither the
+ * rules planner nor the AI planner can put such a claim into a video.
+ */
+export const UNSUPPORTED_CLAIM_PATTERN = /\b(trending|viral|goes viral|blowing up)\b/i;
+
+/** True when on-screen text makes a popularity claim ({@link UNSUPPORTED_CLAIM_PATTERN}). */
+export function containsUnsupportedClaim(text: string): boolean {
+  return UNSUPPORTED_CLAIM_PATTERN.test(text);
+}
 const MIN_GAP_AROUND_TRANSITIONS_SEC = 0.15;
 
 export function normaliseText(s: string): string {
@@ -160,6 +172,9 @@ export function validateEditPlan(input: unknown, ctx: PlanValidationContext): Pl
       if (t.endSec <= t.startSec) errors.push({ code: 'TEXT_EMPTY_RANGE', message: `Text "${t.text}" ends before it starts`, path: p });
       if (t.endSec > total + 0.05) errors.push({ code: 'TEXT_OUT_OF_RANGE', message: `Text "${t.text}" runs past the end of the edit`, path: p });
       if (t.endSec - t.startSec < 0.6) warnings.push({ code: 'TEXT_TOO_BRIEF', message: `Text "${t.text}" shows for under 0.6s`, path: p });
+      if (containsUnsupportedClaim(t.text)) {
+        errors.push({ code: 'TEXT_UNSUPPORTED_CLAIM', message: `Text "${t.text}" claims popularity ("trending", "viral") that cannot be shown to be true; use plain wording`, path: p });
+      }
       const list = byPlacement.get(t.placement) ?? [];
       for (const o of list) {
         if (t.startSec < o.end && o.start < t.endSec) {
