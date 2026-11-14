@@ -2,7 +2,9 @@ import { and, eq, isNotNull, lt } from 'drizzle-orm';
 import { schema } from '@studio/db';
 import { handleSquareAttendance } from '../../handlers/square-attendance.js';
 import { handleSquareAvailability } from '../../handlers/square-availability.js';
+import { handleSquareBookingChange } from '../../handlers/square-booking-change.js';
 import { handleSquareRefresh } from '../../handlers/square-refresh.js';
+import { handleSquareSelfTest } from '../../handlers/square-self-test.js';
 import { handleSquareSync } from '../../handlers/square-sync.js';
 import { handleSquareRevoke, handleSquareTokenRefresh } from '../../handlers/square-token.js';
 import { handleSquareWebhook } from '../../square/webhook.js';
@@ -17,9 +19,10 @@ export const AVAILABILITY_SEARCH_TTL_MS = 24 * 3600_000;
 export const SQUARE_WEBHOOK_RETENTION_DAYS = 7;
 
 /**
- * Worker registrations of the Square appointments module (WP6 Tier 0: reads, webhooks, attendance; WP6b adds booking
- * changes and the self-test). Nothing here writes to Square or sends a message. Handlers are wrapped so this file can
- * be loaded before the handler modules finish loading.
+ * Worker registrations of the Square appointments module (WP6 Tier 0: reads, webhooks, attendance; WP6b: booking
+ * changes and the self-test). Only `square.booking_change` (and the self-test, through the same routine) writes to
+ * Square, and only for an owner-approved change; no cron ever does. Nothing here sends a message. Handlers are
+ * wrapped so this file can be loaded before the handler modules finish loading.
  */
 export const squareModule: WorkerModule = {
   name: 'square',
@@ -30,6 +33,8 @@ export const squareModule: WorkerModule = {
     defineHandler('square.availability', (ctx, run, payload) => handleSquareAvailability(ctx, run, payload), 1),
     defineHandler('square.token_refresh', (ctx, run, payload) => handleSquareTokenRefresh(ctx, run, payload), 1),
     defineHandler('square.revoke', (ctx, run, payload) => handleSquareRevoke(ctx, run, payload), 1),
+    defineHandler('square.booking_change', (ctx, run, payload) => handleSquareBookingChange(ctx, run, payload), 1),
+    defineHandler('square.self_test', (ctx, run, payload) => handleSquareSelfTest(ctx, run, payload), 1),
   ],
   crons: [
     // Every 10 minutes: bookings for the next 31 days (plus the last two hours) and changed clients.
@@ -72,6 +77,10 @@ export const squareModule: WorkerModule = {
         return typeof payload['searchId'] === 'string' ? payload['searchId'] : null;
       case 'square.refresh':
         return typeof payload['squareId'] === 'string' ? payload['squareId'] : null;
+      case 'square.booking_change':
+        return typeof payload['changeId'] === 'string' ? payload['changeId'] : null;
+      case 'square.self_test':
+        return typeof payload['selfTestId'] === 'string' ? payload['selfTestId'] : null;
       case 'square.sync':
       case 'square.attendance':
       case 'square.token_refresh':

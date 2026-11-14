@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Alert } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import { Card, CardBody } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs } from '@/components/ui/tabs';
@@ -10,6 +11,7 @@ import { apiRequest } from '@/lib/client/api-client';
 import type { BookingDto, SquareStatusDto } from '@/lib/shared/square-dto';
 import { AvailabilityFinder } from './availability-finder';
 import { BookingDialog } from './booking-dialog';
+import { ChangeDialog, type ChangeTarget } from './change-dialog';
 import { BookingList } from './booking-list';
 import { ClientList } from './client-list';
 import { ServiceList } from './service-list';
@@ -50,7 +52,9 @@ function BookingsTab({ view, version, onOpen }: { view: View; version: number; o
 
 /**
  * The Appointments page once Square is connected (design §4.2): Upcoming · To confirm · Past · Clients · Services,
- * from Studio Assistant's copy of Square. Square stays the source of truth; nothing is invented.
+ * from Studio Assistant's copy of Square. Square stays the source of truth; nothing is invented. When booking changes
+ * from Studio Assistant are on (Tier 1, owner), "New booking", "Book" on a free time, Move and Cancel open the change
+ * dialog; every change is re-checked with Square before it is sent.
  */
 export function AppointmentsView({ initialStatus }: { initialStatus: SquareStatusDto }) {
   const toast = useToast();
@@ -59,6 +63,8 @@ export function AppointmentsView({ initialStatus }: { initialStatus: SquareStatu
   const [openId, setOpenId] = useState<string | null>(null);
   const [version, setVersion] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [changeTarget, setChangeTarget] = useState<ChangeTarget | null>(null);
+  const canChange = status.canManage && status.tier1.ready && status.state === 'connected';
 
   const reload = useCallback(async () => {
     try {
@@ -94,6 +100,14 @@ export function AppointmentsView({ initialStatus }: { initialStatus: SquareStatu
   return (
     <div className="space-y-6">
       <SquareBanner status={status} onRefresh={() => void refresh()} refreshing={refreshing} />
+      {canChange ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button className="min-h-11" onClick={() => setChangeTarget({ kind: 'create' })}>
+            New booking
+          </Button>
+          <span className="text-xs text-charcoal-500">Booking changes from Studio Assistant are on. Square checks each one before it is made.</span>
+        </div>
+      ) : null}
       {firstSync ? (
         <Card>
           <CardBody className="space-y-3">
@@ -122,7 +136,11 @@ export function AppointmentsView({ initialStatus }: { initialStatus: SquareStatu
                     <h3 id="free-times" className="text-base font-semibold text-charcoal-900">
                       Free times
                     </h3>
-                    <AvailabilityFinder services={status.services} teamMembers={status.teamMembers} />
+                    <AvailabilityFinder
+                      services={status.services}
+                      teamMembers={status.teamMembers}
+                      onBook={canChange ? (slot, searchId, serviceVariationId) => setChangeTarget({ kind: 'create', preset: { slot, searchId, serviceVariationId } }) : undefined}
+                    />
                   </section>
                 </div>
               ),
@@ -130,7 +148,8 @@ export function AppointmentsView({ initialStatus }: { initialStatus: SquareStatu
           ]}
         />
       )}
-      <BookingDialog bookingId={openId} onClose={() => setOpenId(null)} onMarked={() => setVersion((v) => v + 1)} />
+      <BookingDialog bookingId={openId} version={version} onClose={() => setOpenId(null)} onMarked={() => setVersion((v) => v + 1)} onChange={canChange ? setChangeTarget : undefined} />
+      <ChangeDialog target={changeTarget} status={status} onClose={() => setChangeTarget(null)} onFinished={() => setVersion((v) => v + 1)} />
     </div>
   );
 }

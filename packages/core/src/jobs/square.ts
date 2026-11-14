@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { JobPayloadSchemaMap } from './types.js';
 
-/** Job type names of the Square appointments module (WP6 Tier 0; WP6b adds booking changes and the self-test). */
+/** Job type names of the Square appointments module (WP6 Tier 0 reads; WP6b booking changes and the self-test). */
 export const SQUARE_JOB_TYPES = {
   /** Reads Square (token status, snapshot, bookings, customers) into the local mirror. Never writes to Square. */
   SQUARE_SYNC: 'square.sync',
@@ -15,6 +15,10 @@ export const SQUARE_JOB_TYPES = {
   SQUARE_TOKEN_REFRESH: 'square.token_refresh',
   /** Asks Square to revoke the app's access after the owner disconnects. */
   SQUARE_REVOKE: 'square.revoke',
+  /** The only writer to Square (WP6b): one owner-approved create, reschedule or cancel, re-checked just before sending. */
+  SQUARE_BOOKING_CHANGE: 'square.booking_change',
+  /** The owner-approved self-test (WP6b): book, move and cancel one test booking through the booking-change routine. */
+  SQUARE_SELF_TEST: 'square.self_test',
 } as const;
 
 export const SquareSyncPayloadSchema = z.object({ reason: z.enum(['connect', 'schedule', 'manual', 'reconcile']) });
@@ -27,6 +31,8 @@ export const SquareAttendancePayloadSchema = z.object({
 export const SquareAvailabilityPayloadSchema = z.object({ searchId: z.string().min(1) });
 export const SquareTokenRefreshPayloadSchema = z.object({});
 export const SquareRevokePayloadSchema = z.object({ merchantId: z.string().min(1).max(192), environment: z.enum(['sandbox', 'production']) });
+export const SquareBookingChangePayloadSchema = z.object({ changeId: z.string().min(1).max(64) });
+export const SquareSelfTestPayloadSchema = z.object({ selfTestId: z.string().min(1).max(64) });
 
 /** Payload schemas of the Square appointments module's job types, keyed by job type. */
 export const SQUARE_JOB_PAYLOAD_SCHEMAS = {
@@ -36,4 +42,6 @@ export const SQUARE_JOB_PAYLOAD_SCHEMAS = {
   [SQUARE_JOB_TYPES.SQUARE_AVAILABILITY]: SquareAvailabilityPayloadSchema,
   [SQUARE_JOB_TYPES.SQUARE_TOKEN_REFRESH]: SquareTokenRefreshPayloadSchema,
   [SQUARE_JOB_TYPES.SQUARE_REVOKE]: SquareRevokePayloadSchema,
+  [SQUARE_JOB_TYPES.SQUARE_BOOKING_CHANGE]: SquareBookingChangePayloadSchema,
+  [SQUARE_JOB_TYPES.SQUARE_SELF_TEST]: SquareSelfTestPayloadSchema,
 } as const satisfies JobPayloadSchemaMap;

@@ -1,4 +1,4 @@
-import { parseSquareConfig, squareIntegrationState } from '@studio/core';
+import { parseSquareCapabilities, parseSquareConfig, squareIntegrationState } from '@studio/core';
 import { connectionFor, envSentence, missingEnv, type IntegrationBuilder } from './types.js';
 
 /**
@@ -58,8 +58,11 @@ export const buildSquareIntegrations: IntegrationBuilder = (env, facts) => {
       ...(name ? { detail: name } : {}),
       state: r.state,
       liveMode: r.liveMode,
-      // Square's live verification is the Tier 1 self-test (WP6b); reads are never a verification.
-      verified: false,
+      // Square's live verification is the owner-approved Tier 1 self-test on live Square; reads never count.
+      verified: (() => {
+        const c = parseSquareCapabilities(sq?.capabilities);
+        return r.state === 'connected' && c.selfTestStatus === 'passed' && c.selfTestEnvironment === 'production' && environment === 'production';
+      })(),
     },
   ];
 };

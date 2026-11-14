@@ -8,8 +8,10 @@ import { Dialog } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { StatusPill } from '@/components/ui/status-pill';
 import { apiRequest } from '@/lib/client/api-client';
+import { Button } from '@/components/ui/button';
 import type { BookingDetailDto, BookingDto } from '@/lib/shared/square-dto';
 import { AttendanceControl } from './attendance-control';
+import type { ChangeTarget } from './change-dialog';
 
 const SIGNAL_WORDS: Record<string, string> = {
   customer: 'same client',
@@ -19,10 +21,11 @@ const SIGNAL_WORDS: Record<string, string> = {
 };
 
 /**
- * One booking (design §4.2): Square's status, the attendance label with its evidence, notes for the owner, the
- * attendance buttons and "Open in Square". Square's text is shown as plain text, never as HTML.
+ * One booking (design §4.2, §4.6): Square's status, the attendance label with its evidence, notes for the owner, the
+ * attendance buttons, Move and Cancel when booking changes from Studio Assistant are on (with the reason when not),
+ * the changes made from here, and "Open in Square". Square's text is shown as plain text, never as HTML.
  */
-export function BookingDialog({ bookingId, onClose, onMarked }: { bookingId: string | null; onClose: () => void; onMarked?: (b: BookingDto) => void }) {
+export function BookingDialog({ bookingId, onClose, onMarked, onChange, version = 0 }: { bookingId: string | null; onClose: () => void; onMarked?: (b: BookingDto) => void; onChange?: (t: ChangeTarget) => void; version?: number }) {
   const [detail, setDetail] = useState<BookingDetailDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -36,7 +39,7 @@ export function BookingDialog({ bookingId, onClose, onMarked }: { bookingId: str
     return () => {
       alive = false;
     };
-  }, [bookingId]);
+  }, [bookingId, version]);
 
   const d = detail;
   return (
@@ -94,6 +97,36 @@ export function BookingDialog({ bookingId, onClose, onMarked }: { bookingId: str
             </div>
           ) : null}
           {d.missingFromSquare ? <Alert tone="warning">Square no longer has this booking. It may have been deleted there.</Alert> : null}
+          {onChange && (d.actions.move.allowed || d.actions.cancel.allowed) ? (
+            <div className="flex flex-wrap gap-2">
+              {d.actions.move.allowed ? (
+                <Button variant="secondary" className="min-h-11" onClick={() => onChange({ kind: 'reschedule', booking: d })}>
+                  Move
+                </Button>
+              ) : null}
+              {d.actions.cancel.allowed ? (
+                <Button variant="ghost" className="min-h-11" onClick={() => onChange({ kind: 'cancel', booking: d })}>
+                  Cancel booking
+                </Button>
+              ) : null}
+              {!d.actions.move.allowed && d.actions.move.reason ? <p className="w-full text-xs text-charcoal-500">{d.actions.move.reason}</p> : null}
+            </div>
+          ) : null}
+          {d.changes.length ? (
+            <div>
+              <p className="text-xs font-semibold text-charcoal-500">Changes from Studio Assistant</p>
+              <ul className="mt-1 space-y-1">
+                {d.changes.map((c) => (
+                  <li key={c.id} className="flex flex-wrap items-center gap-2 text-xs">
+                    <StatusPill status={c.pill} label={c.statusLabel} />
+                    <span>{c.kind === 'create' ? 'Booked' : c.kind === 'reschedule' ? `Move${c.startLabel ? ` to ${c.startLabel}` : ''}` : 'Cancel'}</span>
+                    <span className="text-charcoal-500">{c.createdLabel}</span>
+                    {c.statusMessage ? <span className="w-full text-charcoal-600">{c.statusMessage}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           <AttendanceControl
             booking={d}
             onMarked={(b) => {

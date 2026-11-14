@@ -351,7 +351,7 @@ not allow it for this app setup, the card says "Not available" and everything el
   `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` are not used (no direct TikTok API for a private app).
 - The worker schedules `publish.dispatch` every minute and `social.check` daily at 4:23 am Melbourne time.
 
-## Square appointments (Stage C, WP6)
+## Square appointments (Stage C, WP6 and WP6b)
 
 - Needs `SQUARE_APPLICATION_ID` and `SQUARE_APPLICATION_SECRET` (Developer Console → OAuth, sandbox tab first) and
   `SQUARE_ENVIRONMENT` (`sandbox` by default; `production` for the live account). Register
@@ -366,6 +366,11 @@ not allow it for this app setup, the card says "Not available" and everything el
 - Switching `SQUARE_ENVIRONMENT` asks the owner to reconnect; the other environment's copied data is removed then.
 - The worker schedules `square.sync` every 10 minutes and at 2:47 am, `square.attendance` every 30 minutes and
   `square.token_refresh` at 3:13 am (Melbourne time).
+- Booking changes from Studio Assistant (WP6b) need no extra setting: they are switched off in code
+  (`SQUARE_TIER1_AVAILABLE` in `packages/core/src/square.ts`) until the sandbox write checks (design §11.3) are recorded
+  in `docs/research/square-sandbox-results.md`. Turning them on is a code change and a deploy, then the owner's checklist
+  in Settings (Appointments Plus or Premium, "Give permission", fee-free services, the self-test, the switch).
+  Migration `square_changes` adds `square_booking_changes`.
 
 ## Email and review requests (Stage C, WP7)
 

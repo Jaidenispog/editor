@@ -48,7 +48,15 @@ export default async function AppointmentsPage() {
   }
   return (
     <>
-      <PageHeader eyebrow="Appointments" title="Appointments" description="Your Square bookings in Melbourne time. Square stays the source of truth; changes to bookings are made in Square." />
+      <PageHeader
+        eyebrow="Appointments"
+        title="Appointments"
+        description={
+          status.tier1.ready
+            ? 'Your Square bookings in Melbourne time. Square stays the source of truth: every change from here is checked with Square first.'
+            : 'Your Square bookings in Melbourne time. Square stays the source of truth; changes to bookings are made in Square.'
+        }
+      />
       <AppointmentsView initialStatus={status} />
     </>
   );

@@ -8,8 +8,9 @@ import { SQUARE_OAUTH_PATH, buildSquareAuthUrl, squareAuthBase, squareRedirectUr
 
 /**
  * GET /api/integrations/square/connect?access=read (owner): sends the owner to Square's authorise page (code flow)
- * with the read permissions only. The state is bound to this session in a 10-minute HttpOnly cookie. Write
- * permissions (`access=write`) are asked for only once booking changes exist (WP6b).
+ * with the read permissions only. The state is bound to this session in a 10-minute HttpOnly cookie.
+ * `access=write` ("Give permission", Tier 1) adds the two booking-change permissions; it is refused while booking
+ * changes are not available in this version, so Square is never asked for permissions that cannot be used.
  */
 export const GET = handleApi(async ({ req, user, session }) => {
   requireOwner(user);

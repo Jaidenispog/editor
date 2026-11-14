@@ -1,6 +1,5 @@
 'use client';
 
-import { Check, CircleHelp, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button, buttonClasses } from '@/components/ui/button';
@@ -11,6 +10,7 @@ import { StatusPill } from '@/components/ui/status-pill';
 import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
 import type { SquareStatusDto } from '@/lib/shared/square-dto';
+import { Tier1Checklist } from './tier1-checklist';
 
 type Notice = { tone: 'success' | 'info' | 'danger'; text: string };
 
@@ -37,15 +37,10 @@ const WEBHOOK_WORDS: Record<SquareStatusDto['webhooks'], string> = {
   quiet: 'No webhook received for 3 days — check the subscription in Square.',
 };
 
-function Mark({ mark }: { mark: 'ok' | 'missing' | 'unknown' }) {
-  if (mark === 'ok') return <Check className="size-4 shrink-0 text-emerald-600" aria-label="Done" />;
-  if (mark === 'missing') return <X className="size-4 shrink-0 text-red-600" aria-label="Not yet" />;
-  return <CircleHelp className="size-4 shrink-0 text-charcoal-400" aria-label="Not checked yet" />;
-}
-
 /**
  * Settings → Integrations → Square (design §4.1, §9.2): the connection states, connect and reconnect, the location
- * picker, the webhook line, Sync now, the booking-changes checklist (read-only while Tier 1 is not built),
+ * picker, the webhook line, Sync now, the booking-changes checklist with the self-test and switch (read-only while
+ * booking changes are not available in this version),
  * disconnect with an optional purge, and the technical details for the owner. Staff see the state only.
  */
 export function SquareIntegrationCard() {
@@ -182,21 +177,7 @@ export function SquareIntegrationCard() {
                   </div>
                 ) : null}
 
-                <div>
-                  <h4 className="font-semibold text-charcoal-900">Booking changes from Studio Assistant</h4>
-                  <p className="mt-1 text-xs text-charcoal-500">{s.tier1.summary}</p>
-                  <ul className="mt-2 space-y-2">
-                    {s.tier1.lines.map((l) => (
-                      <li key={l.key} className="flex gap-2">
-                        <Mark mark={l.mark} />
-                        <span>
-                          <span className="font-medium text-charcoal-900">{l.label}.</span> {l.explanation}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                  <p className="mt-2 text-xs text-charcoal-500">Always in Square: marking no-shows, deposits, accepting or declining requests, and booking services with a no-show fee.</p>
-                </div>
+                <Tier1Checklist status={s} onChanged={setS} reload={load} />
 
                 {s.canManage ? (
                   <div className="flex flex-wrap gap-2">

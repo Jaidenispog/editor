@@ -52,6 +52,7 @@ export * from './schema/preferences.js';
 export * from './schema/trends.js';
 export * from './schema/publishing.js';
 export * from './schema/square.js';
+export * from './schema/square-changes.js';
 export * from './schema/email.js';
 export * from './schema/website.js';
 export * from './schema/business_profile.js';

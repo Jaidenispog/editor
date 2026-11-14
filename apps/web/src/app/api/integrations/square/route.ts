@@ -15,7 +15,8 @@ const PatchSchema = z
 
 /**
  * PATCH /api/integrations/square (owner): choose the location, confirm a service has no no-show fee, or switch
- * booking changes off. Switching them on is refused until every checklist line is ticked (Tier 1 is not built yet).
+ * booking changes on or off. Switching them on is refused (409) until checklist lines 1–4 are ticked, and always
+ * while booking changes are not available in this version.
  */
 export const PATCH = handleApi(async ({ req, user }) => {
   requireOwner(user);

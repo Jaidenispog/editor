@@ -7,7 +7,11 @@ import type { AddressInfo } from 'node:net';
  * shapes (snake_case), so the real `square@46.0.0` SDK runs against it through `SQUARE_API_BASE_URL` (honoured only
  * when NODE_ENV=test). It enforces the documented limits the module must respect (ListBookings ≤ 31 days,
  * SearchAvailability 24 hours to 32 days) and records every call, including any write, so tests can prove that
- * nothing is ever written to Square. No real Square endpoint is ever contacted.
+ * nothing is ever written to Square. Booking writes (WP6b) are refused with 403 unless a test sets `acceptWrites`;
+ * then CreateBooking, UpdateBooking and CancelBooking change the scenario like Square would, honour the idempotency
+ * key (the same key returns the first answer and changes nothing), check the booking version, and can drop the
+ * response after applying a write (`dropWriteResponses`), which is what a time-out after Square made the change looks
+ * like. No real Square endpoint is ever contacted.
  */
 
 /** Square's error body entry. */
@@ -67,6 +71,16 @@ export interface SquareScenario {
   availabilities: Array<Record<string, unknown>>;
   /** Errors returned once per endpoint (consumed when used). */
   failOnce: Partial<Record<SquareEndpoint, FakeSquareError>>;
+  /** Booking writes are applied only when true (otherwise every write gets 403 FORBIDDEN, as for Tier 0). */
+  acceptWrites: boolean;
+  /** This many write responses are dropped (the connection is cut) after the write was applied. */
+  dropWriteResponses: number;
+  /** Which writes `dropWriteResponses` applies to (all when empty). */
+  dropWriteKinds: Array<'create' | 'update' | 'cancel'>;
+  /** Refuses the next write of this kind with this error, without applying it (consumed when used). */
+  failNextWrite: { kind: 'create' | 'update' | 'cancel'; error: FakeSquareError } | null;
+  /** Idempotency key → the JSON body of Square's first answer. */
+  idempotency: Record<string, unknown>;
 }
 
 /** One recorded request. */
@@ -172,6 +186,20 @@ export function defaultSquareScenario(): SquareScenario {
     orders: [],
     availabilities: [],
     failOnce: {},
+    acceptWrites: false,
+    dropWriteResponses: 0,
+    dropWriteKinds: [],
+    failNextWrite: null,
+    idempotency: {},
+  };
+}
+
+/** A free time in SearchAvailability's JSON shape. */
+export function fakeSlot(input: { startAt: string; teamMemberId?: string; serviceVariationId?: string; durationMinutes?: number; version?: number }): Record<string, unknown> {
+  return {
+    start_at: input.startAt,
+    location_id: 'LOC_1',
+    appointment_segments: [{ duration_minutes: input.durationMinutes ?? 45, team_member_id: input.teamMemberId ?? 'TM_SAM', service_variation_id: input.serviceVariationId ?? 'VAR_FADE', service_variation_version: input.version ?? 1700000000001 }],
   };
 }
 
@@ -223,6 +251,55 @@ export function fakePayment(input: { id: string; createdAt: string; customerId?:
     ...(input.product ? { application_details: { square_product: input.product } } : {}),
     source_type: 'CARD',
   };
+}
+
+/**
+ * Applies one booking write to the scenario (CreateBooking, UpdateBooking, CancelBooking at seller level). A key
+ * already used returns Square's first answer without changing anything; a stale `version` answers 409 CONFLICT.
+ */
+function applyWrite(scenario: SquareScenario, method: string, path: string, body: Record<string, unknown> | null): { status: number; body: unknown } {
+  const key = typeof body?.['idempotency_key'] === 'string' ? body['idempotency_key'] : null;
+  if (key && scenario.idempotency[key]) return { status: 200, body: scenario.idempotency[key] };
+  const err = (status: number, code: string, detail: string) => ({ status, body: { errors: [{ category: 'INVALID_REQUEST_ERROR', code, detail }] } });
+  const nowIso = new Date().toISOString();
+  let booking: Record<string, unknown>;
+  if (method === 'POST' && path === '/v2/bookings') {
+    const b = (body?.['booking'] ?? {}) as Record<string, unknown>;
+    booking = {
+      id: `BK_NEW_${scenario.bookings.length + 1}_${Math.random().toString(36).slice(2, 7)}`,
+      version: 0,
+      status: 'ACCEPTED',
+      created_at: nowIso,
+      updated_at: nowIso,
+      start_at: b['start_at'],
+      location_id: b['location_id'],
+      customer_id: b['customer_id'],
+      ...(b['seller_note'] ? { seller_note: b['seller_note'] } : {}),
+      appointment_segments: b['appointment_segments'],
+      source: 'API',
+    };
+    scenario.bookings.push(booking);
+  } else {
+    const m = /^\/v2\/bookings\/([^/]+)(\/cancel)?$/.exec(path);
+    const existing = m ? scenario.bookings.find((x) => x['id'] === decodeURIComponent(m[1] ?? '')) : undefined;
+    if (!m || !existing) return err(404, 'NOT_FOUND', 'Booking not found');
+    const cancel = Boolean(m[2]);
+    const version = cancel ? body?.['booking_version'] : ((body?.['booking'] ?? {}) as Record<string, unknown>)['version'];
+    if (version !== undefined && version !== null && version !== existing['version']) return err(409, 'CONFLICT', 'The booking version does not match');
+    if (cancel) {
+      existing['status'] = 'CANCELLED_BY_SELLER';
+    } else {
+      const b = (body?.['booking'] ?? {}) as Record<string, unknown>;
+      if (b['start_at']) existing['start_at'] = b['start_at'];
+      if (b['appointment_segments']) existing['appointment_segments'] = b['appointment_segments'];
+    }
+    existing['version'] = Number(existing['version'] ?? 0) + 1;
+    existing['updated_at'] = nowIso;
+    booking = existing;
+  }
+  const answer = { booking: JSON.parse(JSON.stringify(booking)) as Record<string, unknown> };
+  if (key) scenario.idempotency[key] = answer;
+  return { status: 200, body: answer };
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -293,7 +370,23 @@ export async function startFakeSquareServer(initial: Partial<SquareScenario> = {
         delete scenario.failOnce[endpoint];
         return squareError(res, injected);
       }
-      if (endpoint === 'write') return squareError(res, { status: 403, code: 'FORBIDDEN', detail: 'The fake refuses every write' });
+      if (endpoint === 'write') {
+        if (!scenario.acceptWrites) return squareError(res, { status: 403, code: 'FORBIDDEN', detail: 'The fake refuses every write' });
+        if (auth !== `Bearer ${scenario.accessToken}` || scenario.revoked) return squareError(res, { status: 401, code: 'UNAUTHORIZED', detail: 'Bad token' });
+        const kind = method === 'POST' && u.pathname === '/v2/bookings' ? 'create' : u.pathname.endsWith('/cancel') ? 'cancel' : 'update';
+        if (scenario.failNextWrite?.kind === kind) {
+          const e = scenario.failNextWrite.error;
+          scenario.failNextWrite = null;
+          return squareError(res, e);
+        }
+        const answer = applyWrite(scenario, method, u.pathname, body);
+        if (scenario.dropWriteResponses > 0 && answer.status < 300 && (!scenario.dropWriteKinds.length || scenario.dropWriteKinds.includes(kind))) {
+          scenario.dropWriteResponses--;
+          req.socket.destroy();
+          return;
+        }
+        return send(res, answer.status, answer.body);
+      }
       const bearerOk = auth === `Bearer ${scenario.accessToken}` && !scenario.revoked;
       if (!['token', 'revoke'].includes(endpoint) && !bearerOk) {
         return squareError(res, { status: 401, code: scenario.revoked ? 'ACCESS_TOKEN_REVOKED' : 'UNAUTHORIZED', detail: 'Bad token' });
@@ -336,7 +429,7 @@ export async function startFakeSquareServer(initial: Partial<SquareScenario> = {
             if (item['id'] === id) return send(res, 200, { object: item });
             const variations = ((item['item_data'] as Record<string, unknown>)['variations'] ?? []) as Array<Record<string, unknown>>;
             const v = variations.find((x) => x['id'] === id);
-            if (v) return send(res, 200, { object: v });
+            if (v) return send(res, 200, { object: v, ...(u.searchParams.get('include_related_objects') === 'true' ? { related_objects: [item] } : {}) });
           }
           return notFound(res);
         }

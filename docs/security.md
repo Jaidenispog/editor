@@ -182,7 +182,7 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
 - **Media**: uploads stream from private storage to `rupload.facebook.com` (no public URL); owner downloads use
   expiring links. Deleting a project cancels its unsent posts and removes its `publishing/{postId}/` covers.
 
-## Square appointments (Stage C, WP6)
+## Square appointments (Stage C, WP6 and WP6b)
 
 - **Tokens**: Square access and refresh tokens live only in `integration_connections` (AES-256-GCM), decrypted in the
   worker per call and in the callback for the single code exchange. Never in job payloads, `bookings.raw`, audit data,
@@ -190,7 +190,20 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   the secret for refresh and revoke.
 - **Least privilege**: read scopes only (`APPOINTMENTS_READ`, `APPOINTMENTS_ALL_READ`,
   `APPOINTMENTS_BUSINESS_SETTINGS_READ`, `CUSTOMERS_READ`, `ITEMS_READ`, `MERCHANT_PROFILE_READ`, `PAYMENTS_READ`,
-  `ORDERS_READ`). Write scopes are refused until booking changes exist (WP6b). Code flow, so the secret stays server-side.
+  `ORDERS_READ`). The two write scopes (`APPOINTMENTS_WRITE`, `APPOINTMENTS_ALL_WRITE`) are asked for only when the
+  owner presses "Give permission", and refused while booking changes are not available in this version. No
+  `CUSTOMERS_WRITE`, `PAYMENTS_WRITE` or `ORDERS_WRITE`. Code flow, so the secret stays server-side.
+- **Booking changes (WP6b, switched off in this version)**: only `square.booking_change` writes to Square, only for a
+  change row the owner created (owner role, CSRF-checked route), never from a sync, schedule or connect. The approval is
+  bound to the Square account and environment the owner saw (`merchant_id`, `environment`); just before the one write
+  the worker re-checks the plan flag, the service at Square's current version, the booking's version and the exact free
+  time, and sets `submitted_at` under the connection row's lock, so a disconnect or switch stops it. The idempotency
+  key (`sabc_<id>`) makes a retry harmless and holds no secret. Square's refusals are stored verbatim and shown as
+  text, never HTML. Audit: `booking.change_requested/_submitted/_confirmed/_rejected/_unknown/_cancelled`,
+  `integration.square.scopes_upgraded`, `writes_enabled/_disabled/_suspended`, `self_test_requested/_passed/_failed`
+  (ids, kind, environment, Square error code, start time; never names, contact details, notes or tokens). The
+  self-test is an explicit owner action with its own confirmation (and, on live Square, a tick that these are real
+  bookings); it is never run to test a connection.
 - **OAuth**: state bound to the owner's session in an encrypted, HttpOnly, SameSite=Lax 10-minute cookie on
   `/api/integrations/square`; fixed redirect from `APP_URL`; the callback requires the owner and refuses a sign-in
   that started in the other environment.
@@ -201,7 +214,8 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
   address, notes, amounts) is dropped before anything is written. Payloads are hints only: the worker ignores other
   merchants and re-reads every object from Square. Processed Square deliveries are deleted after 7 days
   (`maintenance.cleanup`) and with every purge.
-- **Roles**: owner only for connect, disconnect, location, service confirmations and sync. Staff see bookings, client
+- **Roles**: owner only for connect, disconnect, location, service confirmations, sync, the self-test, the switch and
+  every booking change. Staff see bookings, client
   names, services and free times, and may mark attendance; client email/phone and booking notes are owner-only.
 - **Personal data**: only names, email, phone, Square ids and the email opt-out are copied, and bookings only for the
   studio's own Square location (none while the owner still has to choose between several; choosing one deletes the

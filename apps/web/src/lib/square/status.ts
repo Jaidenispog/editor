@@ -4,7 +4,6 @@ import {
   AppError,
   BUSINESS_TIMEZONE,
   SQUARE_DASHBOARD_URL,
-  SQUARE_TIER1_AVAILABLE,
   classifyVariation,
   effectiveLocationId,
   formatCurrencyAud,
@@ -13,7 +12,12 @@ import {
   newId,
   parseSquareCapabilities,
   parseSquareConfig,
+  selfTestAllowed,
+  selfTestIsCurrent,
   squareIntegrationState,
+  squareNotificationSentence,
+  suspensionWords,
+  writeGateReason,
   type SquareConnectionConfig,
   type SquareTier1Status,
 } from '@studio/core';
@@ -26,7 +30,8 @@ import { getEnv } from '../env.js';
 import { formatRelative } from '../format.js';
 import { createTrackedJob } from '../jobs.js';
 import { missingEnv } from '../integrations/types.js';
-import type { SquareRevokeDto, SquareServiceDto, SquareStatusDto, Tier1LineDto } from '../shared/square-dto.js';
+import type { BookingChangeDto, SelfTestDto, SquareRevokeDto, SquareServiceDto, SquareStatusDto, Tier1LineDto } from '../shared/square-dto.js';
+import { toChangeDto } from './change-dto.js';
 
 /** The stored `square` connection row, or null. */
 export async function loadSquareConnection(db: Database = getDb()) {
@@ -131,8 +136,33 @@ export async function squareRevokeOutcome(db: Database, conn: { id: string; stat
   return null;
 }
 
+/** Test-only options: `tier1Available` overrides `SQUARE_TIER1_AVAILABLE` (production code never passes it). */
+export interface Tier1Options {
+  tier1Available?: boolean | undefined;
+}
+
+/** The three step rows of a self-test, in order (for its progress line). */
+async function selfTestSteps(db: Database, selfTestId: string | null, config: SquareConnectionConfig, now: Date): Promise<BookingChangeDto[]> {
+  if (!selfTestId) return [];
+  const t = schema.squareBookingChanges;
+  const rows = await db.select().from(t).where(eq(t.selfTestId, selfTestId));
+  const names = new Map((config.snapshot?.teamMembers ?? []).map((m) => [m.id, m.displayName]));
+  return (['create', 'reschedule', 'cancel'] as const).flatMap((k) => {
+    const r = rows.find((x) => x.kind === k);
+    return r ? [toChangeDto(r, names, now)] : [];
+  });
+}
+
+/**
+ * Why the booking-changes switch cannot be turned on (lines 1–4 must be ticked), or null. A pause is cleared by
+ * turning the switch on again once the cause is fixed, so the pause itself is not a reason here.
+ */
+export function enableReason(t: SquareTier1Status): string | null {
+  return writeGateReason({ tier1: { ...t, suspendedReason: '', checklist: { ...t.checklist, switch: 'ok' } }, selfTest: false });
+}
+
 /** Everything the Square card and the Appointments header show (never tokens or secrets). */
-export async function getSquareStatus(user: SessionUser, db: Database = getDb(), now: Date = new Date()): Promise<SquareStatusDto> {
+export async function getSquareStatus(user: SessionUser, db: Database = getDb(), now: Date = new Date(), opts: Tier1Options = {}): Promise<SquareStatusDto> {
   const env = getEnv();
   const conn = await loadSquareConnection(db);
   const missing = missingEnv(env, ['SQUARE_APPLICATION_ID', 'SQUARE_APPLICATION_SECRET']);
@@ -144,6 +174,7 @@ export async function getSquareStatus(user: SessionUser, db: Database = getDb(),
       ? { status: conn.status, externalAccountId: conn.externalAccountId, scopes: conn.scopes, config: conn.config, capabilities: conn.capabilities, lastSyncAt: conn.lastSyncAt, lastError: conn.lastError }
       : null,
     now,
+    tier1Available: opts.tier1Available,
   });
   const config = parseSquareConfig(conn?.config);
   const caps = parseSquareCapabilities(conn?.capabilities);
@@ -154,13 +185,28 @@ export async function getSquareStatus(user: SessionUser, db: Database = getDb(),
     ? ((await db.select().from(schema.jobs).where(eq(schema.jobs.type, 'square.sync')).orderBy(desc(schema.jobs.createdAt)).limit(1))[0] ?? null)
     : null;
   const owner = user.role === 'owner';
-  const summary = !SQUARE_TIER1_AVAILABLE
+  const summary = !r.tier1.available
     ? 'Not available yet: booking changes are made in Square. Studio Assistant reads your bookings.'
     : r.tier1.ready
-      ? 'On'
+      ? 'On: you can book, move and cancel from Studio Assistant. Square re-checks every change before it is made.'
       : r.tier1.suspendedReason
-        ? `Paused: ${r.tier1.suspendedReason === 'plan' ? 'Square refused because of your Appointments plan.' : 'Square refused a change.'}`
-        : 'Off';
+        ? suspensionWords(r.tier1.suspendedReason)
+        : 'Off: booking changes are made in Square.';
+  const connected = r.state === 'connected';
+  const enableWhy = connected ? enableReason(r.tier1) : 'Connect Square first.';
+  const selfTestCurrent = selfTestIsCurrent(caps, r.environment, conn?.externalAccountId ?? null);
+  const runWhy = !connected ? 'Connect Square first.' : caps.selfTestStatus === 'running' ? 'A self-test is running.' : selfTestAllowed(r.tier1) ? null : (writeGateReason({ tier1: r.tier1, selfTest: true }) ?? 'Not available.');
+  const selfTest: SelfTestDto = {
+    status: caps.selfTestStatus,
+    current: selfTestCurrent,
+    atLabel: caps.selfTestAt ? formatDateTime(caps.selfTestAt) : null,
+    failure: caps.selfTestStatus === 'failed' ? caps.selfTestFailure : null,
+    canRun: owner && runWhy === null,
+    runReason: owner ? runWhy : 'Only the owner can run the self-test.',
+    notifies: caps.squareNotifiesApiBookings,
+    askNotification: owner && selfTestCurrent && caps.selfTestEnvironment === 'production' && caps.selfTestStatus !== 'running' && caps.selfTestStatus !== 'none' && caps.squareNotifiesApiBookings === 'unknown',
+    steps: hasData ? await selfTestSteps(db, caps.selfTestId, config, now) : [],
+  };
   return {
     state: r.state,
     liveMode: r.liveMode,
@@ -180,7 +226,18 @@ export async function getSquareStatus(user: SessionUser, db: Database = getDb(),
     lastWebhookLabel: config.lastWebhookAt ? formatRelative(config.lastWebhookAt) : null,
     bookingSiteUrl: location?.bookingSiteUrl ?? null,
     dashboardUrl: SQUARE_DASHBOARD_URL[config.environment],
-    tier1: { available: r.tier1.available, ready: r.tier1.ready, summary, lines: tier1Lines(r.tier1) },
+    tier1: {
+      available: r.tier1.available,
+      ready: r.tier1.ready,
+      summary,
+      lines: tier1Lines(r.tier1),
+      canEnable: owner && r.tier1.available && enableWhy === null,
+      enableReason: enableWhy,
+      switchOn: caps.writesEnabled,
+      canGivePermission: owner && connected && r.tier1.available && r.tier1.checklist.scopes !== 'ok',
+      notificationSentence: squareNotificationSentence(caps.squareNotifiesApiBookings),
+    },
+    selfTest,
     services: serviceDtos(config),
     teamMembers: config.snapshot?.teamMembers ?? [],
     sync: job ? { jobId: job.id, status: job.status, progress: job.progress, message: job.message } : null,
@@ -211,6 +268,7 @@ export async function updateSquareSettings(
   user: SessionUser,
   body: { locationId?: string | undefined; writesEnabled?: boolean | undefined; serviceConfirmation?: { variationId: string; confirmed: boolean } | undefined },
   db: Database = getDb(),
+  opts: Tier1Options = {},
 ): Promise<void> {
   const conn = await requireSquareConnected(db);
   const t = schema.integrationConnections;
@@ -242,7 +300,27 @@ export async function updateSquareSettings(
   }
   if (body.writesEnabled !== undefined) {
     if (body.writesEnabled) {
-      throw new AppError('CONFLICT', SQUARE_TIER1_AVAILABLE ? 'Booking changes can be switched on once every line of the checklist is ticked.' : 'Booking changes from Studio Assistant aren’t available yet. Make changes in Square.');
+      // Re-read under the row lock: lines 1–4 must be ticked now. Turning it on again also clears a pause whose
+      // cause is fixed (the plan flag and permissions are re-checked here, and by the worker before every change).
+      const refused = await db.transaction(async (tx) => {
+        const locked = (await tx.select().from(t).where(eq(t.id, conn.id)).limit(1).for('update'))[0];
+        if (!locked) return 'Square is not connected.';
+        const r = squareIntegrationState({
+          envPresent: true,
+          webhookKeyPresent: false,
+          environment: getEnv().SQUARE_ENVIRONMENT,
+          connection: { status: locked.status, externalAccountId: locked.externalAccountId, scopes: locked.scopes, config: locked.config, capabilities: locked.capabilities, lastSyncAt: locked.lastSyncAt, lastError: locked.lastError },
+          now: new Date(),
+          tier1Available: opts.tier1Available,
+        });
+        const why = r.tier1.available ? enableReason(r.tier1) : 'Booking changes from Studio Assistant aren’t available yet. Make changes in Square.';
+        if (why) return why;
+        await tx.update(t).set({ capabilities: sql`${t.capabilities} || '{"writesEnabled": true, "writesSuspendedReason": ""}'::jsonb`, updatedAt: new Date() }).where(eq(t.id, conn.id));
+        return null;
+      });
+      if (refused) throw new AppError('CONFLICT', refused);
+      await writeAudit({ userId: user.id, action: 'integration.square.writes_enabled', entityType: 'integration_connection', entityId: conn.id });
+      return;
     }
     await db.update(t).set({ capabilities: sql`${t.capabilities} || '{"writesEnabled": false}'::jsonb`, updatedAt: new Date() }).where(eq(t.id, conn.id));
     await writeAudit({ userId: user.id, action: 'integration.square.writes_disabled', entityType: 'integration_connection', entityId: conn.id });
@@ -278,6 +356,9 @@ export async function disconnectSquare(user: SessionUser, purgeData: boolean, db
       })
       .where(eq(t.id, conn.id));
     await tx.insert(schema.auditLog).values({ id: newId(), userId: user.id, action: 'integration.square.disconnected', entityType: 'integration_connection', entityId: conn.id, data: { environment, purgeData } });
+    // Changes still waiting are withdrawn (the worker also refuses any change once the connection is gone).
+    const sc = schema.squareBookingChanges;
+    await tx.update(sc).set({ status: 'cancelled', statusMessage: 'Square was disconnected.', finishedAt: new Date(), updatedAt: new Date() }).where(eq(sc.status, 'queued'));
     if (purgeData) await purgeSquareData(tx as unknown as Database, { environment, userId: user.id, reason: 'disconnected' });
   });
   let revokeJobId: string | null = null;

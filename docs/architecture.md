@@ -260,9 +260,9 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   `publish.prepare` again. `publish.dispatch` hands due scheduled targets on, turns due manual ones into "Your turn",
   and settles a processing target untouched for an hour (failed with Retry, or `check_before_retry` once submitted).
 
-## Square appointments (Stage C, WP6)
+## Square appointments (Stage C, WP6 and WP6b)
 
-- **Tier 0 only (read-only).** Square stays the source of truth. The worker copies bookings, customers and the
+- **Tier 0 (read-only).** Square stays the source of truth. The worker copies bookings, customers and the
   business snapshot (locations, booking profile, team, APPOINTMENTS_SERVICE catalogue) through the official
   `square@46.0.0` SDK behind a narrow `SquareApi` interface (`apps/worker/src/square/api.ts`; `maxRetries: 0`, 20 s,
   the run's AbortSignal). Nothing writes to Square and nothing sends a message; Square keeps sending its own
@@ -296,6 +296,22 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   disconnect and, when Square did not confirm it, tells the owner to remove the app in Square's App integrations page.
 - **Times**: everything stored in UTC; availability searches use `availabilityRange` (a 23-hour DST day is widened to
   Square's 24-hour minimum and the extra slots dropped); lists are grouped by Melbourne day.
+- **Tier 1: booking changes and the self-test (WP6b), switched off in this version.** Built and tested against the
+  fake of Square, but `SQUARE_TIER1_AVAILABLE` stays `false` until the sandbox smoke test records Square's real answers
+  (fee-protected services, PENDING cancels, the plan error); while it is false every Tier 1 route refuses and the card
+  shows the checklist read-only. Contracts in `packages/core/src/square-changes.ts` (`BookingChangeRequestSchema`,
+  statuses, `writeGateReason`, `bookingActions`, `selfTestAllowed`, the notification sentence). One owner-approved
+  `square_booking_changes` row per change (`packages/db/src/schema/square-changes.ts`; `merchant_id` + `environment`
+  bind the approval to the account the owner saw; idempotency key `sabc_<id>`). The web app records the change after
+  checking its copy (checklist, a ≤ 5-minute-old search, the booking's version) and queues `square.booking_change`;
+  `apps/worker/src/square/change.ts` is the only code that writes to Square: claim → gate → plan flag → service from
+  the catalogue → booking version → fresh availability → `submitted_at` under the connection row's `FOR SHARE` lock →
+  one write → confirmed (mirrored, double-booking check) or Square's refusal stored verbatim (plan/permission refusals
+  pause changes; an unexplained 4xx marks the service "Book in Square"). Time-outs re-send with the same key; the last
+  attempt leaves `unknown`, which `square.sync` settles (`settleUnknownChanges`). The self-test
+  (`handlers/square-self-test.ts`) books, moves by one free slot and cancels through the same routine; its step rows
+  have fixed ids so it resumes after a crash, and the cancel is always attempted. Its result counts only for the same
+  account and environment and is the Square card's `verified` on live Square.
 
 ## Email and review requests (Stage C, WP7)
 

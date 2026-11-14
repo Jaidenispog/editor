@@ -52,13 +52,21 @@ export async function handleSquareAvailability(ctx: WorkerContext, run: TrackedR
   }
   try {
     const range = availabilityRange(search.params.fromDate, search.params.days);
-    const found = await s.api.searchAvailability({
-      startAt: range.start.toISOString(),
-      endAt: range.end.toISOString(),
-      locationId,
-      serviceVariationId: search.params.serviceVariationId,
-      teamMemberId: search.params.teamMemberId,
-    });
+    // A search for moving a booking (Tier 1) uses Square's booking filter (location and service then cannot be set).
+    const moving = search.params.bookingId ? await ctx.db.query.bookings.findFirst({ where: eq(schema.bookings.id, search.params.bookingId), columns: { squareBookingId: true } }) : null;
+    if (search.params.bookingId && !moving) {
+      await fail('That booking is no longer in Studio Assistant’s copy of Square.');
+      return;
+    }
+    const found = moving
+      ? (await s.api.searchAvailabilityForBooking({ startAt: range.start.toISOString(), endAt: range.end.toISOString(), bookingId: moving.squareBookingId })).filter((a) => !search.params.teamMemberId || a.segments[0]?.teamMemberId === search.params.teamMemberId)
+      : await s.api.searchAvailability({
+          startAt: range.start.toISOString(),
+          endAt: range.end.toISOString(),
+          locationId,
+          serviceVariationId: search.params.serviceVariationId,
+          teamMemberId: search.params.teamMemberId,
+        });
     const slots: SquareAvailabilitySlot[] = [];
     for (const a of found) {
       const at = Date.parse(a.startAt);

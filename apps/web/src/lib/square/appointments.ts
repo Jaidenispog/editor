@@ -10,6 +10,8 @@ import {
   SQUARE_IN_SQUARE_INSTRUCTIONS,
   addDaysToDate,
   attendanceLabel,
+  bookingActions,
+  classifyVariation,
   deriveAttendance,
   deriveCompletion,
   effectiveLocationId,
@@ -32,6 +34,7 @@ import { writeAudit } from '../audit.js';
 import { getDb } from '../db.js';
 import { createTrackedJob } from '../jobs.js';
 import { attendanceMarkAllowed, type AvailabilitySearchDto, type BookingDetailDto, type BookingDto, type ClientDetailDto, type ClientDto } from '../shared/square-dto.js';
+import { changesForBooking, tier1For } from './changes.js';
 import { loadSquareConnection, requireSquareConnected } from './status.js';
 
 type BookingRow = typeof schema.bookings.$inferSelect;
@@ -211,8 +214,11 @@ function createdIn(raw: Record<string, unknown>): string {
   }
 }
 
-/** A booking with its detail; notes and contact details only for the owner. */
-export async function getBookingDetail(id: string, user: SessionUser, db: Database = getDb(), now: Date = new Date()): Promise<BookingDetailDto> {
+/**
+ * A booking with its detail; notes and contact details only for the owner. Also the change buttons it gets (Tier 1,
+ * owner only, with the reason when not) and the changes made to it from Studio Assistant.
+ */
+export async function getBookingDetail(id: string, user: SessionUser, db: Database = getDb(), now: Date = new Date(), opts: { tier1Available?: boolean | undefined } = {}): Promise<BookingDetailDto> {
   const data = await dataEnvironment(db);
   const row = await db.query.bookings.findFirst({ where: eq(schema.bookings.id, id) });
   if (!row || !data || !isShown(row, data)) throw new AppError('NOT_FOUND', 'That booking is not in Studio Assistant’s copy of your Square bookings.');
@@ -223,6 +229,11 @@ export async function getBookingDetail(id: string, user: SessionUser, db: Databa
   const customer = row.customerId ? await db.query.customers.findFirst({ where: eq(schema.customers.id, row.customerId) }) : undefined;
   const ev = row.attendanceEvidence as { paymentId?: unknown; confidence?: unknown; signals?: unknown };
   const instruction = row.status === 'PENDING' ? SQUARE_IN_SQUARE_INSTRUCTIONS.accept : row.status === 'ACCEPTED' && row.startAt < now ? SQUARE_IN_SQUARE_INSTRUCTIONS.noShow : SQUARE_IN_SQUARE_INSTRUCTIONS.booking;
+  const conn = await loadSquareConnection(db);
+  const tier1 = conn ? tier1For(conn, data.environment, opts) : null;
+  const service = data.config.snapshot?.services.find((s) => s.variationId === row.serviceVariationId);
+  const serviceLabel = service ? classifyVariation(service, data.config.snapshot?.businessProfile ?? null, data.config.serviceConfirmations, data.config.serviceWriteRejections).label : null;
+  const actions = bookingActions({ tier1Ready: Boolean(tier1?.ready && conn && (conn.status === 'connected' || conn.status === 'error')), owner, status: row.status, startAt: row.startAt, missingFromSquare: row.missingFromSquareAt !== null, serviceLabel, now });
   return {
     ...dto,
     customerNote: owner && typeof raw['customerNote'] === 'string' ? raw['customerNote'] : null,
@@ -232,6 +243,12 @@ export async function getBookingDetail(id: string, user: SessionUser, db: Databa
     deepLink: { url: SQUARE_DASHBOARD_URL[data.environment], instruction: data.environment === 'sandbox' ? SQUARE_IN_SQUARE_INSTRUCTIONS.sandbox : instruction },
     clientEmail: owner ? (customer?.email ?? null) : null,
     clientPhone: owner ? (customer?.phone ?? null) : null,
+    squareVersion: row.squareVersion,
+    serviceVariationId: row.serviceVariationId,
+    teamMemberId: row.teamMemberId,
+    durationMinutes: row.durationMinutes,
+    actions,
+    changes: await changesForBooking(db, row.id, data.config, now),
   };
 }
 
@@ -308,9 +325,12 @@ export async function getClient(id: string, user: SessionUser, db: Database = ge
   return { ...toClientDto(row, user.role === 'owner'), bookings: await toBookingDtos(db, bookings, data.config, now) };
 }
 
-/** Starts a read-only free-times search (design §4.4); the worker fills it. */
+/**
+ * Starts a read-only free-times search (design §4.4); the worker fills it. With `bookingId` it finds times to move
+ * that booking to (Square's own search for that booking, Tier 1).
+ */
 export async function createAvailabilitySearch(
-  input: { serviceVariationId: string; teamMemberId?: string | null | undefined; fromDate: string; days: number },
+  input: { serviceVariationId: string; teamMemberId?: string | null | undefined; fromDate: string; days: number; bookingId?: string | null | undefined },
   user: SessionUser,
   db: Database = getDb(),
   now: Date = new Date(),
@@ -323,11 +343,16 @@ export async function createAvailabilitySearch(
   if (!isMelbourneDate(input.fromDate)) throw new AppError('VALIDATION', 'Choose a start date.');
   if (input.fromDate < melbourneDateOf(now)) throw new AppError('VALIDATION', 'Choose today or a later day.');
   const days = Math.min(SQUARE_AVAILABILITY_MAX_DAYS, Math.max(1, Math.floor(input.days)));
+  if (input.bookingId) {
+    const b = await db.query.bookings.findFirst({ where: eq(schema.bookings.id, input.bookingId) });
+    if (!b || b.squareEnvironment !== config.environment || b.locationId !== effectiveLocationId(config)) throw new AppError('NOT_FOUND', 'That booking is not in Studio Assistant’s copy of your Square bookings.');
+    if (b.serviceVariationId !== service.variationId) throw new AppError('VALIDATION', 'Search with the booking’s own service.');
+  }
   const id = newId();
   await db.insert(schema.squareAvailabilitySearches).values({
     id,
     environment: config.environment,
-    params: { serviceVariationId: service.variationId, teamMemberId: input.teamMemberId ?? null, fromDate: input.fromDate, days, bookingId: null },
+    params: { serviceVariationId: service.variationId, teamMemberId: input.teamMemberId ?? null, fromDate: input.fromDate, days, bookingId: input.bookingId ?? null },
     requestedBy: user.id,
   });
   const job = await createTrackedJob({ type: 'square.availability', payload: { searchId: id }, projectId: null, refId: id, singletonKey: `square-availability:${id}` });

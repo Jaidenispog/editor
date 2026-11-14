@@ -17,6 +17,7 @@ import type { TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
 import { isMalformedBooking } from './api.js';
 import { markSquareNeedsReauth, mergeSquareConfig, type SquareSession } from './client.js';
+import { settleUnknownChanges } from './change.js';
 import { applyAttendance, storedMatch, upsertBooking, upsertCustomer, type UpsertOutcome } from './map.js';
 
 /** Why a sync runs. */
@@ -157,6 +158,9 @@ export async function runSquareSync(ctx: WorkerContext, run: TrackedRun, s: Squa
       }
     }
   }
+
+  // 4b. Booking changes whose outcome is not known yet (Tier 1): settled from what Square now shows.
+  if (locationId) await settleUnknownChanges(ctx, s, now);
 
   // 5. Customers: everything on connect, otherwise changes since the last watermark (minus a day of overlap).
   run.checkCancelled();

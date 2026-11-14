@@ -202,8 +202,13 @@ export interface SquareCapabilities {
   writesEnabled: boolean;
   writesSuspendedReason: SquareSuspensionReason;
   selfTestStatus: 'none' | 'running' | 'passed' | 'failed';
+  /** The latest self-test (WP6b) and when it finished. */
+  selfTestId: string | null;
+  selfTestAt: string | null;
   selfTestEnvironment: string | null;
   selfTestMerchantId: string | null;
+  /** Plain reason the latest self-test failed (empty when it did not). */
+  selfTestFailure: string | null;
   squareNotifiesApiBookings: 'yes' | 'no' | 'unknown';
   /** The location's Square time zone when it is not Australia/Melbourne. */
   locationTimezone: string | null;
@@ -224,8 +229,11 @@ export function parseSquareCapabilities(raw: Record<string, unknown> | null | un
     writesEnabled: c['writesEnabled'] === true,
     writesSuspendedReason: (SQUARE_SUSPENSION_REASONS as readonly string[]).includes(reason ?? '') ? ((reason ?? '') as SquareSuspensionReason) : '',
     selfTestStatus: selfTest === 'running' || selfTest === 'passed' || selfTest === 'failed' ? selfTest : 'none',
+    selfTestId: str('selfTestId'),
+    selfTestAt: str('selfTestAt'),
     selfTestEnvironment: str('selfTestEnvironment'),
     selfTestMerchantId: str('selfTestMerchantId'),
+    selfTestFailure: str('selfTestFailure'),
     squareNotifiesApiBookings: notifies === 'yes' || notifies === 'no' ? notifies : 'unknown',
     locationTimezone: str('locationTimezone'),
   };
@@ -286,7 +294,7 @@ export function noShowFeeFrom(variation: Record<string, unknown> | null | undefi
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Booking changes checklist (Tier 1 summary; changes themselves are WP6b)
+// Booking changes checklist (Tier 1; the changes themselves are in square-changes.ts)
 // ---------------------------------------------------------------------------------------------------------------
 
 export type ChecklistMark = 'ok' | 'missing' | 'unknown';
@@ -300,14 +308,19 @@ export interface SquareTier1Status {
   suspendedReason: SquareSuspensionReason;
 }
 
-/** The Tier 1 checklist (design §4.5) from stored facts. Never ready while {@link SQUARE_TIER1_AVAILABLE} is false. */
+/**
+ * The Tier 1 checklist (design §4.5) from stored facts. Never ready while {@link SQUARE_TIER1_AVAILABLE} is false;
+ * `available` exists only so tests can exercise the switched-on path (production code never passes it).
+ */
 export function tier1Status(input: {
   capabilities: SquareCapabilities;
   config: SquareConnectionConfig;
   scopes: readonly string[];
   environment: SquareEnvironmentName;
   merchantId: string | null;
+  available?: boolean | undefined;
 }): SquareTier1Status {
+  const available = input.available ?? SQUARE_TIER1_AVAILABLE;
   const { capabilities: c, config } = input;
   const plan: ChecklistMark = c.sellerLevelWrites === null ? 'unknown' : c.sellerLevelWrites ? 'ok' : 'missing';
   const scopes: ChecklistMark = hasSquareWriteScopes(input.scopes) ? 'ok' : 'missing';
@@ -320,8 +333,8 @@ export function tier1Status(input: {
   const selfTest: ChecklistMark =
     c.selfTestStatus === 'passed' && c.selfTestEnvironment === input.environment && c.selfTestMerchantId === input.merchantId ? 'ok' : c.selfTestStatus === 'none' ? 'unknown' : 'missing';
   const sw: ChecklistMark = c.writesEnabled ? 'ok' : 'missing';
-  const ready = SQUARE_TIER1_AVAILABLE && plan === 'ok' && scopes === 'ok' && bookableService === 'ok' && selfTest === 'ok' && sw === 'ok' && c.writesSuspendedReason === '';
-  return { available: SQUARE_TIER1_AVAILABLE, ready, checklist: { plan, scopes, bookableService, selfTest, switch: sw }, suspendedReason: c.writesSuspendedReason };
+  const ready = available && plan === 'ok' && scopes === 'ok' && bookableService === 'ok' && selfTest === 'ok' && sw === 'ok' && c.writesSuspendedReason === '';
+  return { available, ready, checklist: { plan, scopes, bookableService, selfTest, switch: sw }, suspendedReason: c.writesSuspendedReason };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -365,11 +378,13 @@ export function squareIntegrationState(input: {
   environment: SquareEnvironmentName;
   connection: SquareConnectionFacts | null;
   now: Date;
+  /** Tests only: overrides {@link SQUARE_TIER1_AVAILABLE}. */
+  tier1Available?: boolean | undefined;
 }): SquareIntegrationStateResult {
   const conn = input.connection;
   const config = parseSquareConfig(conn?.config);
   const capabilities = parseSquareCapabilities(conn?.capabilities ?? null);
-  const tier1 = tier1Status({ capabilities, config, scopes: conn?.scopes ?? [], environment: input.environment, merchantId: conn?.externalAccountId ?? null });
+  const tier1 = tier1Status({ capabilities, config, scopes: conn?.scopes ?? [], environment: input.environment, merchantId: conn?.externalAccountId ?? null, available: input.tier1Available });
   const liveMode = input.envPresent ? (input.environment === 'production' ? 'live' : 'sandbox') : null;
   const base = { liveMode, environment: input.environment, tier1 } as const;
   const lastSync = conn?.lastSyncAt ? new Date(conn.lastSyncAt) : null;

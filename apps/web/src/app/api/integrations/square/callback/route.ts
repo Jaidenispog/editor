@@ -54,6 +54,11 @@ export const GET = handleApi(async ({ req, user, session }) => {
       entityId: stored.connectionId,
       data: { environment: env.SQUARE_ENVIRONMENT, merchantId: tokens.merchantId, access: checked.extra['access'] ?? 'read', purged: stored.purged },
     });
+    // "Give permission" (Tier 1): the same sign-in with the two booking-change permissions added. Square's token
+    // status, read by the sync queued below, records what was really granted.
+    if (checked.extra['access'] === 'write') {
+      await writeAudit({ userId: user.id, action: 'integration.square.scopes_upgraded', entityType: 'integration_connection', entityId: stored.connectionId, data: { environment: env.SQUARE_ENVIRONMENT } });
+    }
     try {
       await queueSquareSync('connect');
       return finish({ square: 'checking' });
