@@ -158,6 +158,22 @@ History of the background runs:
       (`run-stage-c-bookings.sh` on port 3800 / `studio_e2e_c1`; `run-stage-c-website.sh` on 3900 /
       `studio_e2e_c2`), each re-run twice and reviewed independently, then fixed up. Merge each only after the full
       suite plus all four browser tests pass on the merged result.
+15. Stage C acceptance merged and pushed (d614663): 1,411 unit tests, integration 12/12, Stage A 51/51, Stage B
+    77/77, **Stage C bookings 124/124** (Square sandbox then live through a restart, owner-only contact details,
+    sandbox never counts as a visit, signed webhooks, Postmark read-only check, consent at the counter, one approved
+    review request → exactly one send with the footer, unsubscribe, campaign pause/complaint/cancel, Square writes
+    stay off) and **Stage C website 114/114** (fixture site check with robots and the 25-page cap, refused private
+    addresses, prepared change applied once to a WordPress fake and refused when the page changed, Search Console and
+    Business Profile through Google fakes, no placeholder numbers).
+    - Test-only hooks added (all ignored unless `NODE_ENV=test`, each with an inertness unit test):
+      `POSTMARK_API_BASE_URL`, `GOOGLE_API_BASE_URL`, `WEBSITE_FIXTURE_BASE_URL` (one dotted host name on 127.0.0.1;
+      every other private address stays refused).
+    - Product bug found by the test and fixed: choosing the Square location queued a short sync, so that location's
+      recent past bookings were missing until the nightly reconcile; it now queues the full connect window.
+    - Full local check: `scratchpad/verify-all.sh <out dir>` runs install, typecheck, unit, integration and all four
+      browser tests (about 35 minutes). Stage C scripts take `E2E_SKIP_BUILD=1` after Stage A has built.
+    - **What remains:** WP10 Zernio (blocked on docs access), and everything that needs the owner's real accounts and
+      footage (README "Not yet done").
       **WP10 Zernio stays blocked:** the plan requires docs.zernio.com to be read first; this environment's proxy
       refuses docs.zernio.com and zernio.com (CONNECT 403) and WebFetch cannot resolve them. Needs the owner to
       allow those hosts (a network change) before WP10 can start.

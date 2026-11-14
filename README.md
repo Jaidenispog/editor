@@ -33,18 +33,19 @@ Australian English, AUD, `Australia/Melbourne`.
 | Email and review requests: Postmark, consent ledger, send gate, review link and requests, Google rating (WP7) | Yes | Yes, against a fake email provider and a fake Google API (unit, database and route tests); no real email sent | A domain with DNS access, a Postmark account and its approval, the review link; optionally a Google Maps key and Place ID |
 | Website check, prepared changes, WordPress apply, Search Console (WP8) | Yes | Yes, against a local fixture site, a fake WordPress REST API and a fake Google (unit, database and route tests); no real site, WordPress or Google contacted | The owner's site builder and an Application Password if it is WordPress; Search Console verification and connection; the owner's first check |
 | Google Business Profile reviews and performance, read-only (WP9) | Yes | Yes, against a fake of the Business Profile APIs (unit, database and route tests); no real Google call made | A Google Cloud project with the Business Profile APIs, the consent screen in Production and Google's Basic API Access approval |
-| TikTok direct (Stage C, WP10) | TikTok: manual posting only; the Zernio route is a "Needs setup" screen | — | TikTok (optional Zernio route) |
+| TikTok direct (Stage C, WP10) | Not built: Zernio's documentation could not be reached from the build environment, and the plan forbids building on unconfirmed API details. TikTok posting is manual (export, copy the caption, post in the app) | — | Network access to docs.zernio.com; a Zernio account (optional) |
+| Stage C end to end (bookings, email, reviews, website, search) | Yes | Yes: two browser tests against local fakes of Square, Postmark, Google and WordPress plus a fixture website (`run-stage-c-bookings.sh`, 124 checks; `run-stage-c-website.sh`, 114 checks) | The owner's real accounts (see the rows above) |
 
 **Not yet done:**
 
 - The Stage A acceptance test on the owner's **real haircut footage**. Synthetic footage is not a substitute
   for it (`docs/testing.md`, section 5).
-- Anything against the owner's **real accounts**: no real Instagram post, hashtag read, YouTube chart fetch or AI
-  call has been made. Stage B passes its browser test (`bash apps/web/e2e/run-stage-b.sh`) on synthetic footage
-  with a local fake of Meta only (`docs/testing.md`, "Stage B browser test").
-- The rest of Stage C: TikTok via Zernio (WP10). Square booking changes (WP6b) are built but stay switched off until
-  the sandbox write checks are recorded. Square appointments, email and review requests, the website tools and the
-  Google Business Profile reviews and performance (WP9) are built and verified with fakes only.
+- Anything against the owner's **real accounts**: no real Instagram post, hashtag read, YouTube chart fetch, AI
+  call, Square read or write, email, Google call or website change has been made. Stage B and Stage C pass their
+  browser tests on synthetic data with local fakes only (`docs/testing.md`, "Stage B browser test" and the two
+  "Stage C browser test" sections).
+- TikTok via Zernio (WP10): blocked until docs.zernio.com can be read. Square booking changes (WP6b) are built but
+  stay switched off until the sandbox write checks are recorded.
 
 ## Quick start (local, no Docker)
 
