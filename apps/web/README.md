@@ -148,38 +148,72 @@ App components (`src/components/app`): `SidebarNav`, `MobileNav`, `NAV_ITEMS`, `
 Design: charcoal and white, one accent (`--accent`, `--accent-foreground`, `--accent-soft`; Tailwind classes
 `bg-accent`, `text-accent-foreground`, `bg-accent-soft`). Fonts: system stack with Inter first (no network fetch).
 
-## Handover for the Studio UI agent
+## Video Studio (project page)
 
-The project page `src/app/(app)/studio/[projectId]/page.tsx` is a placeholder: replace its "Video Studio"
-section with the upload/generation UI. Everything below is ready to reuse.
+`src/app/(app)/studio/[projectId]/page.tsx` renders the first status payload on the server and hands it to
+`StudioWorkspace` (`src/components/studio/`), which keeps it fresh by polling
+`GET /api/projects/[id]/status` every 3 s while anything is queued or working, every 20 s otherwise, and not at
+all while the tab is hidden (it refreshes as soon as the tab is visible again).
 
-- **Route handlers:** wrap every handler in `handleApi<{ id: string }>(async ({ req, params, user, session, requestId }) => …)`.
-  Return a plain object for JSON, `Response.json(x, { status: 201 })` for other statuses, `undefined` for 204.
-  Throw `AppError` from `@studio/core` (`'VALIDATION' | 'NOT_FOUND' | 'CONFLICT' | 'UNSUPPORTED' | …`) with a plain
-  message; zod errors become 400 with `details: [{ path, message }]`. Use `parseJson(req, Schema)` for bodies.
-  Raw-body routes (upload parts) read `await req.arrayBuffer()` inside `handleApi`; the CSRF guard already applies.
-- **Jobs:** `createTrackedJob({ type: JOB_TYPES.INGEST_ASSET, payload: { assetId, projectId } })` — inserts the
-  `jobs` row, enqueues with `trackingJobId`, stores `bossJobId`; marks the row failed and throws a plain error if
-  the queue is unreachable. `refId` defaults like the worker (`assetId`, `generationId`, `newVersionId`,
-  `editVersionId`, `trackId`). Use `singletonKey` to avoid duplicate renders. Cancel/retry routes already exist.
-- **Media links:** `signedUrlFor(key)` for players/thumbnails, `signedUrlFor(key, { downloadName: downloadNameFor([project.title, styleName, 'v2'], 'mp4') })`
-  for downloads. Links expire after `MEDIA_LINK_TTL_SECONDS`; re-fetch status to get fresh ones. Local-driver
-  links stream through `/api/media/[token]` with Range support.
-- **Storage keys:** always `storageKeys` from `@studio/storage` (`assetOriginal`, `editPreview`, `musicOriginal`, …).
-  Store: `getBlobStore()` (`createMultipart` / `uploadPart` / `completeMultipart` / `abortMultipart`). Upload limit:
-  `getEnv().MAX_UPLOAD_BYTES`.
-- **Music:** after an audio upload completes, call `createLibraryTrack(user.id, { title, artist, storageKey, mimeType, byteSize, licence, confirmLicence })`
-  (key must be under `music/`); it queues `music.analyse`. `toMusicSummary(row)` hides the storage key.
-- **Settings/preferences:** `getSettings()` gives `preferences.defaultDurationSec`, `preferredStyles`, etc. for
-  form defaults and `brand` for previews. Record style affinity with `updateSettings({ preferences: { styleAffinity } }, userId)`.
-- **Manual labels / style support:** use `applyManualLabels` and `styleSupportWithManualLabels` from `@studio/core`.
-- **Client side:** `apiRequest()` (throws `ApiClientError` with the server's message; 401 → sign-in),
-  `fieldErrors(err)` for form fields, `useToast()`, `router.refresh()` after mutations. `JobList` accepts
-  `onChanged` so a polling component can refetch instead of refreshing the page. `StatusPill` already knows
-  `planning`, `rendering_preview`, `preview_ready`, `uploaded`, `processing`, `partial`, etc.
-- **Formatting:** `formatDateTime` (Melbourne), `formatSeconds`, `formatBytes`, `formatProgress` from `@/lib/format`.
-- **Do not** read env at module scope, import `server-only` modules into client components (type-only
-  imports are fine), or add Turbopack-only config.
+Layout, top to bottom: project header (edit details, permanent delete with a typed confirmation) → drop zone
+(several files, per-file progress, pause/resume, cancel, retry) → clip cards (thumbnail, duration, HDR/rotation/
+speech/no-sound badges, analysis status, retry/remove, "What's in this clip?" tag) → style controls (five style
+toggles with plain reasons when unsupported, 8–90 s length slider, music from the library with BPM and licence
+status, "Upload licensed track" licence form, original sound, captions, instructions, "Generate N edits") →
+background jobs with progress and cancel → preview grid (9:16 players on signed links, favourite, warnings,
+built-in-editor note, Revise dialog with suggestion chips and Regenerate, version switcher, Export full quality →
+Download) → earlier generations.
+
+| Piece | Where |
+| --- | --- |
+| Status payload (shape + loader) | `lib/studio-status-shape.ts` (pure, tested), `lib/studio-status.ts` |
+| Access checks | `lib/studio-access.ts`: owner sees every project, staff only their own; deleted projects are 404 |
+| Uploads | `lib/uploads.ts`; maths and type rules shared with the browser in `lib/shared/upload-math.ts` |
+| Clips | `lib/assets.ts` (tags → `styleSupportWithManualLabels`, retry, delete with storage prefix) |
+| Generate / edits / export | `lib/studio-edits.ts` |
+| Request schemas | `lib/shared/studio-schemas.ts` (+ `GenerateRequestSchema` in `lib/studio-edits.ts`) |
+| Browser uploader | `lib/client/uploader.ts` (`ChunkedUploader`) |
+| DTOs | `lib/shared/studio-dto.ts` |
+
+Uploads: 8 MiB parts (the proxy buffers request bodies up to 10 MB), two files at a time, each part retried up
+to 3 times with 1 s / 2 s / 4 s back-off. The upload id is remembered in `localStorage` under
+`studio-upload:<project>:<name>:<size>:<lastModified>`; dropping the same file after a reload asks the server for
+`receivedParts` and sends only the rest. Part records are merged into `driverState.parts` and `receivedParts` in
+one atomic SQL update, so parallel or repeated parts are safe. Completion is claimed atomically
+(`driverState.completingSince`), so a double click cannot create two clips; a completed session returns the same
+id. Videos become `media_assets` (`sortOrder` = next) + `ingest.asset`; audio becomes a library `music_tracks` row
+(via `createLibraryTrack`) + `music.analyse`, and only with `licence` and `confirmLicence: true` in the body.
+
+Signed links change on every poll, so cards keep the first link for a clip/version until half of
+`MEDIA_LINK_TTL_SECONDS` has passed (or the player reports an error) to avoid reloading a playing video.
+
+### Video Studio API (in addition to the table above)
+
+| Method | Route | Notes |
+| --- | --- | --- |
+| GET | `/api/projects/[id]/status` | `StudioStatusDto`: project, five styles with support, clips, library music, generations (newest first, 20) with edits and every version, active jobs, defaults, limits, `busy` |
+| POST | `/api/projects/[id]/uploads` | `{ filename, size, mimeType, kind }` → 201 `{ uploadId, partSize, partCount, receivedParts, status }` |
+| PUT | `/api/uploads/[id]/parts/[n]` | raw bytes; size must match the part → `{ partNumber, receivedParts }` |
+| GET / DELETE | `/api/uploads/[id]` | resume info / abort (204) |
+| POST | `/api/uploads/[id]/complete` | `{}` for video; `{ title?, artist?, licence, confirmLicence: true }` for music → `{ assetId, kind }` |
+| PATCH / DELETE | `/api/assets/[id]` | `{ clipLabel?, manualLabels?, sortOrder? }` → `{ asset, styles? }` / removes rows and files |
+| POST | `/api/assets/[id]/retry` | 202 `{ jobId }` |
+| POST | `/api/projects/[id]/generate` | `GenerationSettings` (unique, supported styles; no clips still processing; music ready with a confirmed licence) → 201 `{ generationId, jobId, edits }`; 409 while a generation is still being planned |
+| POST | `/api/edits/[id]/favourite` | `{ value }` → `{ isFavourite }` (+ feedback event, style affinity ±1, floor 0) |
+| POST | `/api/edits/[id]/revise` · `/regenerate` | `{ instruction }` / `{ instruction? }` → 201 `{ versionId, versionNo, jobId }`; 409 while the current version is still being made |
+| POST | `/api/edits/[id]/current-version` | `{ versionId }` (must belong to the edit) |
+| POST | `/api/edit-versions/[id]/export` | 202 `{ versionId, exportStatus, exportMessage, jobId }`; idempotent while queued/rendering/ready (`singletonKey export:<id>`) |
+| GET | `/api/edit-versions/[id]/download` | `{ url, filename }` ("<project>-<style>-v<n>.mp4"); `?kind=preview` for the preview |
+
+### Tests
+
+`test/upload-math.test.ts`, `test/studio-schemas.test.ts`, `test/studio-status-shape.test.ts` (unit) and
+`test/studio-routes.integration.test.ts`, which calls the real route handlers against a throwaway database
+(session lookup stubbed; CSRF guard, storage and pg-boss real): multipart upload with out-of-order and duplicate
+parts → asset + `ingest.asset` job; music upload requires confirmation; tagging recomputes style support;
+generate → generation, five edits in slot order, v1 rows, `edits.generate` job; revise keeps v1 and makes v2;
+version switching; favourite; export idempotency; download names; cross-site requests refused; clip removal
+deletes its files.
 
 ## Known limitations
 

@@ -193,6 +193,18 @@ STORAGE_DRIVER=local, STORAGE_LOCAL_ROOT=./data/storage, WORKER_TMP_DIR=./tmp/wo
    Sound Collection tracks locked to Instagram/Facebook renders; Square writes gated on plan, fee-free services and
    a self-test; Postmark (transactional + broadcast streams) for email with a consent ledger.
 
+### Gaps reported by the Video Studio agent (to schedule)
+
+- Staff access: studio routes let staff open only projects they created, but the foundation's `/api/projects` and
+  `/api/projects/[id]` routes do not apply that rule. Use `getAccessibleProject` (`apps/web/src/lib/studio-access.ts`)
+  everywhere, or drop the staff restriction.
+- Music licence confirmation: Generate only accepts tracks whose licence is confirmed, but Settings → Music has no
+  control to confirm a track registered without confirmation (only `PATCH /api/music/[id]`).
+- Not built yet: clip reordering in the UI (API accepts `sortOrder`), per-shot tagging in the UI (API accepts
+  `manualLabels`), the music start-offset picker over the energy curve.
+- Local-driver media links carry a readable (HMAC-signed, not encrypted) payload with the storage key; keys hold only
+  ids. Encrypt or use opaque references if keys must never reach browsers.
+
 ## 8. Decisions already made (do not re-litigate without reason)
 
 - FFmpeg + libass render text (vendored Inter fonts in `assets/fonts`); Remotion not used (licence is free ≤3

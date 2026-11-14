@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/main.ts",
-    "start": "tsx src/main.ts",
+    "start": "exec tsx src/main.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --exclude \"test/**/*.integration.test.ts\"",
     "build": "echo 'worker runs from TypeScript source via tsx'",

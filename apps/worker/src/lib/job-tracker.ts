@@ -70,7 +70,10 @@ export async function runTracked<T>(
       controller.abort(new CancelledError('Cancelled by owner'));
     }
   };
-  input.bossSignal.addEventListener('abort', () => log.warn('queue aborted the job (expired, cancelled or claim lost)'), { once: true });
+  // pg-boss also aborts the job signal after every normal completion, so only an abort while the work is still
+  // running is worth a warning; the listener is removed once the work settles.
+  const listenerScope = new AbortController();
+  input.bossSignal.addEventListener('abort', () => log.warn('queue aborted the job (expired, cancelled or claim lost)'), { once: true, signal: listenerScope.signal });
 
   const heartbeat = setInterval(() => {
     void (async () => {
@@ -115,6 +118,7 @@ export async function runTracked<T>(
     run.checkCancelled();
     const result = await work(run);
     clearInterval(heartbeat);
+    listenerScope.abort();
     await db
       .update(schema.jobs)
       .set({ status: 'succeeded', progress: 1, message: lastMessage || 'Done', finishedAt: new Date(), updatedAt: new Date() })
@@ -123,6 +127,7 @@ export async function runTracked<T>(
     return result;
   } catch (err) {
     clearInterval(heartbeat);
+    listenerScope.abort();
     const cancelled = err instanceof CancelledError || signal.aborted;
     const attemptsLeft = input.retryCount + 1 < maxAttempts;
     const message = errorMessage(err);
