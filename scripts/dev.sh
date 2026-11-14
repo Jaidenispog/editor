@@ -111,8 +111,8 @@ PIDS+=("$!")
 PIDS+=("$!")
 set +m
 
-printf 'Starting web (http://localhost:${PORT:-3000}) and worker. Press Ctrl+C to stop both.\n'
-printf 'First run? Open http://localhost:${PORT:-3000}/setup to create the owner account.\n'
+printf 'Starting web (http://localhost:%s) and worker. Press Ctrl+C to stop both.\n' "${PORT:-3000}"
+printf 'First run? Open http://localhost:%s/setup to create the owner account.\n' "${PORT:-3000}"
 
 # Wait until either service exits, then stop the other. (Polling instead of `wait -n`, which the bash 3.2
 # that ships with macOS does not have.)
