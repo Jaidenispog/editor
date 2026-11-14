@@ -263,8 +263,10 @@ three detached processes: the local fake of Meta (`apps/web/e2e/fake-meta.ts`, o
 `META_APP_ID` / `META_APP_SECRET` / `META_LOGIN_CONFIG_ID`, and `META_GRAPH_BASE_URL`, `META_RUPLOAD_BASE_URL` and
 `META_DIALOG_BASE_URL` all pointing at the fake; no `YOUTUBE_API_KEY`. Everything is stopped and the database dropped
 afterwards (logs and downloads are kept on failure or with `E2E_KEEP=1`). Other settings: `E2E_PG_URL`, `E2E_DB`,
-`E2E_PORT`, `E2E_WORK_DIR`. A passing run prints `73 checks passed, 0 failed` after about five and a half minutes
-(plus the build); most of that is FFmpeg rendering and the worker's publishing run against the fake.
+`E2E_PORT`, `E2E_WORK_DIR`. A passing run prints `77 checks passed, 0 failed` after five to six and a half minutes
+(plus the build; 383, 309 and 337 s in three consecutive runs on 2026-11-14); most of that is FFmpeg rendering and the
+worker's publishing run against the fake. Every wait is on a real state (a job or file reported ready through the
+API, a button enabled), not on a fixed delay.
 
 **What the fake replaces.** One process plays the three Meta hosts the app talks to, using WP4's Graph model
 (`apps/worker/test/fakes/graph-server.ts`, shared with the worker's tests): the Unified Login dialog on
@@ -285,18 +287,26 @@ other base URLs it is ignored unless `NODE_ENV=test`, so a deployment always sen
   confirmed" and "Origin not recorded", analysed at 120 BPM. CC BY-NC shows the refusal and cannot continue; nothing is
   stored.
 - Export gates: five edits generated with that track; the card says "Music licence not confirmed — previews only";
-  "Export full quality" is refused with the licence message (a deliberate 409) and starts nothing; "Make a music-free
-  version" exports a 1080×1920 file without a music stream (ffprobe); no `music_usage` row. After "Licence details" →
-  "I made it, or I own the recording" with the rights confirmation, the standard export works (AAC stereo music) and
-  exactly one `music_usage` row (`export`, owner_upload snapshot) exists.
+  "Export full quality" is refused with the licence message (a deliberate 409) and starts nothing. "Make a music-free
+  version" is clicked, the test waits until `GET /api/music/versions/:id` reports the `no_music` export `ready` and the
+  card's exact "Music-free version" button is enabled (the two button names overlap, so both locators are exact), and
+  downloads it: 1080×1920; when the plan keeps no clip sound (`originalSound` off and no segment with
+  `keepOriginalSound`, as packages/core decides it) the file must have no audio stream at all, otherwise at most one;
+  no `music_usage` row. After "Licence details" → "I made it, or I own the recording" with the rights confirmation, the
+  standard export works (1080×1920 H.264, AAC stereo) and exactly one `music_usage` row (`export`, owner_upload
+  snapshot) exists. The music itself is detected by its 1 kHz click (ffmpeg band-pass + `volumedetect`; the clips'
+  own sound is a 440 Hz tone, pink noise or silence): it must be above −50 dB in the standard export, and the
+  music-free file must have no audio or at least 20 dB less in that band. Both renders are loudness-normalised to the
+  same target, so the levels compare directly.
 - Meta-only music: a Meta Sound Collection track is locked to Instagram/Facebook; after the Sound panel switches one
   edit to it, the composer offers TikTok only "Without music" ("With music" disabled) and labels Instagram "For
   Instagram/Facebook upload only".
 - Manual posting: the composer starts empty ("Nothing is picked for you"), no edit is ticked in the picker, and both
   platform switches start off. One exported edit goes to Instagram as "Post it yourself": the destination is "Your
   turn" (not posted, no `publish` feedback and no ledger row) until "I've posted it"; the download is the 1080×1920
-  file with music and the caption to copy is the one written. After confirming it reads "Posted (you confirmed)" and
-  one `publish` feedback event and one `music_usage` (`publish`, instagram) row exist.
+  file with the music (its 1 kHz click within 3 dB of the standard export) and the caption to copy is the one written.
+  After confirming it reads "Posted (you confirmed)", still does after a reload, and one `publish` feedback event and
+  one `music_usage` (`publish`, instagram) row exist.
 - Instagram direct: "Connect Instagram" goes through the real connect route, the fake login dialog and the callback;
   the read-only check finds `@ivanhoe_studio_test`; the token is stored encrypted. A first verification post is
   approved; the worker uploads to the fake and publishes once; the destination is published with the fake's media id
@@ -309,12 +319,15 @@ other base URLs it is ignored unless `NODE_ENV=test`, so a deployment always sen
   one `top_media` read at the fake; no popularity words (trending, viral, popular …) on any of these.
 - Learned preferences: three favourites and a download give a learned "Default length" (10 seconds) with its evidence
   ("From 3 favourites …"); "Keep this" makes it "Set by you"; "Reset what it learned" leaves nothing marked "Learned".
-- No page errors or console errors except the two deliberate 409s above (each must actually appear).
+- No page errors or console errors except the two deliberate 409s above (each must actually appear). The only failed
+  loads tolerated are ones the browser cancels itself (`net::ERR_ABORTED` / `ERR_FAILED`) on this app's signed
+  `/api/media/…` links or on Next.js route prefetches (`?_rsc=`); the run logs how many it ignored.
 
 **Not verified without real accounts.** Everything Meta-specific stays unproven until the owner's own accounts are
 used (publishing design §11.4 and the WP5 notes above): whether a Unified Login system-user configuration may publish
 in Development mode and search hashtags, the real permission names, the resumable size limit, quota and token expiry,
 `thumb_offset`, Sound Collection copyright matching, real container processing times and errors, and how Instagram
 renders the reel. The fake answers the documented happy path immediately. Manual posting in the real Instagram and
-TikTok apps, Web Share on iOS, the YouTube chart (no key), and how learned defaults feel after weeks of real use are not
-covered either; all footage and music are synthetic.
+TikTok apps, Web Share on iOS, the YouTube chart (no key), Spotify references (links only; not exercised here, covered
+by the WP1 unit and route tests), and how learned defaults feel after weeks of real use are not covered either; all
+footage and music are synthetic.

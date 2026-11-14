@@ -19,7 +19,7 @@
  *   E2E_SAMPLES_DIR     synthetic footage                  (default <repo>/data/samples)
  *   E2E_OUT_DIR         downloads and failure screenshots  (default <os tmp>/studio-e2e-b)
  *   E2E_OWNER_EMAIL / E2E_OWNER_PASSWORD                   (default e2e-owner@example.com / a fixed test password)
- *   FFPROBE_PATH        ffprobe binary                     (default ffprobe)
+ *   FFPROBE_PATH / FFMPEG_PATH  ffprobe and ffmpeg binaries  (default ffprobe / ffmpeg)
  *
  * Exit code 0 when every check passed, 1 otherwise. Plain node + playwright + pg; no test runner.
  */
@@ -58,6 +58,7 @@ const OWNER_EMAIL = process.env.E2E_OWNER_EMAIL ?? 'e2e-owner@example.com';
 const OWNER_PASSWORD = process.env.E2E_OWNER_PASSWORD ?? 'clipper guard number two';
 const OWNER_NAME = 'E2E Owner';
 const FFPROBE = process.env.FFPROBE_PATH ?? 'ffprobe';
+const FFMPEG = process.env.FFMPEG_PATH ?? 'ffmpeg';
 const TSX = path.join(REPO_ROOT, 'apps', 'web', 'node_modules', '.bin', 'tsx');
 const DESKTOP = { width: 1600, height: 1000 };
 const TARGET_SEC = 12;
@@ -96,7 +97,11 @@ function check(condition, message, detail) {
   return condition;
 }
 
-/** Polls `fn` until it returns a truthy value or the time runs out. */
+/** An error that ends a {@link waitFor} at once instead of being retried (a failed job will not recover). */
+class FatalError extends Error {}
+const fatal = (message) => new FatalError(message);
+
+/** Polls `fn` until it returns a truthy value or the time runs out. A {@link FatalError} stops the wait at once. */
 async function waitFor(description, fn, { timeoutMs = 120_000, intervalMs = 1000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last;
@@ -105,6 +110,7 @@ async function waitFor(description, fn, { timeoutMs = 120_000, intervalMs = 1000
       last = await fn();
       if (last) return last;
     } catch (err) {
+      if (err instanceof FatalError) throw new Error(`${description}: ${err.message}`);
       last = err;
     }
     if (Date.now() > deadline) {
@@ -113,6 +119,21 @@ async function waitFor(description, fn, { timeoutMs = 120_000, intervalMs = 1000
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
+}
+
+/**
+ * A load the browser itself cancelled: a video or download link (signed /api/media/… URL) that was replaced or left,
+ * or a Next.js route prefetch (`?_rsc=`) cut short by navigating. Any other failed load counts as an error.
+ */
+function abortedLoadWeIgnore(e) {
+  if (!/Failed to load resource: net::ERR_(ABORTED|FAILED)/.test(e.text)) return false;
+  let u;
+  try {
+    u = new URL(e.url);
+  } catch {
+    return false;
+  }
+  return u.origin === new URL(BASE_URL).origin && (u.pathname.startsWith('/api/media/') || u.searchParams.has('_rsc'));
 }
 
 async function failureScreenshot(page, name) {
@@ -163,6 +184,31 @@ const getStatus = (page, projectId) => apiGet(page, `/api/projects/${projectId}/
 async function ffprobeJson(file) {
   const { stdout } = await execFileAsync(FFPROBE, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file]);
   return JSON.parse(stdout);
+}
+
+/**
+ * Mean level (dBFS) of a file's sound in a narrow band around 1 kHz, where the synthetic music has its 120 BPM click
+ * (scripts/make-sample-footage.sh). The clips' own sound has almost nothing there: sample A is a 440 Hz tone (about
+ * 70 dB below its own level in this band), sample B pink noise (about 30 dB below), sample C silent. The renderer
+ * normalises every file to the plan's loudness target, so levels of two renders of one version compare directly.
+ * Null when the file has no audio stream.
+ */
+async function clickBandDb(file) {
+  const probe = await ffprobeJson(file);
+  if (!probe.streams.some((s) => s.codec_type === 'audio')) return null;
+  // Three narrow band-passes: the click (a 1 kHz tone) passes at about its full level, pink noise drops by ~30 dB.
+  const band = 'bandpass=f=1000:width_type=h:w=10';
+  const filter = `${band},${band},${band},volumedetect`;
+  const { stderr } = await execFileAsync(FFMPEG, ['-hide_banner', '-nostats', '-i', file, '-map', '0:a:0', '-af', filter, '-f', 'null', '-']);
+  const m = /mean_volume:\s*(-?[\d.]+|-inf) dB/.exec(stderr);
+  if (!m) throw new Error(`volumedetect gave no level for ${file}`);
+  return m[1] === '-inf' ? -Infinity : Number(m[1]);
+}
+
+/** Whether a plan keeps the clips' own sound, the way packages/core decides it (plan-facts, originalSoundModeOf). */
+function keepsClipSound(plan) {
+  const sound = plan?.audio?.originalSound;
+  return Boolean(sound && sound.volume > 0 && (sound.enabled || plan.segments.some((s) => s.keepOriginalSound)));
 }
 
 function editCards(page) {
@@ -222,10 +268,10 @@ async function uploadTrack(page, { title, kindLabel, step2, analysed = true }) {
   await dialog.locator('input[type="file"]').setInputFiles(path.join(SAMPLES, MUSIC_FILE));
   await dialog.getByLabel('Track title').fill(title);
   await dialog.getByLabel(kindLabel, { exact: true }).check();
-  await dialog.getByRole('button', { name: 'Next' }).click();
+  await dialog.getByRole('button', { name: 'Next', exact: true }).click();
   await dialog.getByText('Step 2 of 3').waitFor();
   if (step2) await step2(dialog);
-  await dialog.getByRole('button', { name: 'Next' }).click();
+  await dialog.getByRole('button', { name: 'Next', exact: true }).click();
   await dialog.getByText('Step 3 of 3').waitFor();
   await dialog.getByRole('checkbox', { name: /I confirm the business holds the rights/ }).check();
   await dialog.getByRole('button', { name: 'Upload track' }).click();
@@ -236,7 +282,7 @@ async function uploadTrack(page, { title, kindLabel, step2, analysed = true }) {
     async () => {
       const { tracks } = await apiGet(page, '/api/music');
       const t = tracks.find((x) => x.title === title);
-      if (t?.status === 'failed') throw new Error(`analysis failed: ${t.statusMessage}`);
+      if (t?.status === 'failed') throw fatal(`analysis failed: ${t.statusMessage}`);
       return t?.status === 'ready' ? t : null;
     },
     { timeoutMs: 180_000, intervalMs: 2000 },
@@ -353,7 +399,7 @@ async function main() {
       const dialog = page.getByRole('dialog');
       await dialog.getByLabel("I'm not sure", { exact: true }).check();
       check((await dialog.getByText('Exports with this track are blocked until you confirm a licence.').count()) === 1, 'passport warns that "I\'m not sure" blocks exports');
-      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
       await dialog.waitFor({ state: 'hidden' });
     }
     // Uploads are kept against a project, so with no project yet the library says what to do instead of failing silently.
@@ -383,8 +429,8 @@ async function main() {
       const refusal = dialog.getByRole('alert');
       await refusal.waitFor();
       check(/Non-commercial licences don't cover promoting a business, so this track can't be added\./.test(await textOf(refusal)), 'CC BY-NC shows the refusal', await textOf(refusal));
-      check(await dialog.getByRole('button', { name: 'Next' }).isDisabled(), 'CC BY-NC cannot go on to the next step');
-      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      check(await dialog.getByRole('button', { name: 'Next', exact: true }).isDisabled(), 'CC BY-NC cannot go on to the next step');
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
       await dialog.waitFor({ state: 'hidden' });
     }
     const trackCount = await q('select count(*)::int as n from music_tracks where deleted_at is null');
@@ -400,7 +446,7 @@ async function main() {
       async () => {
         const s = await getStatus(page, projectId);
         const failed = s.assets.filter((a) => a.status === 'failed');
-        if (failed.length) throw new Error(`clip analysis failed: ${failed.map((a) => `${a.filename}: ${a.statusMessage}`).join('; ')}`);
+        if (failed.length) throw fatal(`clip analysis failed: ${failed.map((a) => `${a.filename}: ${a.statusMessage}`).join('; ')}`);
         return s.assets.length === 3 && s.assets.every((a) => a.status === 'ready') ? s : null;
       },
       { timeoutMs: 240_000, intervalMs: 2000 },
@@ -427,7 +473,7 @@ async function main() {
         if (!g) return null;
         const versions = g.edits.map((e) => e.versions.find((v) => v.id === e.currentVersionId) ?? e.versions[0]);
         const bad = versions.filter((v) => v && (v.status === 'failed' || v.status === 'cancelled'));
-        if (bad.length) throw new Error(`a preview failed: ${bad.map((v) => v.statusMessage).join('; ')}`);
+        if (bad.length) throw fatal(`a preview failed: ${bad.map((v) => v.statusMessage).join('; ')}`);
         return g.edits.length === 5 && versions.every((v) => v?.status === 'preview_ready') ? s : null;
       },
       { timeoutMs: 480_000, intervalMs: 2000 },
@@ -456,21 +502,36 @@ async function main() {
     check(currentVersion(afterRefusal, exportName).exportStatus === 'none' && afterRefusal.jobs.every((j) => j.type !== 'render.export'), 'no export was started for the refused version');
 
     log('Music-free version');
-    await exportCard.getByRole('button', { name: 'Make a music-free version' }).first().click();
-    const musicFreeButton = exportCard.getByRole('button', { name: 'Music-free version' });
-    await musicFreeButton.waitFor({ timeout: 300_000 });
+    // "Music-free version" (the download) is also a substring of "Make a music-free version", so both locators are
+    // exact, and the download is clicked only once the worker has stored the file and the card shows the real button.
+    await exportCard.getByRole('button', { name: 'Make a music-free version', exact: true }).click();
+    await waitFor(
+      'the music-free version to be ready',
+      async () => {
+        const m = await apiGet(page, `/api/music/versions/${v1.id}`);
+        if (m.noMusicExport.status === 'failed') throw fatal(`the music-free render failed: ${m.noMusicExport.message}`);
+        return m.noMusicExport.status === 'ready';
+      },
+      { timeoutMs: 300_000, intervalMs: 2000 },
+    );
+    const musicFreeButton = exportCard.getByRole('button', { name: 'Music-free version', exact: true });
+    await musicFreeButton.waitFor({ timeout: 30_000 });
+    await waitFor('the music-free download button to be enabled', () => musicFreeButton.isEnabled(), { timeoutMs: 30_000, intervalMs: 250 });
+    check((await exportCard.getByRole('button', { name: 'Make a music-free version', exact: true }).count()) === 0, 'once ready, the card offers the music-free download instead of making it again');
     const noMusic = await saveDownload(page, () => musicFreeButton.click(), 'no-music');
     const noMusicProbe = await ffprobeJson(noMusic.file);
     const v1Plan = plans.find((r) => r.id === v1.id)?.plan;
-    const clipSound = Boolean(v1Plan?.audio?.originalSound?.enabled);
+    const clipSound = keepsClipSound(v1Plan);
     const nmVideo = noMusicProbe.streams.find((s) => s.codec_type === 'video');
     const nmAudio = noMusicProbe.streams.filter((s) => s.codec_type === 'audio');
+    const noMusicClickDb = await clickBandDb(noMusic.file);
+    log(`  music-free file: ${nmAudio.length} audio streams, 1 kHz band ${noMusicClickDb ?? 'none'} dB, plan keeps clip sound: ${clipSound}`);
     check(nmVideo?.width === 1080 && nmVideo?.height === 1920, 'the music-free file is 1080x1920', `${nmVideo?.width}x${nmVideo?.height}`);
-    check(
-      clipSound ? nmAudio.length <= 1 : nmAudio.length === 0,
-      clipSound ? 'the music-free file has at most the clips’ own sound' : 'the music-free file has no audio stream',
-      `${nmAudio.length} audio streams, original sound ${clipSound ? 'on' : 'off'}`,
-    );
+    if (!clipSound) {
+      check(nmAudio.length === 0, 'the plan keeps no clip sound, so the music-free file has no audio stream at all', `${nmAudio.length} audio streams`);
+    } else {
+      check(nmAudio.length <= 1, 'the music-free file has at most one audio stream (the clips’ own sound)', `${nmAudio.length} audio streams`);
+    }
     check(/no-music|music-free/i.test(noMusic.suggested), 'the music-free download is named as such', noMusic.suggested);
     check((await q('select count(*)::int as n from music_usage where edit_version_id = $1', [v1.id]))[0].n === 0, 'no music_usage row for a refused or music-free export');
 
@@ -480,9 +541,9 @@ async function main() {
     {
       const dialog = page.getByRole('dialog');
       await dialog.getByLabel('I made it, or I own the recording', { exact: true }).check();
-      await dialog.getByRole('button', { name: 'Next' }).click();
+      await dialog.getByRole('button', { name: 'Next', exact: true }).click();
       await dialog.getByText('Step 2 of 3').waitFor();
-      await dialog.getByRole('button', { name: 'Next' }).click();
+      await dialog.getByRole('button', { name: 'Next', exact: true }).click();
       await dialog.getByText('Step 3 of 3').waitFor();
       const rights = dialog.getByRole('checkbox', { name: /I confirm the business holds the rights/ });
       if (!(await rights.isChecked())) await rights.check();
@@ -506,7 +567,17 @@ async function main() {
     const sv = standardProbe.streams.find((s) => s.codec_type === 'video');
     const sa = standardProbe.streams.find((s) => s.codec_type === 'audio');
     check(sv?.width === 1080 && sv?.height === 1920 && sv?.codec_name === 'h264', 'the standard export is 1080x1920 H.264', `${sv?.width}x${sv?.height} ${sv?.codec_name}`);
-    check(sa?.codec_name === 'aac' && sa?.channels === 2, 'the standard export carries the music (AAC stereo)', `${sa?.codec_name} ${sa?.channels}ch`);
+    check(sa?.codec_name === 'aac' && sa?.channels === 2, 'the standard export has an AAC stereo audio stream', `${sa?.codec_name} ${sa?.channels}ch`);
+    // The music is told apart from the clips' own sound by its 1 kHz click: clearly there in the standard export, and
+    // at least 20 dB lower (or no audio at all) in the music-free file of the same version.
+    const standardClickDb = await clickBandDb(standard.file);
+    log(`  standard export: 1 kHz band ${standardClickDb} dB`);
+    check(standardClickDb !== null && standardClickDb > -50, 'the standard export carries the music (its 1 kHz click is there)', `${standardClickDb} dB`);
+    check(
+      noMusicClickDb === null || (standardClickDb !== null && noMusicClickDb <= standardClickDb - 20),
+      'the music-free file has none of the music: no click in its sound',
+      `music-free ${noMusicClickDb ?? 'no audio'} dB vs standard ${standardClickDb} dB`,
+    );
     const usage = await q("select purpose, platform, licence_snapshot->>'kind' as kind from music_usage where edit_version_id = $1", [v1.id]);
     check(usage.length === 1 && usage[0].purpose === 'export' && usage[0].platform === '' && usage[0].kind === 'owner_upload', 'one music_usage row for the export, with the confirmed licence', JSON.stringify(usage));
 
@@ -530,13 +601,13 @@ async function main() {
     check(metaTrack.licenceState === 'meta_only' && metaTrack.licence.permitted.tiktok === false, 'the Sound Collection track is locked to Instagram and Facebook', `${metaTrack.licenceState}, tiktok ${metaTrack.licence.permitted.tiktok}`);
     await page.goto(`${BASE_URL}/studio/${projectId}`);
     const metaCard = cardFor(page, metaName);
-    await metaCard.getByRole('button', { name: 'Sound' }).click();
+    await metaCard.getByRole('button', { name: 'Sound', exact: true }).click();
     {
       const dialog = page.getByRole('dialog');
       const trackSelect = dialog.getByLabel('Track', { exact: true });
       await waitFor('the Sound Collection track in the Sound panel', async () => (await trackSelect.locator(`option[value="${metaTrack.id}"]`).count()) === 1, { timeoutMs: 30_000 });
       await trackSelect.selectOption(metaTrack.id);
-      await dialog.getByRole('button', { name: 'Apply' }).click();
+      await dialog.getByRole('button', { name: 'Apply', exact: true }).click();
       await dialog.waitFor({ state: 'hidden', timeout: 15_000 });
     }
     const withMeta = await waitFor(
@@ -544,7 +615,7 @@ async function main() {
       async () => {
         const s = await getStatus(page, projectId);
         const v = currentVersion(s, metaName);
-        if (v.status === 'failed') throw new Error(`re-cut failed: ${v.statusMessage}`);
+        if (v.status === 'failed') throw fatal(`re-cut failed: ${v.statusMessage}`);
         return v.versionNo === 2 && v.status === 'preview_ready' ? v : null;
       },
       { timeoutMs: 240_000, intervalMs: 2000 },
@@ -570,13 +641,13 @@ async function main() {
     log(`Manual post of "${exportName}" to Instagram`);
     await openComposer(page, []);
     check((await page.getByText('Choose the edits to publish. Nothing is picked for you.').count()) === 1, 'the composer starts empty: nothing is picked');
-    await page.getByRole('button', { name: 'Choose edits' }).click();
+    await page.getByRole('button', { name: 'Choose edits', exact: true }).click();
     const pickerBoxes = page.locator('input[type="checkbox"]');
     await waitFor('the edit picker', async () => (await pickerBoxes.count()) >= 5, { timeoutMs: 15_000 });
     const tickedAtStart = await pickerBoxes.evaluateAll((els) => els.filter((e) => e.checked).length);
     check(tickedAtStart === 0, 'no edit is ticked in the picker', `${tickedAtStart} ticked of ${await pickerBoxes.count()}`);
     await page.locator('label', { hasText: `${PROJECT_TITLE} · ${exportName}` }).filter({ hasText: 'Version 1' }).locator('input[type="checkbox"]').check();
-    await page.getByRole('button', { name: 'Done' }).click();
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
     const manualCard = composerCard(page, exportName);
     await platformSwitch(manualCard, 'Instagram').waitFor({ timeout: 15_000 });
     check((await platformSwitch(manualCard, 'Instagram').getAttribute('aria-checked')) === 'false', 'the chosen edit starts with Instagram off');
@@ -602,7 +673,12 @@ async function main() {
     const manualFile = await saveDownload(page, () => manualTarget.getByRole('link', { name: /Download video/ }).click(), 'manual');
     const manualProbe = await ffprobeJson(manualFile.file);
     const mv = manualProbe.streams.find((s) => s.codec_type === 'video');
-    check(mv?.width === 1080 && mv?.height === 1920 && manualProbe.streams.some((s) => s.codec_type === 'audio'), 'the manual download is the 1080x1920 file with its music', `${mv?.width}x${mv?.height}`);
+    const manualClickDb = await clickBandDb(manualFile.file);
+    check(
+      mv?.width === 1080 && mv?.height === 1920 && manualClickDb !== null && standardClickDb !== null && Math.abs(manualClickDb - standardClickDb) < 3,
+      'the manual download is the 1080x1920 file with its music (same click level as the standard export)',
+      `${mv?.width}x${mv?.height}, 1 kHz band ${manualClickDb} dB vs standard ${standardClickDb} dB`,
+    );
     const media = await page.evaluate(async (id) => (await fetch(`/api/publish-targets/${id}/media`)).json(), (await q('select id from publish_targets where post_id = $1', [manualPost.id]))[0].id);
     check(typeof media.caption === 'string' && media.caption.startsWith(manualCaption), 'the caption to copy is the one written in the composer', media.caption);
     await manualTarget.getByRole('button', { name: "I've posted it" }).click();
@@ -613,6 +689,10 @@ async function main() {
     }
     await manualTarget.getByText('Posted (you confirmed)').first().waitFor({ timeout: 15_000 });
     check(/confirmed by E2E Owner/.test(await textOf(manualTarget)), 'after "I\'ve posted it" the destination shows "Posted (you confirmed)"');
+    await page.reload();
+    await manualTarget.getByText('Posted (you confirmed)').first().waitFor({ timeout: 30_000 });
+    const afterReloadText = await textOf(manualTarget);
+    check(/confirmed by E2E Owner/.test(afterReloadText) && !/Your turn/.test(afterReloadText), 'after a reload the destination still shows "Posted (you confirmed)"', afterReloadText.slice(0, 200));
     const afterManual = await q("select (select count(*)::int from feedback_events where type = 'publish' and edit_version_id = $1) as fb, (select count(*)::int from music_usage where purpose = 'publish' and platform = 'instagram' and edit_version_id = $1) as mu", [v1.id]);
     check(afterManual[0].fb === 1 && afterManual[0].mu === 1, 'the confirmation records one publish event and one music_usage row', JSON.stringify(afterManual[0]));
 
@@ -657,7 +737,7 @@ async function main() {
       async () => {
         const post = await getPost(page, igPost.id);
         const t = post.targets.find((x) => x.platform === 'instagram');
-        if (t?.status === 'failed') throw new Error(`publishing failed: ${t.statusMessage}`);
+        if (t?.status === 'failed') throw fatal(`publishing failed: ${t.statusMessage}`);
         return t?.status === 'published' ? { post, target: t } : null;
       },
       { timeoutMs: 420_000, intervalMs: 2000 },
@@ -722,7 +802,7 @@ async function main() {
 
     const hashtagCard = page.locator('section[aria-labelledby="source-instagram_hashtag"]');
     await hashtagCard.getByLabel('Hashtag to watch (without #)').fill(HASHTAG);
-    await hashtagCard.getByRole('button', { name: 'Watch' }).click();
+    await hashtagCard.getByRole('button', { name: 'Watch', exact: true }).click();
     const tagBlock = hashtagCard.locator('div.rounded-lg', { has: page.getByText(`#${HASHTAG}`, { exact: true }) }).first();
     await tagBlock.getByText(/^Fetched /).waitFor({ timeout: 90_000 });
     const heading = await textOf(tagBlock.locator('h4'));
@@ -755,7 +835,7 @@ async function main() {
     const lengthText = await textOf(lengthRow);
     check(learnedFields.includes('defaultDurationSec') && /Learned/.test(lengthText) && /From \d+ favourites?/.test(lengthText), 'Default length shows a learned value with its evidence', lengthText);
     check(/\b10 seconds\b/.test(lengthText), 'the learned length follows the kept 12-second edits (10 seconds after rounding)', lengthText);
-    await lengthRow.getByRole('button', { name: 'Keep this' }).click();
+    await lengthRow.getByRole('button', { name: 'Keep this', exact: true }).click();
     await lengthRow.getByText('Set by you').waitFor({ timeout: 15_000 });
     check((await lengthRow.getByRole('button', { name: 'Let it learn' }).count()) === 1, '"Keep this" pins the value as the owner\'s setting');
     await learnedCard.getByRole('button', { name: 'Reset what it learned' }).click();
@@ -779,8 +859,10 @@ async function main() {
     const unexpected = consoleErrors.filter((e) => {
       const match = expectedErrors.find((x) => x.pattern.test(`${e.text} ${e.url}`));
       if (match) match.seen++;
-      return !match && !/net::ERR_ABORTED|net::ERR_FAILED/.test(e.text);
+      return !match && !abortedLoadWeIgnore(e);
     });
+    const ignored = consoleErrors.filter(abortedLoadWeIgnore);
+    if (ignored.length) log(`  (ignored ${ignored.length} cancelled media or prefetch loads: ${[...new Set(ignored.map((e) => e.url.replace(/\/api\/media\/[^?]+/, '/api/media/…').replace(/\?.*$/, '?…')))].join(', ')})`);
     check(unexpected.length === 0, 'no unexpected page errors or console errors', unexpected.slice(0, 5).map((e) => `${e.text} ${e.url}`).join(' | '));
     for (const x of expectedErrors) check(x.seen >= 1, `the deliberate error appeared: ${x.why}`, `${x.seen} seen`);
     await context.close();

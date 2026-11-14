@@ -23,15 +23,21 @@ Australian English, AUD, `Australia/Melbourne`.
 | AI planning and shot labelling (Anthropic) | Yes | Stubbed client only | Anthropic API key (owner approval for spend) |
 | Speech captions (transcription) | Yes (OpenAI adapter) | Not run | OpenAI key |
 | Docker images, Compose, deployment docs | Written | `docker compose config` validated; install and run steps run by hand; images not built (no Docker daemon in the build sandbox) | Hosting account |
-| Instagram, TikTok, Square, email, Google reviews | "Needs setup" screens only | — | Meta, TikTok, Square, Resend, Google accounts |
-| Trends: curated (sourced, dated), noted by staff, YouTube AU chart; no "trending" claims | Yes (WP3) | Unit and database tests with a fake YouTube API | `YOUTUBE_API_KEY` for the chart (optional) |
+| Music licence passport, export gates, music-free version, usage ledger (WP1) | Yes | Yes: unit, database and Stage B browser tests (120 BPM click track) | The music library's written confirmation that its plan covers organic posts, website and boosts |
+| Saved preferences, reference video, brand (WP2) | Yes | Yes: unit and database tests; learned length, "Keep this" and reset in the Stage B browser test | Anthropic key for the on-screen text estimate; real use over weeks |
+| Publishing: composer, "Post it yourself", Instagram direct (WP4) | Yes | Yes, against a local fake of Meta (Stage B browser test and worker tests); no real post made | Meta business app, configuration and the first real verification post |
+| Trends: curated (sourced, dated), noted by staff, YouTube AU chart; no "trending" claims | Yes (WP3) | Unit and database tests with a fake YouTube API; curated and noted labels in the Stage B browser test | `YOUTUBE_API_KEY` for the chart (optional) |
+| Instagram hashtag watch (WP5) | Yes | Yes, against the fake of Meta (unit, database and Stage B browser tests) | A connected Instagram account and Meta's hashtag search permission |
+| TikTok direct, Square, email, Google reviews, website tools (Stage C) | TikTok: manual posting only; the rest "Needs setup" screens | — | TikTok (optional Zernio route), Square, Resend, Google accounts |
 
 **Not yet done:**
 
 - The Stage A acceptance test on the owner's **real haircut footage**. Synthetic footage is not a substitute
   for it (`docs/testing.md`, section 5).
-- A browser end-to-end test.
-- Stage B/C integrations.
+- Anything against the owner's **real accounts**: no real Instagram post, hashtag read, YouTube chart fetch or AI
+  call has been made. Stage B passes its browser test (`bash apps/web/e2e/run-stage-b.sh`) on synthetic footage
+  with a local fake of Meta only (`docs/testing.md`, "Stage B browser test").
+- Stage C (Square appointments, email, reviews, website and local search).
 
 ## Quick start (local, no Docker)
 

@@ -74,6 +74,25 @@ History of the background runs:
      checkboxes not pre-ticked by learned order (style-controls.tsx), logo copy key belongs in packages/storage,
      nothing tested against real Meta accounts.
 
+10. Stage B acceptance (plan "Stage B acceptance (after WP5)"), branch `worktree-wf_d9dca0d1-b5f-1`, not yet merged
+   or pushed: `apps/web/e2e/stage-b.e2e.mjs` + `run-stage-b.sh` drive the whole Stage B flow in Chromium on synthetic
+   footage against a local fake of Meta (`apps/web/e2e/fake-meta.ts`, built on WP4's Graph fake): music licence →
+   export gates and the music-free version → manual posting → Instagram connect and direct post (fake) → trends
+   labels and hashtag watch (fake) → learned preferences. A passing run prints `77 checks passed, 0 failed` in five to
+   six and a half minutes plus the build (`docs/testing.md`, "Stage B browser test"); three consecutive runs passed after a
+   review found the first version flaky (it clicked "Make a music-free version" instead of the download, since
+   button names match as substrings). Product fixes on the branch: `licenceStateOf` never reports an "I'm not sure"
+   track as confirmed (it used to say "Licence confirmed" while exports stayed blocked), and `META_DIALOG_BASE_URL`,
+   a test-only host for Meta's login dialog that is ignored unless `NODE_ENV=test`.
+   - **Built and verified on synthetic data (with fakes):** WP1 music passport, export gates, music-free version and
+     usage ledger; WP2 learned preferences; WP3 curated and noted trends; WP4 composer, manual posting and Instagram
+     direct; WP5 hashtag watch. README status table updated.
+   - **Still waiting on account access (unchanged):** a real Meta business app and the first real verification post;
+     hashtag search permission and the first real read; `YOUTUBE_API_KEY` for the chart; the music library's written
+     confirmation of its plan; the Anthropic key; manual posting in the real Instagram/TikTok apps and Web Share on
+     iOS. Spotify stays links only.
+   - Next after merging: G4 (Stage C: WP6 Square ∥ WP7 email/reviews ∥ WP8 website).
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent
