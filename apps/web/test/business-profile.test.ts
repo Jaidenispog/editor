@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AppSettingsSchema, buildQueryClassifier } from '@studio/core';
 import { buildProfileNumbers, locationsOf, toGoogleReviewDto } from '../src/lib/business-profile';
 import { businessProfileCard, businessProfileState, buildBusinessProfileIntegrations, profilePerformanceState } from '../src/lib/integrations/business_profile';
+import { defaultRefId } from '../src/lib/jobs';
 import { keywordCount, profileNumber } from '../src/lib/shared/business-profile-dto';
 
 const env = { GOOGLE_CLIENT_ID: 'g', GOOGLE_CLIENT_SECRET: 'g' } as never;
@@ -14,7 +15,10 @@ describe('Business Profile card states (email design §4.8, website design §10.
     expect(none).toMatchObject({ state: 'not_configured', missingEnv: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'], liveMode: null, connected: false });
     expect(businessProfileCard(env, undefined)).toMatchObject({ state: 'not_connected', configured: true });
     expect(businessProfileCard(env, row({ status: 'disconnected' }) as never).state).toBe('not_connected');
-    expect(businessProfileCard(env, row({}) as never)).toMatchObject({ state: 'connected', stateLabel: 'Checking', pillStatus: 'processing' });
+    // Signed in but Google not answered yet: "checking" only while a check is in flight (R13).
+    expect(businessProfileCard(env, row({}) as never)).toMatchObject({ state: 'connected', stateLabel: 'Not checked yet', pillStatus: 'manual_step_required' });
+    expect(businessProfileState(env, row({}) as never)).toBe('not_checked');
+    expect(businessProfileState(env, row({}) as never, true)).toBe('checking');
     const waiting = businessProfileCard(env, row({ capabilities: { apiAccess: 'awaiting_approval' } }) as never);
     expect(waiting).toMatchObject({ state: 'awaiting_approval', stateLabel: 'Waiting for Google', liveMode: 'read_only' });
     expect(waiting.message).toMatch(/about 14 days and isn't guaranteed/);
@@ -37,6 +41,14 @@ describe('Business Profile card states (email design §4.8, website design §10.
     }
     // A malformed stored location is never trusted.
     expect(businessProfileState(env, row({ capabilities: { apiAccess: 'available' }, config: { ...located, location: 'locations/../x' } }) as never)).toBe('choose_location');
+  });
+});
+
+describe('Business Profile job attribution', () => {
+  it('puts the Performance probe and sync on the Business Profile card (R16)', () => {
+    expect(defaultRefId('website.connection_check', { provider: 'business_profile_performance', reason: 'manual' })).toBe('google_business_profile');
+    expect(defaultRefId('search.sync', { source: 'business_profile', reason: 'manual' })).toBe('google_business_profile');
+    expect(defaultRefId('website.connection_check', { provider: 'google_search_console', reason: 'manual' })).toBe('google_search_console');
   });
 });
 

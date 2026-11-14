@@ -62,14 +62,17 @@ export const GOOGLE_OAUTH_PRODUCTS = {
     provider: 'google_business_profile',
     /** Read-only job enqueued after connecting, when its module has registered it. */
     followUpJob: { type: 'reviews.gbp.sync', payload: { reason: 'connect' } },
+    /** The same singleton key as every other Business Profile reviews sync, so two never run at once. */
+    followUpSingletonKey: 'gbp-sync',
   },
   search_console: {
     label: 'Google Search Console',
     scope: 'https://www.googleapis.com/auth/webmasters.readonly',
     provider: 'google_search_console',
     followUpJob: { type: 'website.connection_check', payload: { provider: 'google_search_console', reason: 'connect' } },
+    followUpSingletonKey: 'website-check:google_search_console',
   },
-} as const satisfies Record<string, { label: string; scope: string; provider: ConnectionProvider; followUpJob: { type: string; payload: Record<string, unknown> } }>;
+} as const satisfies Record<string, { label: string; scope: string; provider: ConnectionProvider; followUpJob: { type: string; payload: Record<string, unknown> }; followUpSingletonKey: string }>;
 export const GoogleProductSchema = z.enum(['business_profile', 'search_console']);
 export type GoogleProduct = z.infer<typeof GoogleProductSchema>;
 

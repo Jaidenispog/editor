@@ -1189,8 +1189,9 @@ export async function getSearchPerformance(range: SearchPerformanceDto['range'],
     .from(m)
     .where(and(eq(m.source, 'search_console'), eq(m.property, property)));
   if (!last?.d) {
+    // Only Search Console's own syncs: the Business Profile Performance syncs share the queue.
     const syncing = await getDb().query.jobs.findFirst({
-      where: and(eq(schema.jobs.type, 'search.sync'), inArray(schema.jobs.status, ['queued', 'running'])),
+      where: and(eq(schema.jobs.type, 'search.sync'), inArray(schema.jobs.status, ['queued', 'running']), sql`${schema.jobs.payload}->>'source' = 'search_console'`),
     });
     return {
       ...empty(syncing ? 'syncing' : 'no_data', null),
@@ -1222,7 +1223,12 @@ export async function requestSearchSync(user: SessionUser): Promise<{ job: Retur
   if (!conn || conn.status !== 'connected' || typeof conn.config['siteUrl'] !== 'string')
     throw new AppError('INTEGRATION_NOT_CONFIGURED', 'Connect Search Console and choose your property first.');
   const recent = await getDb().query.jobs.findFirst({
-    where: and(eq(schema.jobs.type, 'search.sync'), sql`${schema.jobs.createdAt} > now() - interval '15 minutes'`, ne(schema.jobs.status, 'failed')),
+    where: and(
+      eq(schema.jobs.type, 'search.sync'),
+      sql`${schema.jobs.payload}->>'source' = 'search_console'`,
+      sql`${schema.jobs.createdAt} > now() - interval '15 minutes'`,
+      ne(schema.jobs.status, 'failed'),
+    ),
   });
   if (recent || (conn.lastSyncAt && Date.now() - conn.lastSyncAt.getTime() < SEARCH_SYNC_COOLDOWN_MS))
     throw new AppError('RATE_LIMITED', 'Updated a few minutes ago. Try again later.');

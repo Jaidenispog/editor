@@ -981,7 +981,7 @@ Cancel/retry of website jobs use the existing `/api/jobs/[id]/cancel|retry` (own
 | POST | `/api/integrations/website/wordpress` | `{ baseUrl, username, applicationPassword }` | 202 `{ state: 'checking', job }` | `baseUrl` https, in Zod; credential encrypted with `encryptToken` and never echoed; audit `integration.website.connected` (no secret) |
 | POST | `/api/integrations/website/check` | `{}` | 202 `{ job }` | Read-only |
 | DELETE | `/api/integrations/website` | — | 204 | Nulls the credential, status `disconnected`; open `approved` changes go back to `proposed`; audit `integration.website.disconnected` |
-| POST | `/api/integrations/business-profile-performance/check` | `{}` | 202 `{ job }` | Re-probe approval (read-only) |
+| POST | `/api/integrations/google-business-profile/check` | `{}` | 202 `{ jobs }` | *As built (WP9):* one "Check again" for the shared Business Profile connection: re-reads locations and reviews and, with a location chosen, re-probes Performance approval (all read-only). There is no separate `business-profile-performance/check` route |
 | GET | `/api/integrations/status` (existing) | — | adds the three states (§10.5) | |
 
 `/api/settings` (existing): accepts `business.openingHours`; ignores server-only `website.*` fields (§5.3).
@@ -1276,7 +1276,8 @@ Existing Search Console message text in `integrations.ts` is replaced to match t
   (+ `[id]`), `website/edits` (+ `[id]`, `[id]/draft`, `[id]/choose-draft`, `[id]/apply`, `[id]/mark-done`,
   `[id]/reject`, `[id]/undo`), `website/search-performance` (+ `sync`), `website/business-profile-performance`,
   `website/query-groups`, `integrations/google-search-console/{route.ts,property,check}`,
-  `integrations/website/{route.ts,wordpress,check}`, `integrations/business-profile-performance/check`.
+  `integrations/website/{route.ts,wordpress,check}` (the Performance re-probe is WP9's
+  `integrations/google-business-profile/check`).
 - Create `src/lib/website.ts` (queries, DTO mapping, apply availability, grouping for search data).
 - Modify `src/lib/integrations.ts` (three states, §10.5), `src/lib/jobs.ts` (`defaultRefId`),
   `src/lib/settings-merge.ts` (server-only fields), (`src/lib/google-oauth.ts` and

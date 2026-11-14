@@ -39,7 +39,8 @@ import { SquareConnectionChangedError, upsertBooking } from './map.js';
  *   free of no-show fees at Square's current version, the booking still has the version the owner saw, and Square
  *   still offers the exact time with the same barber.
  * - `submitted_at` is set by a conditional update, inside a transaction that holds the `square` connection row
- *   `FOR SHARE` and checks it is still the account and environment the owner approved, immediately before the call.
+ *   `FOR SHARE` and checks it is still the account and environment the owner approved, immediately before the call;
+ *   the call itself is made under the same lock after the same check, so a disconnect in between sends nothing.
  * - A retry after a time-out re-sends the same body with the same idempotency key, so Square applies it once.
  *   After the last attempt the change is `unknown` until a sync finds it (`settleUnknownChanges`).
  * - Square's refusals are stored verbatim; a refusal for the plan or permissions pauses booking changes, and an
@@ -179,7 +180,7 @@ export async function runBookingChange(ctx: WorkerContext, run: TrackedRun, chan
   if (!connectionMatches(conn, row, ctx.env.SQUARE_ENVIRONMENT) || !conn) return finish(ctx, row, 'not_allowed', DISCONNECTED_MESSAGE, {}, clock());
   const config = parseSquareConfig(conn.config);
   const tier1 = tier1Status({ capabilities: parseSquareCapabilities(conn.capabilities), config, scopes: conn.scopes, environment: row.environment, merchantId: conn.externalAccountId, available: opts.tier1Available });
-  const gate = writeGateReason({ tier1, selfTest: row.selfTestId !== null });
+  const gate = writeGateReason({ tier1, selfTest: row.selfTestId !== null, kind: row.kind });
   if (gate) return finish(ctx, row, 'not_allowed', `${gate} Nothing was sent.`, {}, clock());
   if (req.locationId !== effectiveLocationId(config) || ((row.kind === 'create' || row.kind === 'reschedule') && (!req.startAt || !req.teamMemberId || !req.serviceVariationId || !req.durationMinutes))) {
     return finish(ctx, row, 'not_allowed', 'This change no longer matches your Square location or is missing details. Nothing was sent.', {}, clock());
@@ -278,8 +279,7 @@ export async function runBookingChange(ctx: WorkerContext, run: TrackedRun, chan
   if (marked === 'disconnected') return finish(ctx, row, 'not_allowed', DISCONNECTED_MESSAGE, {}, clock());
   if (!marked) return loadChange(ctx, row.id);
   row = marked;
-  await writeWorkerAudit(ctx.db, { userId: row.requestedBy, action: 'booking.change_submitted', entityType: 'square_booking_change', entityId: row.id, data: { kind: row.kind, environment: row.environment, startAt: req.startAt ?? null, selfTest: row.selfTestId !== null } }, ctx.logger);
-  return send(ctx, run, s, row, clock);
+  return send(ctx, run, s, row, clock, true);
 }
 
 /** A change Square may already have: re-sent with the same idempotency key, if the connection is still the approved one. */
@@ -296,16 +296,39 @@ async function resend(ctx: WorkerContext, run: TrackedRun, row: BookingChangeRow
     if (run.willRetry && !(err instanceof NonRetryableError)) throw err;
     return markUnknown(ctx, row, UNKNOWN_MESSAGE, clock(), true);
   }
-  return send(ctx, run, s, row, clock);
+  return send(ctx, run, s, row, clock, false);
 }
 
-/** 7–8: the one write call and what its answer means. */
-async function send(ctx: WorkerContext, run: TrackedRun, s: SquareSession, row: BookingChangeRow, clock: () => Date): Promise<BookingChangeRow> {
+/**
+ * 7–8: the one write call and what its answer means. The call is made inside a transaction that holds the `square`
+ * connection row `FOR SHARE` and re-checks it is still the approved account and environment, so a disconnect (which
+ * takes the row `FOR UPDATE`) either lands before the check, and nothing is sent, or waits for the call to finish
+ * (at most the SDK's time limit).
+ */
+async function send(ctx: WorkerContext, run: TrackedRun, s: SquareSession, row: BookingChangeRow, clock: () => Date, firstSend: boolean): Promise<BookingChangeRow> {
   const req = row.request;
   await run.progress(0.8, 'Sending to Square…');
+  const sent = await ctx.db.transaction(async (tx) => {
+    const t = schema.integrationConnections;
+    const live = (await tx.select({ status: t.status, externalAccountId: t.externalAccountId, config: t.config }).from(t).where(eq(t.provider, 'square')).limit(1).for('share'))[0];
+    if (!connectionMatches(live, row, ctx.env.SQUARE_ENVIRONMENT)) return { gone: true as const };
+    try {
+      return { gone: false as const, booking: await write(s.api, row) };
+    } catch (err) {
+      return { gone: false as const, err };
+    }
+  });
+  if (sent.gone) {
+    // A first send never reached Square; a re-send may follow an earlier send whose answer was lost.
+    return firstSend ? finish(ctx, row, 'not_allowed', DISCONNECTED_MESSAGE, {}, clock()) : markUnknown(ctx, row, 'Square was disconnected before Studio Assistant could confirm this change. Check Square.', clock(), false);
+  }
+  if (firstSend) {
+    await writeWorkerAudit(ctx.db, { userId: row.requestedBy, action: 'booking.change_submitted', entityType: 'square_booking_change', entityId: row.id, data: { kind: row.kind, environment: row.environment, startAt: req.startAt ?? null, selfTest: row.selfTestId !== null } }, ctx.logger);
+  }
   let booking: SquareBookingData;
   try {
-    booking = await write(s.api, row);
+    if ('err' in sent) throw sent.err;
+    booking = sent.booking;
   } catch (err) {
     const transient = !(err instanceof SquareApiError) || err.kind === 'transient' || err.kind === 'rate_limited';
     if (transient) {
@@ -390,8 +413,11 @@ async function refused(ctx: WorkerContext, row: BookingChangeRow, err: unknown, 
     if (row.squareBookingId) await enqueueTracked(ctx, 'square.refresh', { entity: 'booking', squareId: row.squareBookingId }, { singletonKey: `square-refresh:booking:${row.squareBookingId}` });
     done = await finish(ctx, row, 'changed_in_square', `The booking changed in Square, so the change was not made.${said}`, verbatim, now);
   } else {
-    if ((row.kind === 'create' || row.kind === 'reschedule') && row.request.serviceVariationId) await recordServiceRejection(ctx, row.request.serviceVariationId, row.id, e?.code ?? 'UNKNOWN', now);
-    done = await finish(ctx, row, 'rejected', `Square refused the change.${said}${row.kind !== 'cancel' ? ' This service is now marked “Book in Square” until you confirm it again.' : ''}`, verbatim, now);
+    // Only an invalid request (400/422) for a booking with a service is taken as Square refusing that service
+    // (design §6.3). A 404 on a create (an unknown client or location, say) is not about the service.
+    const marksService = e?.kind === 'invalid' && (row.kind === 'create' || row.kind === 'reschedule') && Boolean(row.request.serviceVariationId);
+    if (marksService) await recordServiceRejection(ctx, row.request.serviceVariationId ?? '', row.id, e?.code ?? 'UNKNOWN', now);
+    done = await finish(ctx, row, 'rejected', `Square refused the change.${said}${marksService ? ' This service is now marked “Book in Square” until you confirm it again.' : ''}`, verbatim, now);
   }
   await writeWorkerAudit(ctx.db, { userId: row.requestedBy, action: 'booking.change_rejected', entityType: 'square_booking_change', entityId: row.id, data: { kind: row.kind, code: e?.code ?? 'UNKNOWN', httpStatus: e?.statusCode ?? null } }, ctx.logger);
   return done;
@@ -449,7 +475,20 @@ export async function settleUnknownChanges(ctx: WorkerContext, s: SquareSession,
       }
       const b = fresh;
       const moved = b && row.kind === 'reschedule' && Date.parse(b.startAt) === Date.parse(req.startAt ?? '') && b.version > (req.expectedVersion ?? 0);
-      const cancelled = b && row.kind === 'cancel' && b.status.startsWith('CANCELLED') && b.version > (req.expectedVersion ?? 0);
+      // Only a cancel by the seller can be ours; a client who cancelled online meanwhile is not reported as our change.
+      const cancelled = b && row.kind === 'cancel' && b.status === 'CANCELLED_BY_SELLER' && b.version > (req.expectedVersion ?? 0);
+      if (b && row.kind === 'cancel' && !cancelled && b.status === 'CANCELLED_BY_CUSTOMER' && b.version > (req.expectedVersion ?? 0)) {
+        try {
+          await upsertBooking(ctx.db, b, s, s.config.snapshot, now);
+        } catch (err) {
+          if (!(err instanceof SquareConnectionChangedError)) throw err;
+        }
+        await ctx.db
+          .update(table)
+          .set({ status: 'changed_in_square', statusMessage: 'The client cancelled this in Square.', squareResponse: b.raw, finishedAt: now, updatedAt: now })
+          .where(and(eq(table.id, row.id), inArray(table.status, ['unknown', 'submitted'])));
+        continue;
+      }
       found = moved || cancelled ? b : null;
     }
     if (found) {

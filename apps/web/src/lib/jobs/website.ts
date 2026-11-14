@@ -13,7 +13,8 @@ export const websiteRefId: RefIdResolver = (type, payload) => {
     case 'website.copy_draft':
       return pick('editId');
     case 'website.connection_check':
-      return pick('provider');
+      // The Performance probe belongs on the Business Profile card (it shares that connection).
+      return payload['provider'] === 'business_profile_performance' ? 'google_business_profile' : pick('provider');
     case 'search.sync':
       return payload['source'] === 'business_profile' ? 'google_business_profile' : 'google_search_console';
     default:

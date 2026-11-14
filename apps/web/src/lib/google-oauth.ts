@@ -164,12 +164,12 @@ export async function storeGoogleConnection(db: Database, product: GoogleProduct
  * The read-only follow-up job for a product, when its module has registered the job type and the payload fits;
  * otherwise null, and nothing is enqueued (the tokens are still stored).
  */
-export function googleFollowUpJob(product: GoogleProduct): { type: string; payload: Record<string, unknown> } | null {
+export function googleFollowUpJob(product: GoogleProduct): { type: string; payload: Record<string, unknown>; singletonKey: string } | null {
   const job = GOOGLE_OAUTH_PRODUCTS[product].followUpJob;
   // Widened to string: the type names are only registered once the owning module (WP8, WP9) has merged.
   const type: string = job.type;
   if (!isJobType(type)) return null;
   const schemaForType: { safeParse(v: unknown): { success: boolean; data?: unknown } } = JOB_PAYLOAD_SCHEMAS[type];
   const parsed = schemaForType.safeParse(job.payload);
-  return parsed.success ? { type, payload: parsed.data as Record<string, unknown> } : null;
+  return parsed.success ? { type, payload: parsed.data as Record<string, unknown>, singletonKey: GOOGLE_OAUTH_PRODUCTS[product].followUpSingletonKey } : null;
 }

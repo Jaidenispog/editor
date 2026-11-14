@@ -9,8 +9,11 @@ import { connectionFor, envSentence, missingEnv, type ConnectionFact, type Integ
  * shows as "Waiting for Google approval", never as an error. Pure, unit tested; no message starts with "Needs setup:".
  */
 
-/** Where the connection stands, as the Reviews tab, the Website card and the Settings card show it. */
-export type BusinessProfileState = 'not_configured' | 'not_connected' | 'checking' | 'awaiting_approval' | 'choose_location' | 'needs_reauth' | 'error' | 'connected';
+/**
+ * Where the connection stands, as the Reviews tab, the Website card and the Settings card show it. `checking` only
+ * while a check is really queued or running; signed in with no check recorded and none running is `not_checked`.
+ */
+export type BusinessProfileState = 'not_configured' | 'not_connected' | 'checking' | 'not_checked' | 'awaiting_approval' | 'choose_location' | 'needs_reauth' | 'error' | 'connected';
 
 /** Where Performance stands on the same connection. */
 export type ProfilePerformanceState = 'not_connected' | 'not_checked' | 'awaiting_approval' | 'api_disabled' | 'error' | 'available';
@@ -23,15 +26,19 @@ export function chosenProfileLocation(conn: ConnectionFact | undefined): { name:
   return { name: loc, title: typeof title === 'string' ? title : '' };
 }
 
-/** The connection's state from server settings and the stored row (pure). */
-export function businessProfileState(env: IntegrationEnv, conn: ConnectionFact | undefined): BusinessProfileState {
+/**
+ * The connection's state from server settings and the stored row (pure). `checkInFlight` says whether a
+ * `reviews.gbp.sync` is queued or running (the caller looks it up); without it, a row Google has not answered for yet is
+ * `not_checked`, never "checking".
+ */
+export function businessProfileState(env: IntegrationEnv, conn: ConnectionFact | undefined, checkInFlight = false): BusinessProfileState {
   if (missingEnv(env, ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']).length) return 'not_configured';
   if (!conn || conn.status === 'disconnected' || conn.status === 'not_configured') return 'not_connected';
   if (conn.status === 'needs_reauth') return 'needs_reauth';
   if (conn.status === 'error') return 'error';
   const access = businessProfileApiState(conn.capabilities?.['apiAccess']);
   if (access === 'awaiting_approval') return 'awaiting_approval';
-  if (access === null) return 'checking';
+  if (access === null) return checkInFlight ? 'checking' : 'not_checked';
   if (!chosenProfileLocation(conn)) return 'choose_location';
   return 'connected';
 }
@@ -102,6 +109,16 @@ export function businessProfileCard(env: IntegrationEnv, conn: ConnectionFact | 
       return { ...base, connected: true, state, stateLabel: 'Waiting for Google', liveMode: 'read_only', message: BUSINESS_PROFILE_AWAITING_APPROVAL_MESSAGE };
     case 'checking':
       return { ...base, connected: true, state: 'connected', stateLabel: 'Checking', pillStatus: 'processing', liveMode: 'read_only', message: 'Signed in. Checking your Business Profile (read-only)…' };
+    case 'not_checked':
+      return {
+        ...base,
+        connected: true,
+        state: 'connected',
+        stateLabel: 'Not checked yet',
+        pillStatus: 'manual_step_required',
+        liveMode: 'read_only',
+        message: 'Signed in. Google hasn’t been asked about your Business Profile yet, or the first check didn’t finish. Press Check again under Reviews → Reviews on Google.',
+      };
     case 'choose_location':
       return {
         ...base,

@@ -27,7 +27,8 @@ import { getDb } from '../db.js';
 import { createTrackedJob } from '../jobs.js';
 import type { BookingChangeDto } from '../shared/square-dto.js';
 import { toChangeDto } from './change-dto.js';
-import { loadSquareConnection, requireSquareConnected } from './status.js';
+import { loadSquareConnection, requireSquareConnected, selfTestMadeLiveBooking } from './status.js';
+import { settleStoppedChange, settleStoppedSelfTest } from './stopped.js';
 
 /**
  * Booking changes from Studio Assistant (Square Tier 1, WP6b; design §4.5–4.6, §8). The web app only records what
@@ -66,11 +67,19 @@ async function slotFromSearch(db: Database, input: { searchId: string; startAt: 
   return slot;
 }
 
-/** Refuses a second change to the same booking while one is still being made. */
-async function refuseIfBusy(db: Database, bookingId: string): Promise<void> {
+/**
+ * Refuses a second change to the same booking while one is still being made. A change whose job stopped before
+ * anything was sent is closed first, so it never blocks the booking for ever.
+ */
+async function refuseIfBusy(db: Database, bookingId: string, now: Date): Promise<void> {
   const t = schema.squareBookingChanges;
-  const busy = await db.select({ id: t.id }).from(t).where(and(eq(t.bookingId, bookingId), inArray(t.status, ['queued', 'checking', 'submitted']))).limit(1);
-  if (busy.length) throw new AppError('CONFLICT', 'A change to this booking is already being made. Wait for it to finish.');
+  const busy = await db.select().from(t).where(and(eq(t.bookingId, bookingId), inArray(t.status, ['queued', 'checking', 'submitted'])));
+  for (const row of busy) {
+    const settled = await settleStoppedChange(db, row, now);
+    if (settled.status === 'queued' || settled.status === 'checking' || settled.status === 'submitted') {
+      throw new AppError('CONFLICT', 'A change to this booking is already being made. Wait for it to finish.');
+    }
+  }
 }
 
 /** The body of `POST /api/appointments/changes`. `customerId` is Studio Assistant's id of a client copied from Square. */
@@ -89,7 +98,7 @@ export async function requestBookingChange(input: BookingChangeInput, user: Sess
   const conn = await requireSquareConnected(db);
   const config = parseSquareConfig(conn.config);
   const tier1 = tier1For(conn, config.environment, opts);
-  const gate = writeGateReason({ tier1, selfTest: false });
+  const gate = writeGateReason({ tier1, selfTest: false, kind: input.kind });
   if (gate) throw new AppError('UNSUPPORTED', gate);
   const locationId = effectiveLocationId(config);
   if (!locationId || !conn.externalAccountId) throw new AppError('UNSUPPORTED', 'Choose your studio’s Square location in Settings → Integrations first.');
@@ -126,7 +135,7 @@ export async function requestBookingChange(input: BookingChangeInput, user: Sess
     const allowed = input.kind === 'reschedule' ? actions.move : actions.cancel;
     if (!allowed.allowed) throw new AppError('UNSUPPORTED', allowed.reason ?? 'This booking cannot be changed from Studio Assistant.');
     if (booking.squareVersion !== input.expectedVersion) throw new AppError('CONFLICT', 'This booking changed in Square since you opened it. Close it and open it again.');
-    await refuseIfBusy(db, booking.id);
+    await refuseIfBusy(db, booking.id, now);
     if (input.kind === 'reschedule') {
       const slot = await slotFromSearch(db, { searchId: input.availabilitySearchId, startAt: input.startAt, teamMemberId: input.teamMemberId, environment: config.environment, bookingId: booking.id }, now);
       if (Date.parse(slot.startAt) <= now.getTime()) throw new AppError('VALIDATION', 'That time has passed. Choose a later one.');
@@ -167,20 +176,15 @@ export async function requestBookingChange(input: BookingChangeInput, user: Sess
 }
 
 /**
- * A change and its progress. A change whose job was cancelled or failed before the worker picked it up (so the
- * worker never saw it) is closed here as withdrawn, so it never shows "waiting" for ever.
+ * A change and its progress. A change whose job was cancelled or failed before anything was sent (the worker never
+ * saw it, or died while checking on the last attempt) is closed here, so it never shows "waiting" or "checking" for
+ * ever.
  */
 export async function getBookingChange(id: string, db: Database = getDb(), now: Date = new Date()): Promise<BookingChangeDto> {
   const t = schema.squareBookingChanges;
   let row = (await db.select().from(t).where(eq(t.id, id)).limit(1))[0];
   if (!row) throw new AppError('NOT_FOUND', 'That change no longer exists.');
-  if (row.status === 'queued') {
-    const j = schema.jobs;
-    const job = (await db.select({ status: j.status }).from(j).where(and(eq(j.type, 'square.booking_change'), eq(j.refId, id))).orderBy(desc(j.createdAt)).limit(1))[0];
-    if (job && (job.status === 'cancelled' || job.status === 'failed')) {
-      row = (await db.update(t).set({ status: 'cancelled', statusMessage: 'Stopped before anything was sent to Square.', finishedAt: now, updatedAt: now }).where(and(eq(t.id, id), eq(t.status, 'queued'))).returning())[0] ?? row;
-    }
-  }
+  row = await settleStoppedChange(db, row, now);
   const conn = await loadSquareConnection(db);
   return toChangeDto(row, teamNames(parseSquareConfig(conn?.config)), now);
 }
@@ -231,6 +235,9 @@ export async function requestSelfTest(input: SelfTestInput, user: SessionUser, d
   const locationId = effectiveLocationId(config);
   if (!locationId || !conn.externalAccountId) throw new AppError('UNSUPPORTED', 'Choose your studio’s Square location in Settings → Integrations first.');
   const t = schema.squareBookingChanges;
+  // A test whose job stopped (cancelled, or the worker died on its last attempt) is closed first, so it never blocks.
+  const unfinished = await db.selectDistinct({ selfTestId: t.selfTestId }).from(t).where(and(isNotNull(t.selfTestId), inArray(t.status, ['queued', 'checking', 'submitted'])));
+  for (const u of unfinished) await settleStoppedSelfTest(db, u.selfTestId, now);
   const running = await db.select({ id: t.id }).from(t).where(and(isNotNull(t.selfTestId), inArray(t.status, ['queued', 'checking', 'submitted']))).limit(1);
   if (running.length) throw new AppError('CONFLICT', 'A self-test is already running.');
   if (config.environment === 'production' && !input.acknowledgeLive) throw new AppError('VALIDATION', 'Tick “I understand these are real bookings in Square” first.');
@@ -282,6 +289,9 @@ export async function answerSelfTestNotification(answer: 'yes' | 'no' | 'unknown
   const conn = await requireSquareConnected(db);
   const caps = parseSquareCapabilities(conn.capabilities);
   if (caps.selfTestStatus !== 'passed' && caps.selfTestStatus !== 'failed') throw new AppError('CONFLICT', 'Run the self-test first.');
+  if (!(await selfTestMadeLiveBooking(db, conn, parseSquareConfig(conn.config).environment))) {
+    throw new AppError('CONFLICT', 'This question is only asked after a self-test made a booking on live Square.');
+  }
   const c = schema.integrationConnections;
   await db
     .update(c)

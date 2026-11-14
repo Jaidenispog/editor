@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, gt, gte, inArray, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, inArray, ne, or, sql } from 'drizzle-orm';
 import {
   AppError,
   QUERY_GROUPS,
@@ -19,7 +19,8 @@ import { getDb } from './db.js';
 import { getEnv } from './env.js';
 import { businessProfileState, chosenProfileLocation, profilePerformanceState } from './integrations/business_profile.js';
 import type { ConnectionFact } from './integrations/types.js';
-import { createTrackedJob, toJobDto } from './jobs.js';
+import { cancelJob, createTrackedJob, toJobDto } from './jobs.js';
+import { getLogger } from './logger.js';
 import type { GoogleReviewDto, GoogleReviewsDto, ProfileKeywordDto, ProfileLocationDto, ProfilePerformanceDto } from './shared/business-profile-dto.js';
 import { getSettings } from './settings.js';
 
@@ -80,13 +81,35 @@ export function toGoogleReviewDto(row: Pick<typeof schema.reviews.$inferSelect, 
   };
 }
 
+/** Google's own review totals are kept with the location they were read for; null when cleared. */
+const REVIEW_STATS_CLEARED = { averageRating: null, totalReviewCount: null, reviewsSyncedAt: null, reviewStatsLocation: null };
+
+/** The Business Profile jobs that read Google (reviews, the Performance probe and the Performance sync). */
+function profileJobs() {
+  const j = schema.jobs;
+  return or(
+    eq(j.type, 'reviews.gbp.sync'),
+    and(eq(j.type, 'search.sync'), sql`${j.payload}->>'source' = 'business_profile'`),
+    and(eq(j.type, 'website.connection_check'), sql`${j.payload}->>'provider' = 'business_profile_performance'`),
+  );
+}
+
+/** True while a job of this kind is queued or running (so "checking" is only shown while something really checks). */
+async function inFlight(kind: 'reviews' | 'probe'): Promise<boolean> {
+  const j = schema.jobs;
+  const which = kind === 'reviews' ? eq(j.type, 'reviews.gbp.sync') : and(eq(j.type, 'website.connection_check'), sql`${j.payload}->>'provider' = 'business_profile_performance'`);
+  return Boolean(await getDb().query.jobs.findFirst({ columns: { id: true }, where: and(which, inArray(j.status, ['queued', 'running'])) }));
+}
+
 /** The "Reviews on Google" tab (email design §4.8). Reviews are listed only once connected with a location chosen. */
 export async function getGoogleReviews(): Promise<GoogleReviewsDto> {
   const env = getEnv();
   const conn = await profileRow();
   const f = fact(conn);
-  const state = businessProfileState(env, f);
+  const state = businessProfileState(env, f, await inFlight('reviews'));
   const location = chosenProfileLocation(f);
+  // Google's totals and the sync time count only for the location they were read for.
+  const statsHere = Boolean(location && capString(conn, 'reviewStatsLocation') === location.name);
   const base: GoogleReviewsDto = {
     state,
     message: state === 'error' || state === 'needs_reauth' || state === 'choose_location' ? (conn?.lastError ?? null) : null,
@@ -95,8 +118,9 @@ export async function getGoogleReviews(): Promise<GoogleReviewsDto> {
     reviews: [],
     totalReviewCount: null,
     averageRating: null,
-    syncedAt: capString(conn, 'reviewsSyncedAt'),
+    syncedAt: statsHere ? capString(conn, 'reviewsSyncedAt') : null,
     canRefresh: false,
+    limited: false,
   };
   if (state !== 'connected' || !location) return base;
   const r = schema.reviews;
@@ -105,12 +129,13 @@ export async function getGoogleReviews(): Promise<GoogleReviewsDto> {
     .from(r)
     .where(and(eq(r.provider, PROVIDER), sql`${r.raw}->>'location' = ${location.name}`))
     .orderBy(desc(sql`coalesce(${r.reviewCreatedAt}, ${r.reviewUpdatedAt})`))
-    .limit(REVIEWS_SHOWN);
+    .limit(REVIEWS_SHOWN + 1);
   return {
     ...base,
-    reviews: rows.map(toGoogleReviewDto),
-    totalReviewCount: capNumber(conn, 'totalReviewCount'),
-    averageRating: capNumber(conn, 'averageRating'),
+    reviews: rows.slice(0, REVIEWS_SHOWN).map(toGoogleReviewDto),
+    limited: rows.length > REVIEWS_SHOWN,
+    totalReviewCount: statsHere ? capNumber(conn, 'totalReviewCount') : null,
+    averageRating: statsHere ? capNumber(conn, 'averageRating') : null,
     canRefresh: !(await recentJob('reviews.gbp.sync', REVIEWS_REFRESH_COOLDOWN_MS)),
   };
 }
@@ -178,7 +203,8 @@ export async function chooseProfileLocation(user: SessionUser, locationName: str
       .update(t)
       .set({
         config: sql`${t.config} || ${JSON.stringify({ account: entry.account, location: locationName, locationTitle: title })}::jsonb`,
-        capabilities: sql`${t.capabilities} || ${JSON.stringify({ performanceApi: null, performanceMessage: null })}::jsonb`,
+        // Performance starts again, and the old listing's review totals are not shown for the new one.
+        capabilities: sql`${t.capabilities} || ${JSON.stringify({ performanceApi: null, performanceMessage: null, ...REVIEW_STATS_CLEARED })}::jsonb`,
         displayName: title.slice(0, 120),
         lastError: null,
         updatedAt: new Date(),
@@ -194,24 +220,41 @@ export async function chooseProfileLocation(user: SessionUser, locationName: str
     projectId: null,
     singletonKey: 'website-check:business_profile_performance',
   });
-  return { state: businessProfileState(getEnv(), fact(await profileRow())) };
+  return { state: businessProfileState(getEnv(), fact(await profileRow()), await inFlight('reviews')) };
 }
 
 /**
  * Disconnects the Business Profile (Google revokes through the shared `google.disconnect` job). With `deleteData`,
- * the stored Google reviews and Performance numbers are deleted too.
+ * the stored Google reviews and Performance numbers are deleted too. Google's review totals are cleared either way.
+ * Business Profile jobs still waiting or running are cancelled; a running one that has not noticed yet cannot write
+ * anything back either (the worker stores only while the row is signed in, under the row's lock, which the update
+ * below waits for).
  */
 export async function disconnectBusinessProfile(user: SessionUser, deleteData: boolean): Promise<void> {
   const conn = await profileRow();
   if (!conn || conn.status === 'disconnected') return;
   const db = getDb();
+  const t = schema.integrationConnections;
   await db.transaction(async (tx) => {
-    await tx.update(schema.integrationConnections).set({ status: 'disconnected', lastError: null, updatedAt: new Date() }).where(eq(schema.integrationConnections.id, conn.id));
+    await tx.select({ id: t.id }).from(t).where(eq(t.id, conn.id)).for('update');
+    await tx
+      .update(t)
+      .set({ status: 'disconnected', lastError: null, capabilities: sql`${t.capabilities} || ${JSON.stringify(REVIEW_STATS_CLEARED)}::jsonb`, updatedAt: new Date() })
+      .where(eq(t.id, conn.id));
     if (deleteData) {
       await tx.delete(schema.reviews).where(eq(schema.reviews.provider, PROVIDER));
       await tx.delete(schema.searchMetrics).where(eq(schema.searchMetrics.source, 'business_profile'));
     }
   });
+  const active = await db.select({ id: schema.jobs.id }).from(schema.jobs).where(and(profileJobs(), inArray(schema.jobs.status, ['queued', 'running'])));
+  for (const job of active) {
+    try {
+      await cancelJob(job.id);
+    } catch (err) {
+      // Finished in the meantime; nothing to cancel.
+      getLogger().debug({ err, jobId: job.id }, 'business profile job already finished at disconnect');
+    }
+  }
   await createTrackedJob({ type: 'google.disconnect', payload: { connectionId: conn.id }, projectId: null, singletonKey: `google-disconnect:${conn.id}` });
   await writeAudit({ userId: user.id, action: 'integration.google_business_profile.disconnected', entityType: 'integration_connection', entityId: conn.id, data: { deleteData } });
 }
@@ -297,11 +340,15 @@ export async function getProfilePerformance(range: ProfilePerformanceDto['range'
     canRefresh: false,
   });
   if (conState === 'not_configured') return empty('not_configured');
-  if (conState === 'not_connected' || conState === 'checking') return empty('not_connected');
+  if (conState === 'not_connected') return empty('not_connected');
+  // Signed in: the first check is running, or has not been recorded (never shown as "not connected").
+  if (conState === 'checking' || conState === 'not_checked') return empty((await inFlight('reviews')) ? 'checking' : 'not_checked');
   if (conState === 'needs_reauth') return empty('needs_reauth', conn?.lastError ?? null);
   if (conState === 'error') return empty('error', conn?.lastError ?? null);
   if (conState === 'awaiting_approval') return empty('awaiting_approval');
   if (conState === 'choose_location' || !location) return empty('choose_location');
+  // "Checking" only while the probe is really queued or running; otherwise "not checked yet", with Check again.
+  if (perf === 'not_checked') return empty((await inFlight('probe')) ? 'checking' : 'not_checked');
   if (perf !== 'available') return empty(perf, capString(conn, 'performanceMessage'));
   const m = schema.searchMetrics;
   const db = getDb();

@@ -13,6 +13,8 @@ import {
   parseSquareConfig,
   selfTestAllowed,
   selfTestChangeId,
+  selfTestFailureText,
+  selfTestSummary,
   squareNotificationSentence,
   squareScopes,
   tier1Status,
@@ -60,6 +62,15 @@ describe('writeGateReason (the gate both the web app and the worker apply)', () 
     expect(writeGateReason({ tier1: ready({ confirmed: false }), selfTest: false })).toMatch(/No service is confirmed/);
     expect(writeGateReason({ tier1: ready({ caps: { selfTestStatus: 'failed' } }), selfTest: false })).toMatch(/self-test/);
     expect(writeGateReason({ tier1: ready({ caps: { writesEnabled: false } }), selfTest: false })).toMatch(/switched off/);
+  });
+  it('does not apply line 3 (a bookable service) to a cancel, which books nothing', () => {
+    expect(writeGateReason({ tier1: ready({ confirmed: false }), selfTest: true, kind: 'cancel' })).toBeNull();
+    expect(writeGateReason({ tier1: ready({ confirmed: false }), selfTest: false, kind: 'cancel' })).toBeNull();
+    expect(writeGateReason({ tier1: ready({ confirmed: false }), selfTest: true, kind: 'reschedule' })).toMatch(/No service is confirmed/);
+    expect(writeGateReason({ tier1: ready({ confirmed: false }), selfTest: false, kind: 'create' })).toMatch(/No service is confirmed/);
+    // The plan, permissions and a pause still apply to a cancel.
+    expect(writeGateReason({ tier1: ready({ confirmed: false, scopes: squareScopes('read') }), selfTest: true, kind: 'cancel' })).toMatch(/permission/);
+    expect(writeGateReason({ tier1: ready({ confirmed: false, caps: { writesSuspendedReason: 'plan' } }), selfTest: true, kind: 'cancel' })).toMatch(/^Paused/);
   });
   it('lets the self-test run with lines 1–3 ticked, before it has passed and with the switch off', () => {
     const before = ready({ caps: { selfTestStatus: 'none', writesEnabled: false } });
@@ -127,5 +138,37 @@ describe('booking change contracts', () => {
     const t0 = Date.parse('2026-11-21T00:00:00Z');
     const slots = [5, -1, 2, 30, -10].map((h) => ({ startAt: new Date(t0 + h * HOUR).toISOString() }));
     expect(nearestSlots(slots, new Date(t0).toISOString(), 3).map((s) => (Date.parse(s.startAt) - t0) / HOUR)).toEqual([-1, 2, 5]);
+  });
+});
+
+describe('selfTestSummary and selfTestFailureText (where a test booking may still be)', () => {
+  const booked = '2026-11-21T00:00:00.000Z';
+  const movedTo = '2026-11-21T01:00:00.000Z';
+  const step = (kind: 'create' | 'reschedule' | 'cancel', status: string, startAt: string | null, statusMessage = '') => ({ kind, status, startAt, statusMessage });
+  it('passes only when all three steps were confirmed', () => {
+    expect(selfTestSummary([step('create', 'confirmed', booked), step('reschedule', 'confirmed', movedTo), step('cancel', 'confirmed', null)])).toEqual({ failedStep: null, failedMessage: '', leftoverAt: [] });
+  });
+  it('a failed move with a confirmed cancel leaves nothing in Square', () => {
+    expect(selfTestSummary([step('create', 'confirmed', booked), step('reschedule', 'rejected', movedTo, 'Square refused the change.'), step('cancel', 'confirmed', null)])).toEqual({
+      failedStep: 'reschedule',
+      failedMessage: 'Square refused the change.',
+      leftoverAt: [],
+    });
+  });
+  it('a failed cancel: the moved time once the move was confirmed, otherwise the booked time', () => {
+    expect(selfTestSummary([step('create', 'confirmed', booked), step('reschedule', 'confirmed', movedTo), step('cancel', 'rejected', null)]).leftoverAt).toEqual([movedTo]);
+    expect(selfTestSummary([step('create', 'confirmed', booked), step('reschedule', 'slot_unavailable', null), step('cancel', 'rejected', null)]).leftoverAt).toEqual([booked]);
+  });
+  it('a move whose outcome is not known gives both times (R9)', () => {
+    const s = selfTestSummary([step('create', 'confirmed', booked), step('reschedule', 'unknown', movedTo, 'Square may or may not have made this change.'), step('cancel', 'failed', null, 'Not run')]);
+    expect(s).toMatchObject({ failedStep: 'reschedule', leftoverAt: [booked, movedTo] });
+    expect(selfTestFailureText('reschedule', s.failedMessage, s.leftoverAt)).toMatch(
+      /^Moving failed: Square may or may not have made this change\. A test booking may still be in Square, for .* (AEDT|AEST) or .* (AEDT|AEST) \(the move may or may not have gone through\)\. Cancel it in Square\.$/,
+    );
+  });
+  it('a create that may have been made gives its time; one that was not made gives none', () => {
+    expect(selfTestSummary([step('create', 'unknown', booked), step('reschedule', 'cancelled', null), step('cancel', 'cancelled', null)])).toMatchObject({ failedStep: 'create', leftoverAt: [booked] });
+    expect(selfTestSummary([step('create', 'slot_unavailable', booked), step('reschedule', 'cancelled', null), step('cancel', 'cancelled', null)])).toMatchObject({ failedStep: 'create', leftoverAt: [] });
+    expect(selfTestFailureText('create', '', [])).toBe('Booking failed: Square didn’t confirm it.');
   });
 });

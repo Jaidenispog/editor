@@ -124,6 +124,12 @@ describe('classifyVariation', () => {
     expect(classifyVariation(service({ teamMemberIds: [] }), profile, confirmed, {}).label).toBe('not_bookable');
     expect(classifyVariation(service(), profile, confirmed, { V1: { changeId: 'c', code: 'BAD_REQUEST', at: 'x' } }).label).toBe('book_in_square');
   });
+  it('a refusal by Square is not called a no-show fee (the cause is not known)', () => {
+    const refused = classifyVariation(service(), profile, confirmed, { V1: { changeId: 'c', code: 'BAD_REQUEST', at: 'x' } });
+    expect(refused.reason).toBe('Book in Square — Square refused a change for this service (code BAD_REQUEST). Check it in Square, then confirm it again.');
+    expect(refused.reason).not.toMatch(/no-show fee/);
+    expect(classifyVariation(service({ noShowFeeSeen: { amount: '1000', currency: 'AUD' } }), profile, confirmed, {}).reason).toMatch(/has a no-show fee/);
+  });
   it('reads a passthrough no_show_fee in either casing', () => {
     expect(noShowFeeFrom({ no_show_fee: { amount: 1000, currency: 'AUD' } })).toEqual({ amount: '1000', currency: 'AUD' });
     expect(noShowFeeFrom({ noShowFee: { amount: 500n, currency: 'AUD' } })).toEqual({ amount: '500', currency: 'AUD' });

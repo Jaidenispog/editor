@@ -1,8 +1,8 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, notInArray, sql } from 'drizzle-orm';
 import { AppError, NonRetryableError, type BusinessProfileApiState } from '@studio/core';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../../context.js';
-import { recordConnectionCheck, type ConnectionRow } from '../../lib/connections.js';
+import { recordConnectionCheck, type ConnectionCheckResult, type ConnectionRow, type DbTransaction } from '../../lib/connections.js';
 import { BusinessProfileError, isAccountName, isLocationName, type DiscoveredLocation } from '../../lib/google/business-profile.js';
 import { getGoogleAccessToken } from '../../lib/google/oauth.js';
 
@@ -53,13 +53,52 @@ export async function profileAccessToken(ctx: WorkerContext, signal: AbortSignal
   }
 }
 
-/** Merges keys into the row's config (only the keys given change). */
+/**
+ * The shared row while it is still signed in. Every write a Business Profile job makes to the row is limited to it,
+ * so a job still running when the owner disconnects can never switch the row back to connected or write its
+ * capabilities and config again.
+ */
+export function signedInRow() {
+  const t = schema.integrationConnections;
+  return and(eq(t.provider, PROVIDER), notInArray(t.status, ['disconnected', 'not_configured']));
+}
+
+/** Records a check's outcome on the shared row, unless the owner has disconnected it meanwhile. */
+export function recordProfileCheck(ctx: Pick<WorkerContext, 'db'>, result: ConnectionCheckResult, now: Date = new Date()): Promise<ConnectionRow | null> {
+  return recordConnectionCheck(ctx.db, PROVIDER, result, now, { unlessDisconnected: true });
+}
+
+/** Merges keys into the row's config (only the keys given change), unless the owner has disconnected it. */
 export async function mergeConfig(ctx: Pick<WorkerContext, 'db'>, patch: Record<string, unknown>, now: Date = new Date()): Promise<void> {
   const t = schema.integrationConnections;
   await ctx.db
     .update(t)
     .set({ config: sql`${t.config} || ${JSON.stringify(patch)}::jsonb`, updatedAt: now })
-    .where(eq(t.provider, PROVIDER));
+    .where(signedInRow());
+}
+
+/** Thrown when the owner disconnected the Business Profile, or chose another location, while a job was storing data. */
+export class ProfileStoppedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProfileStoppedError';
+  }
+}
+
+/**
+ * Runs `fn` (a batch of stored reviews or numbers) in a transaction holding the shared row `FOR SHARE`, only while it
+ * is still signed in and, when `location` is given, still set to that location. Disconnecting (and choosing a
+ * location) updates the row, so it waits for a batch in progress, and every later batch sees the change and stops:
+ * data the owner asked to delete is never written back.
+ */
+export async function whileSignedIn<T>(ctx: Pick<WorkerContext, 'db'>, location: string | null, fn: (tx: DbTransaction) => Promise<T>): Promise<T> {
+  return ctx.db.transaction(async (tx) => {
+    const t = schema.integrationConnections;
+    const row = (await tx.select({ status: t.status, config: t.config }).from(t).where(eq(t.provider, PROVIDER)).limit(1).for('share'))[0];
+    if (!row || row.status === 'disconnected' || row.status === 'not_configured') throw new ProfileStoppedError('Google Business Profile was disconnected; stopped without storing anything more.');
+    if (location !== null && row.config['location'] !== location) throw new ProfileStoppedError('Another Business Profile location was chosen; stopped without storing anything more for the old one.');
+    return fn(tx);
+  });
 }
 
 /** Which capability key an API answer is recorded under. */
@@ -77,7 +116,7 @@ export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: un
   const messageKey = api === 'apiAccess' ? 'apiAccessMessage' : 'performanceMessage';
   if (err.kind === 'transient') throw err;
   if (err.kind === 'awaiting_approval') {
-    await recordConnectionCheck(ctx.db, PROVIDER, {
+    await recordProfileCheck(ctx, {
       status: 'connected',
       capabilities: { [api]: 'awaiting_approval' satisfies BusinessProfileApiState, [messageKey]: null },
       ...(api === 'apiAccess' ? { lastError: null } : {}),
@@ -85,16 +124,16 @@ export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: un
     return 'awaiting_approval';
   }
   if (err.kind === 'reauth') {
-    await recordConnectionCheck(ctx.db, PROVIDER, { status: 'needs_reauth', lastError: err.message });
+    await recordProfileCheck(ctx, { status: 'needs_reauth', lastError: err.message });
     throw new NonRetryableError('INTEGRATION_NOT_CONFIGURED', err.message);
   }
   const state: BusinessProfileApiState = err.kind === 'api_disabled' ? 'api_disabled' : 'error';
   if (api === 'apiAccess') {
     if (err.kind === 'not_found') {
       await mergeConfig(ctx, { location: null, account: null, locationTitle: null });
-      await recordConnectionCheck(ctx.db, PROVIDER, { status: 'connected', lastError: err.message, capabilities: { apiAccess: 'available', apiAccessMessage: err.message } });
+      await recordProfileCheck(ctx, { status: 'connected', lastError: err.message, capabilities: { apiAccess: 'available', apiAccessMessage: err.message } });
     } else {
-      await recordConnectionCheck(ctx.db, PROVIDER, { status: 'error', lastError: err.message, capabilities: { apiAccess: state, apiAccessMessage: err.message } });
+      await recordProfileCheck(ctx, { status: 'error', lastError: err.message, capabilities: { apiAccess: state, apiAccessMessage: err.message } });
     }
   } else {
     // The reviews side may still work: only the Performance capability changes.
@@ -102,7 +141,7 @@ export async function handleProfileError(ctx: Pick<WorkerContext, 'db'>, err: un
     await ctx.db
       .update(t)
       .set({ capabilities: sql`${t.capabilities} || ${JSON.stringify({ performanceApi: state, performanceMessage: err.message })}::jsonb`, updatedAt: new Date() })
-      .where(eq(t.provider, PROVIDER));
+      .where(signedInRow());
   }
   throw new NonRetryableError(err.kind === 'unrecognised' ? 'PROCESSING_FAILED' : 'INTEGRATION_NOT_CONFIGURED', err.message);
 }

@@ -1,4 +1,4 @@
-import { GOOGLE_TOKEN_URL } from '../../src/lib/google/oauth.js';
+import { GOOGLE_REVOKE_URL, GOOGLE_TOKEN_URL } from '../../src/lib/google/oauth.js';
 import { fakeFetch, json, type FakeCall } from '../helpers/fakes.js';
 
 /** A Google review as the fake returns it (v4 `reviews.list` shape described in the email design §8.3). */
@@ -36,10 +36,21 @@ export function fakeBusinessProfile() {
     daily: {} as Record<string, Record<string, string | number | undefined>>,
     keywords: [] as Array<{ searchKeyword: string; insightsValue: Record<string, string> }>,
     refreshes: 0,
+    revoked: 0,
+    /** Leaves Google's averageRating and totalReviewCount out of the reviews answer. */
+    omitTotals: false,
+    /** Called before a reviews page is answered, with the page's offset (tests use it to act between pages). */
+    beforeReviewsPage: null as null | ((offset: number) => Promise<void>),
+    /** Called before the locations list is answered (tests use it to act while discovery runs). */
+    beforeLocations: null as null | (() => Promise<void>),
   };
   const quota = () => json(429, { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: "Quota exceeded for quota metric 'Requests' and limit 'Requests per minute'.", details: [{ metadata: { quota_limit_value: '0' } }] } });
-  const respond = (call: FakeCall): Response => {
+  const respond = async (call: FakeCall): Promise<Response> => {
     const url = new URL(call.url);
+    if (call.url === GOOGLE_REVOKE_URL) {
+      state.revoked++;
+      return json(200, {});
+    }
     if (call.url === GOOGLE_TOKEN_URL) {
       state.refreshes++;
       return state.grant === 'ok' ? json(200, { access_token: `access-${state.refreshes}`, expires_in: 3600, scope: 'https://www.googleapis.com/auth/business.manage' }) : json(400, { error: 'invalid_grant' });
@@ -75,10 +86,14 @@ export function fakeBusinessProfile() {
     }
     if (state.quotaZero) return quota();
     if (url.hostname === 'mybusinessaccountmanagement.googleapis.com' && url.pathname === '/v1/accounts') return json(200, { accounts: state.accounts.map((name) => ({ name, accountName: 'Studio' })) });
-    if (url.hostname === 'mybusinessbusinessinformation.googleapis.com' && url.pathname.endsWith('/locations')) return json(200, { locations: state.locations });
+    if (url.hostname === 'mybusinessbusinessinformation.googleapis.com' && url.pathname.endsWith('/locations')) {
+      if (state.beforeLocations) await state.beforeLocations();
+      return json(200, { locations: state.locations });
+    }
     if (url.hostname === 'mybusiness.googleapis.com' && url.pathname.endsWith('/reviews')) {
       const visible = state.reviews.filter((r) => !r.hidden).sort((a, b) => b.updateTime.localeCompare(a.updateTime));
       const offset = Number(url.searchParams.get('pageToken') ?? '0');
+      if (state.beforeReviewsPage) await state.beforeReviewsPage(offset);
       const page = visible.slice(offset, offset + state.pageSize);
       const more = offset + state.pageSize < visible.length;
       return json(200, {
@@ -94,8 +109,7 @@ export function fakeBusinessProfile() {
           ...(r.reviewReplyState ? { reviewReplyState: r.reviewReplyState } : {}),
           ...(r.policyViolation ? { policyViolation: r.policyViolation } : {}),
         })),
-        averageRating: 4.5,
-        totalReviewCount: visible.length,
+        ...(state.omitTotals ? {} : { averageRating: 4.5, totalReviewCount: visible.length }),
         ...(more ? { nextPageToken: String(offset + state.pageSize) } : {}),
       });
     }

@@ -58,7 +58,7 @@ export const GET = handleApi(async ({ req, user, session }) => {
     const followUp = googleFollowUpJob(product.data);
     if (followUp && isJobType(followUp.type)) {
       try {
-        await createTrackedJob({ type: followUp.type, payload: followUp.payload as never, projectId: null, singletonKey: `${followUp.type}:connect` });
+        await createTrackedJob({ type: followUp.type, payload: followUp.payload as never, projectId: null, singletonKey: followUp.singletonKey });
         return finish({ checking: product.data });
       } catch (err) {
         // The tokens are stored; the module's own daily check will pick the connection up.

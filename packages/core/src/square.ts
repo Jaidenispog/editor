@@ -267,8 +267,13 @@ export function classifyVariation(
   confirmations: SquareConnectionConfig['serviceConfirmations'],
   rejections: SquareConnectionConfig['serviceWriteRejections'],
 ): { label: SquareServiceLabel; reason: string } {
-  if (nonZero(service.noShowFeeSeen) || rejections[service.variationId]) {
+  if (nonZero(service.noShowFeeSeen)) {
     return { label: 'book_in_square', reason: 'Book in Square — this service has a no-show fee, which Square doesn’t allow apps to book.' };
+  }
+  const rejected = rejections[service.variationId];
+  if (rejected) {
+    // Square refused a change for it without saying why: the cause is not known, so no fee is claimed.
+    return { label: 'book_in_square', reason: `Book in Square — Square refused a change for this service (code ${rejected.code.slice(0, 60)}). Check it in Square, then confirm it again.` };
   }
   if (nonZero(businessProfile?.cancellationFee)) {
     return { label: 'unverified', reason: 'Not available from here — your Square no-show fee applies to every appointment. Book in Square.' };
