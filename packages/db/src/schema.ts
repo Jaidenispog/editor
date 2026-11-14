@@ -12,6 +12,7 @@ import {
   timestamp,
   uniqueIndex,
   bigint,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import type {
   AppSettings,
@@ -23,6 +24,10 @@ import type {
   PlanIssue,
   PlatformEligibility,
   ReferenceStyleProfile,
+  ApplyResult,
+  AuditSummary,
+  WebsiteAuditResult,
+  WebsiteChange,
   RenderBrandSnapshot,
   StyleSupport,
 } from '@studio/core';
@@ -822,19 +827,34 @@ export const reviews = pgTable(
   (t) => [uniqueIndex('reviews_provider_ext_idx').on(t.provider, t.externalReviewId)],
 );
 
+/** One website check (design `website-local-search.md` §5.2). At most one is queued or running (partial unique index). */
 export const websiteAudits = pgTable(
   'website_audits',
   {
     id: text('id').primaryKey(),
+    /** The site scope root the check read. */
     url: text('url').notNull(),
-    status: text('status', { enum: ['queued', 'running', 'complete', 'failed'] }).notNull().default('queued'),
-    result: jsonb('result').$type<Record<string, unknown> | null>(),
+    status: text('status', { enum: ['queued', 'running', 'complete', 'partial', 'failed', 'cancelled'] }).notNull().default('queued'),
+    /** The validated `WebsiteAuditResult`; cleared (null) for all but the 20 newest checks, which keep only `summary`. */
+    result: jsonb('result').$type<WebsiteAuditResult | null>(),
     error: text('error'),
+    requestedBy: text('requested_by').references(() => users.id, { onDelete: 'set null' }),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+    /** Counts by severity, pages checked/skipped and partial reasons, so history lists never load full results. */
+    summary: jsonb('summary').$type<Partial<AuditSummary>>().notNull().default({}),
     ...timestamps,
   },
-  (t) => [index('website_audits_created_idx').on(t.createdAt)],
+  (t) => [
+    index('website_audits_created_idx').on(t.createdAt),
+    // At most one queued or running check, enforced by the database (an insert conflict becomes a 409).
+    uniqueIndex('website_audits_one_active_idx')
+      .on(sql`(true)`)
+      .where(sql`${t.status} in ('queued', 'running')`),
+  ],
 );
 
+/** One prepared change to the website (design §5.2, lifecycle §6.9). Never applied without `approved_by`. */
 export const websiteEdits = pgTable(
   'website_edits',
   {
@@ -843,12 +863,34 @@ export const websiteEdits = pgTable(
     title: text('title').notNull(),
     rationale: text('rationale').notNull().default(''),
     pageUrl: text('page_url').notNull().default(''),
-    proposedChange: jsonb('proposed_change').$type<Record<string, unknown>>().notNull(),
-    status: text('status', { enum: ['proposed', 'approved', 'applied', 'rejected'] }).notNull().default('proposed'),
+    /** The `WebsiteChange` (kind, page, before, after). */
+    proposedChange: jsonb('proposed_change').$type<WebsiteChange>().notNull(),
+    status: text('status', { enum: ['proposed', 'approved', 'applying', 'applied', 'apply_failed', 'rejected', 'superseded'] }).notNull().default('proposed'),
     appliedVia: text('applied_via'),
     appliedAt: timestamp('applied_at', { withTimezone: true }),
+    source: text('source', { enum: ['audit_rule', 'ai_draft', 'owner', 'undo'] }).notNull().default('audit_rule'),
+    findingKey: text('finding_key'),
+    /** One open change per key (`editDedupeKey`); '' for changes that are never deduplicated. */
+    dedupeKey: text('dedupe_key').notNull().default(''),
+    approvedBy: text('approved_by').references(() => users.id, { onDelete: 'set null' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    /** Outcome, message and verification of an apply; never credentials or whole page content. */
+    applyResult: jsonb('apply_result').$type<ApplyResult>().notNull().default({}),
+    revertsEditId: text('reverts_edit_id').references((): AnyPgColumn => websiteEdits.id, { onDelete: 'set null' }),
+    /** Up to three validated AI wording options. */
+    aiOptions: jsonb('ai_options').$type<string[]>().notNull().default([]),
+    aiDraftedAt: timestamp('ai_drafted_at', { withTimezone: true }),
+    statusMessage: text('status_message').notNull().default(''),
+    /** `page_changed`, `finding_gone`, `conflict`, `not_found`, `auth`, `forbidden`, … */
+    statusReason: text('status_reason'),
     ...timestamps,
   },
+  (t) => [
+    uniqueIndex('website_edits_open_dedupe_idx')
+      .on(t.dedupeKey)
+      .where(sql`${t.status} in ('proposed', 'approved', 'applying', 'apply_failed') and ${t.dedupeKey} <> ''`),
+    index('website_edits_status_idx').on(t.status, t.createdAt),
+  ],
 );
 
 // ---------------------------------------------------------------------------------------------

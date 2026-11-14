@@ -326,4 +326,44 @@ Jobs: `email.send` (`stately`, key `email-send:{id}`), `email.dispatch` (every m
 
 ## Website and local search (Stage C, WP8)
 
+Owner-only (`requireOwner`; staff get 403), through `handleApi` (session + CSRF guard). Long work is always a worker
+job; no route calls the owner's website, WordPress or Google. Responses never contain tokens, passwords, page HTML or
+apply internals beyond `outcome`, `message` and `verification`. Shapes: `apps/web/src/components/website/types.ts`.
+
+| Method | Route | Body | Response / notes |
+| --- | --- | --- | --- |
+| GET | `/api/website` | — | `WebsiteOverviewDto`: setup checklist (website, host, ownership, missing details with what each enables, Business Profile comparison text), latest check and its validated result, "fixed since last check", active job, why "Check my website" is disabled, open changes, AI availability, the two connection cards, search word lists, platform hint |
+| POST | `/api/website/ownership` | `{ confirm: true }` | `{ host, confirmedAt }`; 400 without a website address. Sets the server-only `website.ownershipConfirmedHost/At`; audit `website.ownership.confirmed` |
+| PUT | `/api/website/profile-check` | `{ checked }` | `{ profileDetailsCheckedAt }` (manual comparison, no API call) |
+| POST | `/api/website/audits` | `{}` | 202 `{ audit, job }`; 400 setup incomplete; 409 "A check is already running" (database guard: partial unique index) or the 5-minute cool-down; audit `website.audit.requested` |
+| GET | `/api/website/audits` | `?limit=20` | `{ audits }` (summaries only) |
+| GET | `/api/website/audits/[id]` | — | `{ audit, result, fixedSinceLast }` (older checks keep only their summary) |
+| GET | `/api/website/edits` | `?status=open\|done\|dismissed` | `{ edits: WebsiteEditDto[] }` with `applyAvailable { ok, reason }`, copy-paste `instructions { text, markdown }`, AI options, verification |
+| POST | `/api/website/edits` | `{ kind: 'image_alt_text', pageUrl, imageSrc, after }` or `{ kind: 'text_replace', pageUrl, before, after }` | 201 `{ edit }`; the page must be in the latest check and `before` in its stored facts; 409 when an open change already exists |
+| PATCH | `/api/website/edits/[id]` | `{ after }` | `{ edit, warnings }`; kind limits (titles 10–70, descriptions 50–170); `checkCopyClaims` warnings are soft for the owner's text; source → `owner` |
+| POST | `/api/website/edits/[id]/draft` | `{}` | 202 `{ job }` (`website.copy_draft`); 422 when AI isn't configured or the kind isn't a title/description |
+| POST | `/api/website/edits/[id]/choose-draft` | `{ index: 0..2 }` | `{ edit }` (source `ai_draft`, always labelled) |
+| POST | `/api/website/edits/[id]/apply` | `{ confirm: true, expectedAfter }` | 202 `{ edit, job }`; 409 when the wording changed since the dialog opened; 422 without a connected adapter or for an unsupported kind. Sets `approved_by/at`; audit `website.edit.apply_requested` |
+| POST | `/api/website/edits/[id]/mark-done` | `{}` | `{ edit }`: `applied`, `applied_via = 'manual'`, verification `pending` (the next check confirms it) |
+| POST | `/api/website/edits/[id]/reject` | `{ reason? }` | `{ edit }` |
+| POST | `/api/website/edits/[id]/undo` | `{}` | 201 `{ edit }`: the reverse change (source `undo`), applied with the normal confirmation; only for WordPress-applied text and image descriptions |
+| GET | `/api/website/search-performance` | `?range=28d\|3m\|16m` | `SearchPerformanceDto`: `state` (not_configured / not_connected / choose_property / no_property / syncing / no_data / connected / needs_reauth / error), groups (brand, local, service, other) with impression-weighted average position, the "not listed" remainder, daily series, top 20 searches per group, `dataThrough`. Grouping happens when reading; no numbers unless Google returned rows |
+| POST | `/api/website/search-performance/sync` | `{ source: 'search_console' }` | 202 `{ job }`; 429 within 15 minutes of the last sync |
+| PUT | `/api/website/query-groups` | `{ brandTerms?, placeTerms?, serviceTerms? }` | `{ website }` |
+| PUT | `/api/integrations/google-search-console/property` | `{ siteUrl }` (one of the readable listed properties) | `{ property, job }` + queues `search.sync` (`connect`) |
+| POST | `/api/integrations/google-search-console/check` | `{}` | 202 `{ job }` (read-only) |
+| DELETE | `/api/integrations/google-search-console` | `?deleteData=true\|false` | 202; status `disconnected`, queues the shared `google.disconnect`, optionally deletes stored search numbers |
+| POST | `/api/integrations/website/wordpress` | `{ baseUrl (https), username, applicationPassword }` | 202 `{ state: 'checking', job }`; the credential is encrypted and never echoed |
+| POST | `/api/integrations/website/check` | `{}` | 202 `{ job }` (read-only) |
+| DELETE | `/api/integrations/website` | — | 204; wipes the credential; approved changes go back to "To review" |
+
+`PUT /api/settings` accepts `business.openingHours` (up to two ranges per day, `HH:MM`, closes after opens) and a
+`website` section, from which the server-only ownership fields are dropped. The shared Google routes
+(`/api/integrations/google/{connect,callback}?product=search_console`) now queue `website.connection_check`.
+
+Jobs (`packages/core/src/jobs/website.ts`): `website.audit { auditId }`, `website.edit_apply { editId }`,
+`website.copy_draft { editId }`, `website.connection_check { provider: 'google_search_console' | 'website', reason }`
+(read-only), `search.sync { source: 'search_console', reason: 'connect' | 'daily' | 'manual' }` (daily at 7:37 am
+Melbourne, key `search_console_daily`). All have `projectId = null`; payloads hold ids only.
+
 ## Google Business Profile (Stage C, WP9)

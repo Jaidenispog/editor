@@ -31,9 +31,10 @@ describe('integration statuses', () => {
     const expected = before.find((b) => b.name === name)?.statuses ?? [];
     // Cards added by Stage B/C modules are new; every Stage A card must still read exactly as before.
     // Instagram and TikTok were rewritten by the publishing module (WP4, design §5.3: manual-first wording),
-    // Square by the Square module (WP6, design §4.1 states; no "Needs setup:" prefix), and the Resend card was
-    // replaced by the email module's Postmark and Google rating cards (WP7, plan §10.1).
-    const replaced = new Set(['instagram', 'tiktok', 'square', 'email']);
+    // Square by the Square module (WP6, design §4.1 states; no "Needs setup:" prefix), the Resend card was replaced
+    // by the email module's Postmark and Google rating cards (WP7, plan §10.1), and Google Search Console by the
+    // website module (WP8, design §10.5: "Existing Search Console message text is replaced").
+    const replaced = new Set(['instagram', 'tiktok', 'square', 'email', 'google_search_console']);
     const legacy = now.filter((s) => !replaced.has(s.id) && expected.some((e) => e['id'] === s.id)).map(({ state: _s, liveMode: _l, verified: _v, ...rest }) => rest);
     expect(legacy).toEqual(expected.filter((e) => !replaced.has(String(e['id']))));
   });
@@ -158,7 +159,8 @@ describe('Google OAuth', () => {
 
   it('enqueues no follow-up job while the owning module has not registered it', () => {
     expect(googleFollowUpJob('business_profile')).toBeNull();
-    expect(googleFollowUpJob('search_console')).toBeNull();
+    // The website module (WP8) registers the Search Console check.
+    expect(googleFollowUpJob('search_console')).toEqual({ type: 'website.connection_check', payload: { provider: 'google_search_console', reason: 'connect' } });
   });
 });
 

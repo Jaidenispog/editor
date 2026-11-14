@@ -12,9 +12,10 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { StatusPill } from '@/components/ui/status-pill';
 import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
+import { OpeningHoursEditor } from '@/components/website/opening-hours-editor';
 import { useSaveSettings } from './use-save-settings';
 
-type FieldDef = { key: keyof BusinessConfig; label: string; type?: string; hint?: string; max: number; placeholder?: string; wide?: boolean };
+type FieldDef = { key: Exclude<keyof BusinessConfig, 'openingHours'>; label: string; type?: string; hint?: string; max: number; placeholder?: string; wide?: boolean };
 
 const GROUPS: Array<{ title: string; description: string; fields: FieldDef[] }> = [
   {
@@ -93,6 +94,17 @@ export function BusinessTab({ business, disabled }: { business: BusinessConfig; 
             </CardBody>
           </Card>
         ))}
+        <Card>
+          <CardHeader title="Opening hours" description="Optional. Used by the website check and the business details code it prepares. Up to two times a day; a day without hours shows as closed." />
+          <CardBody>
+            <OpeningHoursEditor
+              value={values.openingHours}
+              onChange={(openingHours) => setValues((s) => ({ ...s, openingHours }))}
+              disabled={disabled}
+              error={Object.entries(errors).find(([k]) => k.startsWith('openingHours'))?.[1] ?? null}
+            />
+          </CardBody>
+        </Card>
         <div className="flex justify-end">
           <Button type="submit" loading={saving} disabled={disabled}>
             Save business details

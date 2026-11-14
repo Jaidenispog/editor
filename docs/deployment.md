@@ -384,3 +384,14 @@ not allow it for this app setup, the card says "Not available" and everything el
   `email.provider.check` daily at 4:37 am and `reviews.places.sync` daily at 5:41 am Melbourne time. Press "Check
   connection" (Settings → Integrations) after setting Postmark up; the check never sends.
 - Start with a Postmark **Sandbox** server: everything it sends shows as "Test — not delivered".
+
+## Website and local search (Stage C, WP8)
+
+- No new server settings. The website check needs outbound HTTP(S) from the worker to the owner's site (and one HEAD
+  per checked external link); it never uses a proxy setting to reach private addresses.
+- Search Console reuses `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`: turn on "Google Search Console API" in the same
+  Google Cloud project, publish the OAuth consent screen to Production (in Testing Google signs you out every 7
+  days), and add `https://<app address>/api/integrations/google/callback` as a redirect address.
+- AI wording uses `AI_WEBSITE_MODEL` (default `claude-haiku-5-5`) only when `AI_PROVIDER=anthropic`.
+- WordPress needs nothing on the server: the owner enters the site address and an Application Password in
+  Settings → Integrations.

@@ -312,3 +312,35 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   restrict sending or update delivery display; campaigns pause automatically above 0.1% complaints or 5% bounces.
 - **Reviews**: the owner's pasted review link (never built by the app), a tracked `/r/{token}` redirect that never
   branches, requests tracked separately from reviews, and the Places API rating (latest snapshot only, daily).
+
+## Website and local search (Stage C, WP8)
+
+- **Contracts** (`packages/core/src/website.ts`, `website-checks.ts`, `robots.ts`): the stored `WebsiteAuditResult`
+  and `WebsiteChange` schemas, the `website` settings section and `business.openingHours`, site scope and URL
+  normalisation, Australian phone numbers, the ~50-check catalogue (`runWebsiteChecks`), prioritisation
+  (`prioritiseFindings`, "Do these first"; no overall score), suggestions built only from Settings (titles,
+  descriptions, `HairSalon` JSON-LD that omits unknown fields), `classifyQuery`, `checkCopyClaims`, copy-paste
+  instructions and the change lifecycle (dedupe key, refresh, supersede, verification). All pure and unit tested.
+- **Crawler** (`apps/worker/src/website/`): `fetcher.ts` is a stricter HTTP client than `lib/http.ts` — GET/HEAD only,
+  no cookies or auth, every host resolved and refused if any address is private/reserved (`ssrf.ts`), the connection
+  pinned to the checked address, ports 80/443 only, redirects followed by hand (≤ 5, each re-validated), size and time
+  caps, ≤ 400 requests per check and polite spacing (500 ms, or robots.txt `Crawl-delay`). `crawl.ts` reads robots.txt
+  (RFC 9309), host variants, the root, the sitemap (fast-xml-parser, entities off), ≤ 25 HTML pages breadth-first,
+  image sizes, links and a soft-404 probe. `extract.ts` parses pages with cheerio as data only. Tests inject a
+  loopback policy in code; there is no environment variable that loosens the guard.
+- **Changes**: `website.audit` stores the validated result and summary and refreshes prepared changes in one
+  transaction (`changes.ts`): one open change per dedupe key (partial unique index), owner/AI wording kept, superseded
+  when the finding is gone or the page changed, applied changes verified from the next check.
+- **Apply** (`apply.ts`, `adapters/wordpress.ts`): only after the owner's explicit confirmation (`approved_by`). The old
+  text must occur exactly once; a retry after a write that already landed reports `already_applied` (no second write);
+  read-back through WordPress, then a public read through the guarded fetcher. Only page text and image descriptions
+  are written through core WordPress; titles, descriptions, structured data, header code and robots.txt stay
+  copy-paste. A WordPress host other than the public website is labelled `staging`.
+- **Search Console** (`lib/google/search-console.ts`, `handlers/search-sync.ts`): read-only (`webmasters.readonly`),
+  `sites.list` then auto-select (Domain property first), 16-month backfill in 31-day windows, 10-day refresh, idempotent
+  upserts into `search_metrics`. Grouping (brand / local / service / other / not listed) happens when reading
+  (`apps/web/src/lib/website.ts`), so edited word lists apply to all history.
+- **AI wording** (`packages/ai/src/website-copy.ts`): only on the owner's click, Haiku, page text as delimited data,
+  structured output, options filtered by `checkCopyClaims`; `null` (button hidden) unless `AI_PROVIDER=anthropic`.
+- **Not built here (WP9):** Business Profile Performance (`search.sync` source `business_profile`, its connection
+  check branch and card) — they extend the payload enums in a backwards-compatible way.

@@ -65,8 +65,10 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
 - The design: webhooks (Square first) are verified by their HMAC signature before anything is processed, and
   stored once per provider event id in `webhook_events` (unique index), so a replayed delivery is ignored.
 - `SQUARE_WEBHOOK_SIGNATURE_KEY` holds the key.
-- **Status:** the `webhook_events` table exists, but **no webhook endpoint is built yet** (Square is a Stage C
-  integration). Until it is, the app accepts no webhooks at all.
+- **Status:** two webhook endpoints are built. `POST /api/webhooks/square` checks Square's HMAC signature in constant
+  time and only queues a re-read from Square (see "Square appointments" below); `POST /api/webhooks/postmark` checks
+  long random Basic credentials in constant time and may only restrict sending (see "Email and review requests"
+  below). An invalid delivery is refused and never stored; a replayed one is stored once.
 
 ## Data deletion
 
@@ -223,3 +225,26 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
 - **Retention**: `email_messages`, `consent_events` and `email_suppressions` are kept at least 24 months and survive a
   client's soft delete (suppressions must keep working). Processed Postmark webhook payloads are blanked after 90 days
   (`maintenance.cleanup`); their effects stay.
+
+## Website and local search (Stage C, WP8)
+
+- **Owner only**: every website route and the Website page; staff see a plain notice.
+- **Ownership binding**: checks run only against the host the owner confirmed ("This is my business's own website");
+  the confirmation is server-set (`PUT /api/settings` drops it) and is cleared in effect when the website address
+  changes host.
+- **SSRF guard** (`apps/worker/src/website/ssrf.ts`, `fetcher.ts`): the crawler resolves every host and refuses it if
+  any address is in 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.168/16, 198.18/15, multicast,
+  reserved, ::1, fc00::/7, fe80::/10 or an IPv4-mapped private address; it connects to the checked address only (no
+  DNS rebinding), uses ports 80/443 only and re-validates every redirect. The owner-entered WordPress address goes
+  through the same resolver check. Only test code can allow loopback; no setting turns the guard off.
+- **Fetched pages are data**: parsed with cheerio into capped fields, never executed; nothing on a page is followed
+  except plain links in scope; React renders every string as text. The optional AI step wraps page text in a JSON
+  field declared untrusted, uses structured output and drops options with ranking claims, other phone numbers or
+  addresses; AI text is never applied without the owner choosing it and confirming Apply.
+- **WordPress credential**: `username:applicationPassword` encrypted with AES-256-GCM in `integration_connections`,
+  decrypted only in the worker, never echoed, logged or audited; HTTPS only. A dedicated Editor user is recommended
+  (an Administrator gets a note). Disconnect wipes it; deleting the Application Password in WordPress revokes it.
+- **No live change without the owner**: connection checks are read-only; apply needs `approved_by` from the explicit
+  confirmation; a retry never writes twice (`already_applied`). Search Console is read-only (`webmasters.readonly`).
+- **Privacy**: checks store extracted facts, never page HTML or images. Search queries stay server-side and owner-only
+  and can be deleted on disconnect ("Also delete stored search data").

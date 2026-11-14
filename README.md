@@ -29,7 +29,9 @@ Australian English, AUD, `Australia/Melbourne`.
 | Trends: curated (sourced, dated), noted by staff, YouTube AU chart; no "trending" claims | Yes (WP3) | Unit and database tests with a fake YouTube API; curated and noted labels in the Stage B browser test | `YOUTUBE_API_KEY` for the chart (optional) |
 | Instagram hashtag watch (WP5) | Yes | Yes, against the fake of Meta (unit, database and Stage B browser tests) | A connected Instagram account and Meta's hashtag search permission |
 | Square appointments, read-only: bookings, clients, services, free times, attendance estimate and marks (WP6) | Yes | Yes, against a local fake of Square through the real SDK (unit, database and route tests); nothing written to Square | A Square developer application (sandbox first), then the live account |
-| TikTok direct, Square, email, Google reviews, website tools (Stage C) | TikTok: manual posting only; the rest "Needs setup" screens | — | TikTok (optional Zernio route), Square, Resend, Google accounts |
+| Email and review requests: Postmark, consent ledger, send gate, review link and requests, Google rating (WP7) | Yes | Yes, against a fake email provider and a fake Google API (unit, database and route tests); no real email sent | A domain with DNS access, a Postmark account and its approval, the review link; optionally a Google Maps key and Place ID |
+| Website check, prepared changes, WordPress apply, Search Console (WP8) | Yes | Yes, against a local fixture site, a fake WordPress REST API and a fake Google (unit, database and route tests); no real site, WordPress or Google contacted | The owner's site builder and an Application Password if it is WordPress; Search Console verification and connection; the owner's first check |
+| TikTok direct, Square booking changes, Google Business Profile reviews and performance (Stage C, G5) | TikTok: manual posting only; the rest "Needs setup" screens | — | TikTok (optional Zernio route), Square, Google accounts |
 
 **Not yet done:**
 
@@ -38,7 +40,9 @@ Australian English, AUD, `Australia/Melbourne`.
 - Anything against the owner's **real accounts**: no real Instagram post, hashtag read, YouTube chart fetch or AI
   call has been made. Stage B passes its browser test (`bash apps/web/e2e/run-stage-b.sh`) on synthetic footage
   with a local fake of Meta only (`docs/testing.md`, "Stage B browser test").
-- Stage C (Square appointments, email, reviews, website and local search).
+- The rest of Stage C: Square booking changes (WP6b), Google Business Profile reviews and performance (WP9) and
+  TikTok via Zernio (WP10). Square appointments, email and review requests, and the website tools are built and
+  verified with fakes only.
 
 ## Quick start (local, no Docker)
 

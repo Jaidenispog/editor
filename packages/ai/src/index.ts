@@ -30,3 +30,4 @@ export {
 } from './transcription/deepgram.js';
 export { audioMimeType } from './transcription/audio-mime.js';
 export { AnthropicTextEstimator, TextEstimateWireSchema, TEXT_ESTIMATE_SYSTEM_PROMPT, TEXT_ESTIMATE_MAX_FRAMES, type OnScreenTextEstimator, type TextEstimateFrame, type TextEstimateResult, type AnthropicTextEstimatorOptions } from './anthropic/text-estimate.js';
+export { AnthropicWebsiteCopywriter, WebsiteCopyWireSchema, WEBSITE_COPY_SYSTEM_PROMPT, WEBSITE_COPY_DEFAULT_MODEL, WEBSITE_COPY_MAX_TOKENS, createWebsiteCopywriter, filterCopyOptions, type WebsiteCopywriter, type WebsiteCopyInput, type WebsiteCopyResult, type WebsiteCopyEnv } from './website-copy.js';

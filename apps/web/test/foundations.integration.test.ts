@@ -157,7 +157,8 @@ suite('Stage B/C foundations (database-backed)', () => {
     expect(done.status).toBe(302);
     const back = new URL(done.headers.get('location') ?? '');
     expect(back.pathname).toBe('/settings');
-    expect(Object.fromEntries(back.searchParams)).toEqual({ tab: 'integrations', connected: 'search_console' });
+    // The website module (WP8) registered the read-only follow-up check, so the page says it is checking.
+    expect(Object.fromEntries(back.searchParams)).toEqual({ tab: 'integrations', checking: 'search_console' });
     expect(done.headers.get('set-cookie')).toMatch(/sa_oauth_google=;.*Max-Age=0/i);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(String(fetchSpy.mock.calls[0]?.[0])).toBe('https://oauth2.googleapis.com/token');
@@ -168,8 +169,8 @@ suite('Stage B/C foundations (database-backed)', () => {
     expect(decryptToken(row?.accessTokenEncrypted ?? '')).toBe('ya29.access');
     expect(decryptToken(row?.refreshTokenEncrypted ?? '')).toBe('1//refresh');
     expect(await getDb().query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'google_business_profile') })).toBeUndefined();
-    // The follow-up check belongs to the website package; until it registers its job type nothing is queued.
-    expect(await getDb().select().from(schema.jobs).where(eq(schema.jobs.type, 'website.connection_check'))).toHaveLength(0);
+    // The follow-up check is the website package's read-only `website.connection_check` (one job).
+    expect(await getDb().select().from(schema.jobs).where(eq(schema.jobs.type, 'website.connection_check'))).toHaveLength(1);
     const audits = await getDb().select().from(schema.auditLog).where(eq(schema.auditLog.entityType, 'integration_connection'));
     expect(audits.map((a) => a.action)).toEqual(expect.arrayContaining(['integration.google_search_console.connect_started', 'integration.google_search_console.connected']));
     expect(JSON.stringify(audits)).not.toMatch(/ya29|1\/\/refresh|auth-code/);
