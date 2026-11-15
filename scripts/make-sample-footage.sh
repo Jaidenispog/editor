@@ -11,6 +11,8 @@ FONT="${SAMPLE_FONT:-$DEFAULT_FONT}"
 label() { # $1 text
   echo "drawtext=fontfile=$FONT:text='$1':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.5:boxborderw=20"
 }
+# Every source below is deterministic: FFmpeg's gradients and noise sources pick random colours, positions and noise
+# unless told otherwise, so every run makes the same footage and test results reproduce.
 # 1. Portrait H.264 1080x1920 with stereo audio tone (like an iPhone MP4), 12 s, moving pattern
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=size=1080x1920:rate=30:duration=12" \
   -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=12" \
@@ -18,18 +20,19 @@ ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=size=1080x1920:rate
 # 2. Landscape 1920x1080 HEVC 10-bit HLG HDR, then remuxed with an iPhone-style display-matrix rotation (-90 = rotate
 #    90 degrees clockwise for display) so the clip must be auto-rotated to portrait, 10 s, mono audio
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc=size=1920x1080:rate=30:duration=10" \
-  -f lavfi -i "anoisesrc=color=pink:sample_rate=48000:duration=10:amplitude=0.1" \
+  -f lavfi -i "anoisesrc=color=pink:sample_rate=48000:duration=10:amplitude=0.1:seed=1" \
   -vf "$(label 'SAMPLE B  rotated  HEVC HLG')" -c:v libx265 -preset ultrafast -crf 24 -pix_fmt yuv420p10le \
   -x265-params "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:range=limited" \
   -color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc -tag:v hvc1 \
   -c:a aac -ac 1 -b:a 96k -shortest "$OUT/.sample_b_landscape.mov"
 ffmpeg -hide_banner -loglevel error -y -display_rotation -90 -i "$OUT/.sample_b_landscape.mov" -c copy -map 0 "$OUT/sample_b_rotated_hevc_hlg.mov"
 rm -f "$OUT/.sample_b_landscape.mov"
-# 3. Short portrait clip WITHOUT audio, with two obvious scene changes (colour bars -> smpte -> gradient), 6 s
+# 3. Short portrait clip WITHOUT audio, with two obvious scene changes (colour bars -> smpte -> gradient), 6 s.
+#    The gradient is bright green (lime to green, corner to corner): logo.test.ts relies on that ending.
 ffmpeg -hide_banner -loglevel error -y \
   -f lavfi -i "color=c=0x224466:size=1080x1920:rate=30:duration=2" \
   -f lavfi -i "smptebars=size=1080x1920:rate=30:duration=2" \
-  -f lavfi -i "gradients=size=1080x1920:rate=30:duration=2:speed=0.5" \
+  -f lavfi -i "gradients=size=1080x1920:rate=30:duration=2:speed=0.5:c0=0x76ff03:c1=0x00c853:x0=0:y0=0:x1=1079:y1=1919:seed=1" \
   -filter_complex "[0:v][1:v][2:v]concat=n=3:v=1:a=0,$(label 'SAMPLE C  no audio  3 scenes')[v]" -map "[v]" \
   -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p "$OUT/sample_c_noaudio_scenes.mp4"
 # 4. Very short clip (1.2 s) to exercise "incomplete footage" handling
