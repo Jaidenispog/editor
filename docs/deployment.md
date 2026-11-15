@@ -351,6 +351,20 @@ not allow it for this app setup, the card says "Not available" and everything el
   `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` are not used (no direct TikTok API for a private app).
 - The worker schedules `publish.dispatch` every minute and `social.check` daily at 4:23 am Melbourne time.
 
+### TikTok through Zernio (Stage C, WP10, optional)
+
+- Off unless `TIKTOK_PUBLISH_PROVIDER=zernio` and `ZERNIO_API_BASE_URL=https://zernio.com/api` are set. Then the owner
+  pastes a Zernio API key in Settings → Integrations → TikTok and chooses the TikTok account.
+- Outbound HTTPS from the worker to `zernio.com` and to the upload host Zernio hands out in each presign answer (its
+  example is an `r2.cloudflarestorage.com` address; the worker refuses private addresses and redirects). The web app
+  never calls Zernio.
+- Optional webhooks: generate 32 random bytes for `ZERNIO_WEBHOOK_SECRET` (`openssl rand -hex 32`) and register
+  `https://<app address>/api/webhooks/zernio` in Zernio with that secret and the events `post.platform.published`,
+  `post.platform.failed`, `post.published`, `post.partial`, `post.failed`, `post.tiktok.url_resolved` and
+  `account.disconnected`. Without webhooks the worker polls (to 50 hours), so they only make updates faster.
+- No migration and no new job type (Zernio reuses `publish.target`, `publish.poll`, `social.check` and
+  `webhook.process`).
+
 ## Square appointments (Stage C, WP6 and WP6b)
 
 - Needs `SQUARE_APPLICATION_ID` and `SQUARE_APPLICATION_SECRET` (Developer Console → OAuth, sandbox tab first) and

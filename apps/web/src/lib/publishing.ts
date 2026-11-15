@@ -1,5 +1,6 @@
 import 'server-only';
-import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   AppError,
@@ -7,10 +8,14 @@ import {
   META_ONLY_LABEL,
   STYLES,
   TARGET_PLATFORM_NAMES,
+  TIKTOK_INTERACTION_LABELS,
+  ZERNIO_DAILY_VIDEO_CAP,
   checkPublishEligibility,
   computeTimeline,
   defaultCoverTimeSec,
   derivePostStatus,
+  disabledInteractionChoices,
+  interactionSeedsFrom,
   manualStepMessage,
   melbourneScheduleLabel,
   methodVariantRefusal,
@@ -22,6 +27,7 @@ import {
   targetActionsFor,
   validateCaption,
   validatePostLink,
+  zernioWebhookEnvelope,
   type ApprovePublishPostsSchema,
   type CreatePublishPostItem,
   type CreatePublishPosts,
@@ -34,6 +40,7 @@ import {
   type StyleId,
   type TargetPlatform,
   type TargetStatus,
+  type ZernioConsent,
 } from '@studio/core';
 import { testOnlyBaseUrl } from '@studio/config';
 import { schema, type Database, type EditVersion } from '@studio/db';
@@ -44,6 +51,7 @@ import { encryptToken } from './crypto.js';
 import { getDb } from './db.js';
 import { getEnv } from './env.js';
 import { recordFeedback, scheduleRecompute } from './feedback.js';
+import { storeWebhookEvent } from './webhooks.js';
 import { createTrackedJob } from './jobs.js';
 import { getLogger } from './logger.js';
 import { downloadNameFor, maybeSignedUrl, signedUrlFor } from './media-links.js';
@@ -62,6 +70,9 @@ import type {
   SocialAccountDto,
   TargetDto,
   TargetMediaDto,
+  ZernioAccountDto,
+  ZernioCandidateDto,
+  ZernioConnectionDto,
 } from './shared/publishing-dto.js';
 
 type PostRow = typeof schema.publishPosts.$inferSelect;
@@ -145,7 +156,7 @@ function metaConfigured(): boolean {
 }
 
 /** The methods the composer offers for each platform. "Post it yourself" is always available. */
-function methodOptions(account: AccountRow | null, handles: { instagram: string; tiktok: string }): Record<TargetPlatform, MethodOption[]> {
+function methodOptions(account: AccountRow | null, handles: { instagram: string; tiktok: string }, tiktokSetup: ZernioSetup = { account: null, connectionStatus: null }): Record<TargetPlatform, MethodOption[]> {
   const igHandle = account?.username ? `@${account.username}` : handleLabel(handles.instagram, 'instagram');
   const instagram: MethodOption[] = [];
   if (account && metaConfigured()) {
@@ -166,8 +177,13 @@ function methodOptions(account: AccountRow | null, handles: { instagram: string;
     }
   }
   instagram.push({ method: 'manual', available: true, isVerification: false, handle: handleLabel(handles.instagram, 'instagram') });
-  const tiktok: MethodOption[] = [{ method: 'manual', available: true, isVerification: false, handle: handleLabel(handles.tiktok, 'tiktok') }];
+  const tiktok: MethodOption[] = [...zernioMethodOptions(tiktokSetup), { method: 'manual', available: true, isVerification: false, handle: handleLabel(handles.tiktok, 'tiktok') }];
   return { instagram, tiktok };
+}
+
+/** Both platforms' method options, with the accounts read from the database. */
+async function allMethodOptions(db: Database | Tx, handles: { instagram: string; tiktok: string }): Promise<Record<TargetPlatform, MethodOption[]>> {
+  return methodOptions(await instagramAccount(db), handles, await zernioSetup(db));
 }
 
 /** Prior targets of versions on each platform (for the "already posted" warning and the duplicate rule). */
@@ -192,7 +208,8 @@ export async function getPublishingEligibility(versionIds: string[], user: Sessi
   const settings = await getSettings();
   const handles = { instagram: settings.business.instagramHandle, tiktok: settings.business.tiktokHandle };
   const account = await instagramAccount(db);
-  const methods = methodOptions(account, handles);
+  const tiktokSetup = await zernioSetup(db);
+  const methods = methodOptions(account, handles, tiktokSetup);
   const prior = await priorTargets(db, ids);
   const items: EligibilityItemDto[] = [];
   for (const id of ids) {
@@ -223,7 +240,10 @@ export async function getPublishingEligibility(versionIds: string[], user: Sessi
   const caps = account?.capabilities ?? {};
   return {
     items,
-    quota: account && typeof caps['quotaUsage'] === 'number' ? { instagram: { usage: caps['quotaUsage'], total: typeof caps['quotaTotal'] === 'number' ? caps['quotaTotal'] : null, checkedAt: typeof caps['quotaCheckedAt'] === 'string' ? caps['quotaCheckedAt'] : null } } : {},
+    quota: {
+      ...(account && typeof caps['quotaUsage'] === 'number' ? { instagram: { usage: caps['quotaUsage'], total: typeof caps['quotaTotal'] === 'number' ? caps['quotaTotal'] : null, checkedAt: typeof caps['quotaCheckedAt'] === 'string' ? caps['quotaCheckedAt'] : null } } : {}),
+      ...(zernioOn() && tiktokSetup.account ? { zernio: { last24h: await zernioVideosLast24h(db, tiktokSetup.account.id), cap: ZERNIO_DAILY_VIDEO_CAP } } : {}),
+    },
     captionFooter: settings.publishing.captionFooter,
     canApprove: user.role === 'owner',
   };
@@ -249,8 +269,8 @@ export async function listCandidateVersions(user: SessionUser, limit = 30): Prom
 /** Checks one destination against the music rule and the methods on offer; returns its account and verification flag. */
 function checkTarget(t: PublishTargetInput, e: PlatformEligibility | undefined, options: MethodOption[]): { accountId: string | null; isVerification: boolean } {
   if (!e) throw new AppError('VALIDATION', 'Choose Instagram or TikTok.');
-  if (t.method === 'zernio') throw new AppError('UNSUPPORTED', 'Automatic TikTok posting is not available yet. Choose "Post it yourself".');
-  const option = options.find((o) => o.method === t.method);
+  if (t.method === 'zernio' && !zernioOn()) throw new AppError('UNSUPPORTED', 'Automatic TikTok posting through Zernio is switched off on this server. Choose "Post it yourself".');
+  const option = options.find((o) => o.method === t.method && (t.method !== 'zernio' || (o.delivery ?? 'publish') === t.delivery));
   if (!option || !option.available) throw new AppError('VALIDATION', option?.reason ?? `That way of posting to ${TARGET_PLATFORM_NAMES[t.platform]} isn't available. Choose "Post it yourself".`);
   const refusal = methodVariantRefusal(e, t.method, t.variant);
   if (refusal) throw new AppError('VALIDATION', refusal);
@@ -293,7 +313,7 @@ async function assertNoRepeat(db: Database | Tx, versionId: string, platforms: T
 export async function createPublishPosts(input: CreatePublishPosts, user: SessionUser, now: Date = new Date()): Promise<{ posts: PublishPostDto[] }> {
   const db = getDb();
   const settings = await getSettings();
-  const methods = methodOptions(await instagramAccount(db), { instagram: settings.business.instagramHandle, tiktok: settings.business.tiktokHandle });
+  const methods = await allMethodOptions(db, { instagram: settings.business.instagramHandle, tiktok: settings.business.tiktokHandle });
   const resolved: Array<{ item: CreatePublishPostItem } & Awaited<ReturnType<typeof resolveItem>>> = [];
   for (const item of input.items) {
     const r = await resolveItem(db, item, user, methods, now);
@@ -351,9 +371,7 @@ export async function approvePublishPosts(input: z.infer<typeof ApprovePublishPo
     if (post.approvedAt) continue;
     if (post.status !== 'draft') throw new AppError('CONFLICT', 'This post can no longer be approved.');
     const targets = await db.query.publishTargets.findMany({ where: eq(schema.publishTargets.postId, post.id) });
-    if (targets.some((t) => t.method === 'zernio') && input.consent?.tiktokPublic !== true) {
-      throw new AppError('VALIDATION', 'Tick the box to confirm you have watched the video and want it posted publicly to TikTok.');
-    }
+    const consents = await zernioConsentsFor(db, post, targets, input.consent, user, now);
     if (post.mode === 'scheduled' && (!post.scheduledFor || post.scheduledFor.getTime() < now.getTime() + 60_000)) {
       throw new AppError('VALIDATION', 'The scheduled time has passed. Choose a new time, then approve.');
     }
@@ -381,6 +399,10 @@ export async function approvePublishPosts(input: z.infer<typeof ApprovePublishPo
       .returning({ id: schema.publishPosts.id });
     if (approved.length === 0) continue;
     await db.update(schema.publishTargets).set({ statusMessage: post.mode === 'scheduled' ? 'Preparing for the scheduled time…' : 'Preparing the full-quality video…', updatedAt: now }).where(eq(schema.publishTargets.postId, post.id));
+    // The consent and the exact choices the owner approved, bound to each Zernio destination (the worker re-checks them).
+    for (const [targetId, consent] of consents) {
+      await db.update(schema.publishTargets).set({ providerState: sql`${schema.publishTargets.providerState} || ${JSON.stringify({ consent })}::jsonb` }).where(eq(schema.publishTargets.id, targetId));
+    }
     await writeAudit({ userId: user.id, action: 'publish.approved', entityType: 'publish_post', entityId: post.id, data: { mode: post.mode, targets: targets.map((t) => ({ platform: t.platform, method: t.method, variant: t.mediaVariant, isVerification: t.isVerification })) } });
     await createTrackedJob({ type: 'publish.prepare', payload: { postId: post.id, projectId: post.projectId }, projectId: post.projectId, singletonKey: `publish-prepare:${post.id}` });
   }
@@ -432,7 +454,7 @@ export async function patchPublishPost(postId: string, input: z.infer<typeof Pat
     const platforms = input.targets.map((t) => t.platform);
     if (new Set(platforms).size !== platforms.length) throw new AppError('VALIDATION', 'Choose each platform once.');
     const settings = await getSettings();
-    const methods = methodOptions(await instagramAccount(db), { instagram: settings.business.instagramHandle, tiktok: settings.business.tiktokHandle });
+    const methods = await allMethodOptions(db, { instagram: settings.business.instagramHandle, tiktok: settings.business.tiktokHandle });
     newTargets = input.targets.map((t) => ({ ...t, ...checkTarget(t, e.perPlatform.find((p) => p.platform === t.platform), methods[t.platform]) }));
     if (post.mode === 'draft_handoff' && newTargets.some((t) => t.method !== 'manual')) throw new AppError('VALIDATION', 'Prepare for manual posting needs every destination set to "Post it yourself".');
   }
@@ -543,7 +565,9 @@ async function toDtos(posts: PostRow[]): Promise<PublishPostDto[]> {
 
 function toTargetDto(t: TargetRow, account: AccountRow | null, confirmedByName: string | null, business: { instagramHandle: string; tiktokHandle: string }): TargetDto {
   const handle = account?.username ? `@${account.username}` : handleLabel(t.platform === 'instagram' ? business.instagramHandle : business.tiktokHandle, t.platform);
-  const verifiedAt = account?.capabilities['verifiedDirectAt'];
+  const isDraftMethod = t.method === 'zernio' && t.delivery === 'draft';
+  const verifiedAt = account?.capabilities[isDraftMethod ? 'verifiedDraftAt' : 'verifiedDirectAt'];
+  const draftHandedOver = isDraftMethod && t.status === 'manual_step_required' && t.manualStep === 'finish_in_tiktok_app';
   return {
     id: t.id,
     platform: t.platform,
@@ -560,7 +584,7 @@ function toTargetDto(t: TargetRow, account: AccountRow | null, confirmedByName: 
     attempts: t.attempts,
     isVerification: t.isVerification,
     accountId: t.accountId,
-    awaitingVerificationAnswer: t.isVerification && t.status === 'published' && !verifiedAt && t.providerState['verificationAnswer'] === undefined,
+    awaitingVerificationAnswer: t.isVerification && (t.status === 'published' || draftHandedOver) && !verifiedAt && t.providerState['verificationAnswer'] === undefined,
     actions: targetActionsFor({
       status: t.status,
       method: t.method,
@@ -842,14 +866,17 @@ export async function recordVerification(accountId: string, input: { result: 'se
   const account = await db.query.socialAccounts.findFirst({ where: eq(schema.socialAccounts.id, accountId) });
   const target = await db.query.publishTargets.findFirst({ where: eq(schema.publishTargets.id, input.targetId) });
   if (!account) throw new AppError('NOT_FOUND', 'That account could not be found.');
-  if (!target || target.accountId !== account.id || !target.isVerification || target.status !== 'published') {
+  const draftVerification = target?.method === 'zernio' && target.delivery === 'draft';
+  const answerable = target && (target.status === 'published' || (draftVerification && target.status === 'manual_step_required' && target.manualStep === 'finish_in_tiktok_app'));
+  if (!target || target.accountId !== account.id || !target.isVerification || !answerable) {
     throw new AppError('CONFLICT', 'Only a published first verification post can be confirmed.');
   }
   const now = new Date().toISOString();
   if (input.result === 'seen') {
+    const marker = draftVerification ? { verifiedDraftAt: now, draftVerificationTargetId: target.id } : { verifiedDirectAt: now, verificationTargetId: target.id };
     await db
       .update(schema.socialAccounts)
-      .set({ capabilities: sql`${schema.socialAccounts.capabilities} || ${JSON.stringify({ verifiedDirectAt: now, verificationTargetId: target.id })}::jsonb`, updatedAt: new Date() })
+      .set({ capabilities: sql`${schema.socialAccounts.capabilities} || ${JSON.stringify(marker)}::jsonb`, updatedAt: new Date() })
       .where(eq(schema.socialAccounts.id, account.id));
   }
   await db
@@ -870,6 +897,21 @@ export async function setDirectPublishing(accountId: string, enabled: boolean, u
   await db.update(schema.socialAccounts).set({ directPublishEnabled: enabled, updatedAt: new Date() }).where(eq(schema.socialAccounts.id, account.id));
   await writeAudit({ userId: user.id, action: `social_account.direct_publish.${enabled ? 'enabled' : 'disabled'}`, entityType: 'social_account', entityId: account.id, data: { platform: account.platform } });
   return toAccountDto({ ...account, directPublishEnabled: enabled });
+}
+
+/** PATCH /api/social-accounts/[id] `draftsEnabled` (owner): "Send to TikTok drafts" through Zernio, only after a confirmed draft verification. */
+export async function setDraftsEnabled(accountId: string, enabled: boolean, user: SessionUser): Promise<SocialAccountDto> {
+  requireOwner(user);
+  const db = getDb();
+  const account = await db.query.socialAccounts.findFirst({ where: eq(schema.socialAccounts.id, accountId) });
+  if (!account || account.provider !== 'zernio') throw new AppError('NOT_FOUND', 'That TikTok account could not be found.');
+  if (enabled && !account.capabilities['verifiedDraftAt']) throw new AppError('CONFLICT', 'Send a first draft through Zernio and confirm it reached your TikTok inbox before switching drafts on.');
+  await db
+    .update(schema.socialAccounts)
+    .set({ capabilities: sql`${schema.socialAccounts.capabilities} || ${JSON.stringify({ draftsEnabled: enabled })}::jsonb`, updatedAt: new Date() })
+    .where(eq(schema.socialAccounts.id, account.id));
+  await writeAudit({ userId: user.id, action: `social_account.drafts.${enabled ? 'enabled' : 'disabled'}`, entityType: 'social_account', entityId: account.id, data: { platform: account.platform } });
+  return toAccountDto({ ...account, capabilities: { ...account.capabilities, draftsEnabled: enabled } });
 }
 
 function num(v: unknown): number | null {
@@ -1128,4 +1170,310 @@ export async function cleanUpProjectPosts(projectId: string): Promise<number> {
     }
   }
   return removed;
+}
+
+// ---------------------------------------------------------------------------------------------
+// TikTok through Zernio (optional, behind TIKTOK_PUBLISH_PROVIDER=zernio; design §7.2)
+// ---------------------------------------------------------------------------------------------
+
+/** Where Zernio sends webhook deliveries (registered by the owner in Zernio's dashboard). */
+export const ZERNIO_WEBHOOK_PATH = '/api/webhooks/zernio';
+/** Zernio's signature header: lowercase hex HMAC-SHA256 of the raw body (zernio-api §11). */
+export const ZERNIO_SIGNATURE_HEADER = 'x-zernio-signature';
+
+/** True when automatic TikTok posting through Zernio is switched on and its address is set on the server. */
+export function zernioOn(): boolean {
+  const env = getEnv();
+  return env.TIKTOK_PUBLISH_PROVIDER === 'zernio' && Boolean(env.ZERNIO_API_BASE_URL?.trim());
+}
+
+/** The chosen Zernio TikTok account and the connection's status, as the composer needs them. */
+interface ZernioSetup {
+  account: AccountRow | null;
+  connectionStatus: string | null;
+}
+
+async function zernioSetup(db: Database | Tx): Promise<ZernioSetup> {
+  if (!zernioOn()) return { account: null, connectionStatus: null };
+  const conn = await db.query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'zernio') });
+  const rows = await db
+    .select()
+    .from(schema.socialAccounts)
+    .where(and(eq(schema.socialAccounts.platform, 'tiktok'), eq(schema.socialAccounts.provider, 'zernio')))
+    .orderBy(desc(schema.socialAccounts.updatedAt));
+  const account = rows.find((r) => r.status !== 'disconnected') ?? null;
+  return { account: conn && conn.status !== 'disconnected' ? account : null, connectionStatus: conn?.status ?? null };
+}
+
+/**
+ * The composer's Zernio options (design §4.1 step 4): "Publish via Zernio" and "Send to TikTok drafts via Zernio",
+ * shown only when the flag is on and an account was chosen. Each is its own first verification post until the owner
+ * confirmed one, then follows its switch in Settings. A greyed option says why.
+ */
+function zernioMethodOptions(setup: ZernioSetup): MethodOption[] {
+  const a = setup.account;
+  if (!zernioOn() || !a) return [];
+  const caps = a.capabilities;
+  const seeds = interactionSeedsFrom(caps);
+  const handle = `@${a.username}`;
+  let blocked: string | null = null;
+  if (setup.connectionStatus !== 'connected') blocked = 'Zernio needs attention in Settings → Integrations first.';
+  else if (a.status !== 'connected') blocked = a.lastError ?? 'Reconnect TikTok in Zernio, then check the connection in Settings → Integrations.';
+  else if (caps['businessApiLane'] !== true) blocked = 'Reconnect TikTok inside Zernio to move it to the Business connection, then check the connection in Settings.';
+  else if (caps['privacyPublicAllowed'] === false) blocked = "TikTok doesn't allow public posts from this account right now.";
+  else if (!seeds) blocked = 'Press Check connection in Settings → Integrations so TikTok’s comment, duet and stitch settings can be read.';
+  return (['publish', 'draft'] as const).map((delivery): MethodOption => {
+    const verified = Boolean(caps[delivery === 'publish' ? 'verifiedDirectAt' : 'verifiedDraftAt']);
+    const switchedOn = delivery === 'publish' ? a.directPublishEnabled : caps['draftsEnabled'] === true;
+    const base = { method: 'zernio' as const, delivery, accountId: a.id, handle, tiktokInteractions: seeds };
+    if (blocked) return { ...base, available: false, reason: blocked, isVerification: !verified };
+    if (!verified) return { ...base, available: true, isVerification: true };
+    return { ...base, available: switchedOn, ...(switchedOn ? {} : { reason: delivery === 'publish' ? 'Publishing via Zernio is switched off in Settings → Integrations.' : 'Sending to TikTok drafts is switched off in Settings → Integrations.' }), isVerification: false };
+  });
+}
+
+/** Our own Zernio videos to an account in the last 24 hours (TikTok allows 15 this way; design §7.2.2). */
+export async function zernioVideosLast24h(db: Database | Tx, accountRowId: string, now: Date = new Date()): Promise<number> {
+  const t = schema.publishTargets;
+  const rows = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(t)
+    .where(and(eq(t.method, 'zernio'), eq(t.accountId, accountRowId), eq(t.delivery, 'publish'), inArray(t.status, ['published', 'processing', 'queued']), gte(t.submittedAt, new Date(now.getTime() - 86_400_000))));
+  return rows[0]?.n ?? 0;
+}
+
+/**
+ * The consent for each Zernio destination of a post at approval (design §7.2.3, plan §10.3): the owner's tick and
+ * their Comments / Duets / Stitches choices are required, a switch TikTok has turned off cannot be turned on, and
+ * the stored binding records exactly what was approved (caption, cover, file, delivery, account and choices).
+ */
+async function zernioConsentsFor(
+  db: Database,
+  post: PostRow,
+  targets: TargetRow[],
+  consent: z.infer<typeof ApprovePublishPostsSchema>['consent'],
+  user: SessionUser,
+  now: Date,
+): Promise<Map<string, ZernioConsent>> {
+  const out = new Map<string, ZernioConsent>();
+  const zernioTargets = targets.filter((t) => t.method === 'zernio');
+  if (zernioTargets.length === 0) return out;
+  if (consent?.tiktokPublic !== true) throw new AppError('VALIDATION', 'Tick the box to confirm you have watched the video and want it posted publicly to TikTok (or sent to your TikTok drafts).');
+  const choice = consent.tiktokInteractions;
+  if (!choice) throw new AppError('VALIDATION', 'Choose whether to allow Comments, Duets and Stitches on TikTok, then approve.');
+  if (!zernioOn()) throw new AppError('CONFLICT', 'Automatic TikTok posting is switched off on this server. Choose "Post it yourself".');
+  for (const t of zernioTargets) {
+    const acct = t.accountId ? await db.query.socialAccounts.findFirst({ where: eq(schema.socialAccounts.id, t.accountId) }) : null;
+    if (!acct || acct.provider !== 'zernio' || acct.status !== 'connected') throw new AppError('VALIDATION', 'Choose your TikTok account again in Settings → Integrations, then make the post again.');
+    const off = disabledInteractionChoices(choice, interactionSeedsFrom(acct.capabilities));
+    if (off.length) {
+      const names = off.map((k) => TIKTOK_INTERACTION_LABELS[k]);
+      throw new AppError('VALIDATION', `${names.join(' and ')} ${names.length === 1 ? 'is' : 'are'} turned off in your TikTok settings. Switch ${names.length === 1 ? 'it' : 'them'} off here, then approve.`);
+    }
+    out.set(t.id, { tiktokPublic: true, at: now.toISOString(), userId: user.id, binding: { caption: post.caption, coverTimeSec: post.coverTimeSec, variant: t.mediaVariant, delivery: t.delivery, accountRowId: acct.id, handle: acct.username, interactions: choice } });
+  }
+  return out;
+}
+
+function zernioCandidates(config: Record<string, unknown> | undefined): ZernioCandidateDto[] {
+  const list = Array.isArray(config?.['candidates']) ? (config['candidates'] as Array<Record<string, unknown>>) : [];
+  return list
+    .filter((c) => typeof c['id'] === 'string')
+    .map((c) => ({ id: String(c['id']), username: String(c['username'] ?? ''), displayName: String(c['displayName'] ?? ''), problem: typeof c['problem'] === 'string' ? c['problem'] : null }));
+}
+
+/** GET /api/integrations/zernio: the TikTok-through-Zernio state for Settings (never the key). */
+export async function getZernioConnection(user: SessionUser): Promise<ZernioConnectionDto> {
+  const env = getEnv();
+  const db = getDb();
+  const enabled = env.TIKTOK_PUBLISH_PROVIDER === 'zernio';
+  const conn = await db.query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'zernio') });
+  const setup = await zernioSetup(db);
+  const a = setup.account;
+  const account: ZernioAccountDto | null = a
+    ? {
+        id: a.id,
+        username: a.username,
+        status: a.status,
+        lastError: a.lastError,
+        businessLane: a.capabilities['businessApiLane'] === true,
+        verified: Boolean(a.capabilities['verifiedDirectAt']),
+        verifiedAt: typeof a.capabilities['verifiedDirectAt'] === 'string' ? a.capabilities['verifiedDirectAt'] : null,
+        draftVerified: Boolean(a.capabilities['verifiedDraftAt']),
+        directPublishEnabled: a.directPublishEnabled,
+        draftsEnabled: a.capabilities['draftsEnabled'] === true,
+        last24h: await zernioVideosLast24h(db, a.id),
+      }
+    : null;
+  const live = conn && conn.status !== 'disconnected';
+  return {
+    enabled,
+    configured: Boolean(env.ZERNIO_API_BASE_URL?.trim()),
+    missingEnv: env.ZERNIO_API_BASE_URL?.trim() ? [] : ['ZERNIO_API_BASE_URL'],
+    canManage: user.role === 'owner',
+    connectionStatus: conn ? conn.status : 'none',
+    keyHint: live && typeof conn.config['keyHint'] === 'string' ? conn.config['keyHint'] : null,
+    lastError: live ? conn.lastError : null,
+    lastCheckedAt: live ? iso(conn.lastSyncAt) : null,
+    candidates: live ? zernioCandidates(conn.config) : [],
+    account,
+    webhookSigning: Boolean(env.ZERNIO_WEBHOOK_SECRET),
+    webhookUrl: `${env.APP_URL.replace(/\/+$/, '')}${ZERNIO_WEBHOOK_PATH}`,
+  };
+}
+
+function assertZernioOn(): void {
+  if (!zernioOn()) throw new AppError('CONFLICT', 'Automatic TikTok posting through Zernio is switched off on this server.');
+}
+
+/**
+ * POST /api/integrations/zernio (owner, flag on): stores the API key encrypted on the one `zernio` connection row,
+ * keeps only its last four characters for display, and queues the read-only check. The key never comes back.
+ */
+export async function connectZernio(apiKey: string, user: SessionUser): Promise<{ status: string; keyHint: string; jobId: string }> {
+  requireOwner(user);
+  assertZernioOn();
+  const db = getDb();
+  const key = apiKey.trim();
+  const keyHint = key.slice(-4);
+  const encrypted = encryptToken(key);
+  const existing = await db.query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'zernio') });
+  let id = existing?.id ?? newId();
+  if (existing) {
+    await db
+      .update(schema.integrationConnections)
+      .set({ status: 'connected', accessTokenEncrypted: encrypted, lastError: null, config: sql`${schema.integrationConnections.config} || ${JSON.stringify({ keyHint })}::jsonb`, updatedAt: new Date() })
+      .where(eq(schema.integrationConnections.id, existing.id));
+  } else {
+    id = newId();
+    await db.insert(schema.integrationConnections).values({ id, provider: 'zernio', status: 'connected', accessTokenEncrypted: encrypted, config: { keyHint } });
+  }
+  // Accounts of an earlier key belong to this connection again (they are checked against the new key's list).
+  await db.update(schema.socialAccounts).set({ connectionId: id, updatedAt: new Date() }).where(and(eq(schema.socialAccounts.provider, 'zernio'), isNull(schema.socialAccounts.connectionId)));
+  await writeAudit({ userId: user.id, action: 'integration.zernio.connected', entityType: 'integration_connection', entityId: id, data: { keyHint } });
+  const jobId = await queueZernioCheck('connect', id);
+  return { status: 'connected', keyHint, jobId };
+}
+
+async function queueZernioCheck(reason: 'connect' | 'manual', connectionId: string): Promise<string> {
+  const job = await createTrackedJob({ type: 'social.check', payload: { connectionId, reason }, projectId: null, singletonKey: `social-check:${connectionId}` });
+  return job.id;
+}
+
+/**
+ * POST /api/integrations/zernio/account (owner): the TikTok account the owner chose from the ones Zernio listed. Keeps
+ * one Zernio TikTok row: choosing again replaces its Zernio id (an id may change when TikTok is reconnected in
+ * Zernio). Nothing is matched by handle automatically; a different handle starts unverified with both switches off.
+ */
+export async function chooseZernioAccount(zernioAccountId: string, user: SessionUser): Promise<ZernioConnectionDto> {
+  requireOwner(user);
+  assertZernioOn();
+  const db = getDb();
+  const conn = await db.query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'zernio') });
+  if (!conn || conn.status === 'disconnected' || !conn.accessTokenEncrypted) throw new AppError('CONFLICT', 'Paste a Zernio API key first.');
+  const candidate = zernioCandidates(conn.config).find((c) => c.id === zernioAccountId);
+  if (!candidate) throw new AppError('VALIDATION', 'Choose one of the TikTok accounts Zernio listed. Press Check connection if yours is missing.');
+  const rows = await db.select().from(schema.socialAccounts).where(and(eq(schema.socialAccounts.platform, 'tiktok'), eq(schema.socialAccounts.provider, 'zernio'))).orderBy(desc(schema.socialAccounts.updatedAt));
+  // The row already holding this id, otherwise the most recent one (so the unique platform + id index never clashes).
+  const existing = rows.find((r) => r.externalId === candidate.id) ?? rows[0] ?? null;
+  const sameHandle = existing && existing.username.toLowerCase() === candidate.username.toLowerCase();
+  const reset = { verifiedDirectAt: null, verifiedDraftAt: null, draftsEnabled: false };
+  await db.transaction(async (tx) => {
+    if (existing) {
+      // Any other Zernio TikTok row stops being used; its history stays.
+      await tx
+        .update(schema.socialAccounts)
+        .set({ status: 'disconnected', directPublishEnabled: false, updatedAt: new Date() })
+        .where(and(eq(schema.socialAccounts.platform, 'tiktok'), eq(schema.socialAccounts.provider, 'zernio'), sql`${schema.socialAccounts.id} <> ${existing.id}`));
+      await tx
+        .update(schema.socialAccounts)
+        .set({
+          externalId: candidate.id,
+          username: candidate.username,
+          displayName: candidate.displayName,
+          connectionId: conn.id,
+          status: candidate.problem ? 'needs_reauth' : 'connected',
+          lastError: candidate.problem,
+          ...(sameHandle ? {} : { directPublishEnabled: false, capabilities: sql`${schema.socialAccounts.capabilities} || ${JSON.stringify(reset)}::jsonb` }),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.socialAccounts.id, existing.id));
+    } else {
+      await tx.insert(schema.socialAccounts).values({ id: newId(), platform: 'tiktok', externalId: candidate.id, username: candidate.username, displayName: candidate.displayName, provider: 'zernio', connectionId: conn.id, status: candidate.problem ? 'needs_reauth' : 'connected', lastError: candidate.problem });
+    }
+  });
+  await writeAudit({ userId: user.id, action: 'social_account.selected', entityType: 'integration_connection', entityId: conn.id, data: { platform: 'tiktok', provider: 'zernio', sameHandle: Boolean(sameHandle) } });
+  await queueZernioCheck('manual', conn.id);
+  return getZernioConnection(user);
+}
+
+/** POST /api/integrations/zernio/check (owner): the read-only check. Never posts. */
+export async function checkZernioConnection(user: SessionUser): Promise<{ jobId: string }> {
+  requireOwner(user);
+  assertZernioOn();
+  const conn = await getDb().query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'zernio') });
+  if (!conn || conn.status === 'disconnected' || !conn.accessTokenEncrypted) throw new AppError('CONFLICT', 'Paste a Zernio API key first.');
+  return { jobId: await queueZernioCheck('manual', conn.id) };
+}
+
+/**
+ * DELETE /api/integrations/zernio (owner): forgets the key, marks the TikTok account disconnected with both switches
+ * off, moves unsent Zernio destinations to "reconnect", and deletes Zernio's stored webhook deliveries (plan §10.3).
+ * Posts already on TikTok stay there; the owner deletes them in the TikTok app.
+ */
+export async function disconnectZernio(user: SessionUser): Promise<{ disconnected: boolean; targetsMoved: number }> {
+  requireOwner(user);
+  const db = getDb();
+  const conn = await db.query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'zernio') });
+  if (!conn) return { disconnected: false, targetsMoved: 0 };
+  const moved = await db.transaction(async (tx) => {
+    await tx
+      .update(schema.integrationConnections)
+      .set({ status: 'disconnected', accessTokenEncrypted: null, refreshTokenEncrypted: null, tokenExpiresAt: null, lastError: null, config: sql`${schema.integrationConnections.config} - 'keyHint' - 'candidates'`, updatedAt: new Date() })
+      .where(eq(schema.integrationConnections.id, conn.id));
+    await tx
+      .update(schema.socialAccounts)
+      .set({ status: 'disconnected', directPublishEnabled: false, capabilities: sql`${schema.socialAccounts.capabilities} || ${JSON.stringify({ draftsEnabled: false })}::jsonb`, updatedAt: new Date() })
+      .where(eq(schema.socialAccounts.provider, 'zernio'));
+    const rows = await tx
+      .update(schema.publishTargets)
+      .set({ status: 'manual_step_required', manualStep: 'reconnect_account', statusMessage: manualStepMessage('reconnect_account', 'tiktok'), updatedAt: new Date() })
+      .where(and(eq(schema.publishTargets.method, 'zernio'), eq(schema.publishTargets.status, 'queued'), isNull(schema.publishTargets.submittedAt)))
+      .returning({ postId: schema.publishTargets.postId });
+    for (const postId of new Set(rows.map((r) => r.postId))) await refreshPostStatus(tx, postId);
+    await tx.delete(schema.webhookEvents).where(eq(schema.webhookEvents.provider, 'zernio'));
+    return rows.length;
+  });
+  await writeAudit({ userId: user.id, action: 'integration.zernio.disconnected', entityType: 'integration_connection', entityId: conn.id, data: { targetsMoved: moved } });
+  return { disconnected: true, targetsMoved: moved };
+}
+
+/** True when `signature` is the lowercase hex HMAC-SHA256 of the raw body with our secret (timing-safe; lengths first). */
+export function verifyZernioSignature(secret: string, rawBody: string, signature: string | null): boolean {
+  if (!signature) return false;
+  const expected = createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');
+  const given = signature.trim().toLowerCase();
+  if (given.length !== expected.length || !/^[0-9a-f]+$/.test(given)) return false;
+  return timingSafeEqual(Buffer.from(given, 'utf8'), Buffer.from(expected, 'utf8'));
+}
+
+/**
+ * Stores one Zernio webhook delivery (design §7.2.5): an envelope only (ids and the event name), under the event's
+ * own id when the signature was verified, otherwise under `unverified:<sha256(raw body)>`, so a forged or unsigned
+ * delivery can never take a real event's slot. Returns whether a new row was stored. The payload is only a hint.
+ */
+export async function receiveZernioWebhook(rawBody: string, signature: string | null): Promise<{ stored: boolean; verified: boolean }> {
+  const secret = getEnv().ZERNIO_WEBHOOK_SECRET;
+  const verified = Boolean(secret) && verifyZernioSignature(secret ?? '', rawBody, signature);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    throw new AppError('VALIDATION', 'The body is not JSON.');
+  }
+  const envelope = zernioWebhookEnvelope(parsed);
+  const externalEventId = verified && envelope.id ? envelope.id : `unverified:${createHash('sha256').update(rawBody, 'utf8').digest('hex')}`;
+  const result = await storeWebhookEvent({ provider: 'zernio', externalEventId, eventType: envelope.event, payload: { ...envelope }, signatureValid: verified });
+  if (!verified) getLogger().info({ webhook: 'zernio', event: envelope.event }, 'zernio webhook stored as unverified (a hint only)');
+  return { stored: result.stored, verified };
 }

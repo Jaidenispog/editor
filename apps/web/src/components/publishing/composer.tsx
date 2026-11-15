@@ -17,6 +17,7 @@ import { addVideo, buildCreateRequest, draftProblems, initialDraft, type VideoDr
 import { CoverPicker } from './cover-picker';
 import { DestinationPicker } from './destination-picker';
 import { ReviewCard } from './review-card';
+import { ZernioConsent, zernioConsentReady, zernioTargetsOf, type ZernioConsentValue } from './zernio-consent';
 import { ScheduleInput } from './schedule-input';
 
 const PLATFORMS: TargetPlatform[] = ['instagram', 'tiktok'];
@@ -36,6 +37,7 @@ export function Composer({ initialVersionIds }: { initialVersionIds: string[] })
   const [picker, setPicker] = useState<CandidateVersionDto[] | null>(null);
   const [review, setReview] = useState<PublishPostDto[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [consent, setConsent] = useState<ZernioConsentValue | null>(null);
 
   const load = useCallback(async (ids: string[]) => {
     if (ids.length === 0) {
@@ -75,13 +77,18 @@ export function Composer({ initialVersionIds }: { initialVersionIds: string[] })
   const backToEditing = async () => {
     const saved = review ?? [];
     setReview(null);
+    setConsent(null);
     await Promise.all(saved.map((p) => apiRequest(`/api/publish-posts/${p.id}`, { method: 'DELETE' }).catch(() => undefined)));
   };
   const approve = async () => {
     if (!review) return;
     setBusy(true);
     try {
-      await apiRequest('/api/publish-posts/approve', { method: 'POST', body: { postIds: review.map((p) => p.id) } });
+      const zernio = zernioTargetsOf(review).length > 0;
+      await apiRequest('/api/publish-posts/approve', {
+        method: 'POST',
+        body: { postIds: review.map((p) => p.id), ...(zernio && consent ? { consent: { tiktokPublic: consent.ticked, tiktokInteractions: consent.interactions } } : {}) },
+      });
       toast.success('Approved', 'Follow each post on the Publishing page.');
       router.push('/publishing');
     } catch (e) {
@@ -122,9 +129,10 @@ export function Composer({ initialVersionIds }: { initialVersionIds: string[] })
         {review.map((p) => (
           <ReviewCard key={p.id} post={p} />
         ))}
+        {zernioTargetsOf(review).length > 0 ? <ZernioConsent posts={review} items={items} onChange={setConsent} /> : null}
         <div className="flex flex-wrap gap-2">
           {data?.canApprove ? (
-            <Button className="min-h-11" loading={busy} onClick={() => void approve()}>
+            <Button className="min-h-11" loading={busy} disabled={zernioTargetsOf(review).length > 0 && !zernioConsentReady(consent)} onClick={() => void approve()}>
               {label}
             </Button>
           ) : (

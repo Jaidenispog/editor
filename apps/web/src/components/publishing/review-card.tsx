@@ -1,6 +1,6 @@
 import { TARGET_PLATFORM_NAMES, formatSeconds } from '@studio/core';
 import type { PublishPostDto } from '@/lib/shared/publishing-dto';
-import { METHOD_LABELS } from './labels';
+import { methodLabel } from './labels';
 
 /**
  * The review step's summary of one saved draft, per destination: account, method, the exact file, the final caption
@@ -20,9 +20,15 @@ export function ReviewCard({ post }: { post: PublishPostDto }) {
               {TARGET_PLATFORM_NAMES[t.platform]} · {t.handle}
             </p>
             <p className="text-charcoal-700">
-              {t.isVerification ? 'First verification post (publish from Studio Assistant)' : METHOD_LABELS[t.method]} · 1080×1920 MP4, {t.variant === 'no_music' ? 'without music' : 'with the edit’s sound'}
+              {methodLabel(t.method, t.delivery, t.isVerification)} · 1080×1920 MP4, {t.variant === 'no_music' ? 'without music' : 'with the edit’s sound'}
             </p>
-            {t.isVerification ? <p className="mt-1 rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">This is a real, public post on {t.handle}. Choose an edit you&apos;re happy to share.</p> : null}
+            {t.isVerification ? (
+              <p className="mt-1 rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
+                {t.method === 'zernio' && t.delivery === 'draft' ? `This sends a real draft to the TikTok inbox of ${t.handle}.` : `This is a real, public post on ${t.handle}.`} Choose an edit you&apos;re happy to share.
+              </p>
+            ) : null}
+            {t.method === 'zernio' && t.delivery === 'publish' ? <p className="mt-1 text-charcoal-700">Public immediately on TikTok. Cover at the frame you chose.</p> : null}
+            {t.method === 'zernio' && t.delivery === 'draft' ? <p className="mt-1 text-charcoal-700">Choose the cover in the TikTok app.</p> : null}
           </li>
         ))}
       </ul>

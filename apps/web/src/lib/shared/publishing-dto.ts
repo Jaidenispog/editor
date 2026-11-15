@@ -8,6 +8,7 @@ import type {
   TargetAction,
   TargetPlatform,
   TargetStatus,
+  TiktokInteractionSeeds,
 } from '@studio/core';
 
 /** Browser-facing shapes of the publishing module (no secrets, no storage keys; links expire). */
@@ -24,6 +25,8 @@ export interface MethodOption {
   accountId?: string;
   /** "@studio" or a plain description when no handle is saved. */
   handle: string;
+  /** Zernio only: creator-info seeds for the Comments / Duets / Stitches switches (null until the check has read them). */
+  tiktokInteractions?: TiktokInteractionSeeds | null;
 }
 
 /** A version as the composer sees it. */
@@ -50,7 +53,7 @@ export interface EligibilityItemDto {
 /** Result of GET /api/publishing/eligibility. */
 export interface EligibilityDto {
   items: EligibilityItemDto[];
-  quota: { instagram?: { usage: number; total: number | null; checkedAt: string | null } };
+  quota: { instagram?: { usage: number; total: number | null; checkedAt: string | null }; zernio?: { last24h: number; cap: number } };
   captionFooter: string;
   /** Whether the signed-in user may approve (the owner). */
   canApprove: boolean;
@@ -168,4 +171,52 @@ export interface CandidateVersionDto {
   versionNo: number;
   durationSec: number | null;
   updatedAt: string;
+}
+
+/** One TikTok account Zernio listed (Settings → Integrations, to choose from). */
+export interface ZernioCandidateDto {
+  id: string;
+  username: string;
+  displayName: string;
+  /** Why it cannot be used for automatic posting, in plain words, or null. */
+  problem: string | null;
+}
+
+/** The chosen TikTok account behind Zernio. */
+export interface ZernioAccountDto {
+  id: string;
+  username: string;
+  status: string;
+  lastError: string | null;
+  businessLane: boolean;
+  /** The first post through Zernio was confirmed by the owner. */
+  verified: boolean;
+  verifiedAt: string | null;
+  /** The first draft through Zernio was confirmed by the owner. */
+  draftVerified: boolean;
+  directPublishEnabled: boolean;
+  draftsEnabled: boolean;
+  /** Our own Zernio videos to this account in the last 24 hours (TikTok allows 15 this way). */
+  last24h: number;
+}
+
+/** GET /api/integrations/zernio: the optional TikTok route through Zernio (never the key). */
+export interface ZernioConnectionDto {
+  /** TIKTOK_PUBLISH_PROVIDER=zernio on the server. Without it nothing about Zernio is shown. */
+  enabled: boolean;
+  /** ZERNIO_API_BASE_URL is set. */
+  configured: boolean;
+  missingEnv: string[];
+  canManage: boolean;
+  connectionStatus: 'none' | 'connected' | 'needs_reauth' | 'error' | 'disconnected' | 'not_configured';
+  /** The last four characters of the saved key ("Key saved (ends …abcd)"). */
+  keyHint: string | null;
+  lastError: string | null;
+  lastCheckedAt: string | null;
+  candidates: ZernioCandidateDto[];
+  account: ZernioAccountDto | null;
+  /** ZERNIO_WEBHOOK_SECRET is set, so signed webhook deliveries can be verified. */
+  webhookSigning: boolean;
+  /** The address to register in Zernio's webhooks dashboard. */
+  webhookUrl: string;
 }

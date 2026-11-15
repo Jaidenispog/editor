@@ -5,6 +5,7 @@ import { ExportVariantSchema, type ExportVariant } from './jobs/music.js';
 import { META_ONLY_LABEL, PLATFORM_NAMES, musicClearanceFor, normaliseLicence, type MusicLicence } from './music.js';
 import { formatDateTime, melbourneLocalToUtc, melbourneZoneLabel } from './time.js';
 import { computeTimeline } from './timeline.js';
+import { TiktokInteractionsSchema } from './zernio.js';
 
 /**
  * Publishing contracts (docs/design/publishing.md): who may post what where, Melbourne scheduling, captions, the
@@ -297,7 +298,7 @@ export type CreatePublishPosts = z.infer<typeof CreatePublishPostsSchema>;
 
 export const ApprovePublishPostsSchema = z.object({
   postIds: z.array(z.string().min(1).max(64)).min(1).max(20),
-  consent: z.object({ tiktokPublic: z.boolean() }).optional(),
+  consent: z.object({ tiktokPublic: z.boolean(), tiktokInteractions: TiktokInteractionsSchema.optional() }).optional(),
 });
 
 export const PatchPublishPostSchema = z

@@ -201,19 +201,20 @@ with that name"); other 4xx → `error` with Meta's message; 5xx/429/network/tim
 
 Manual posting ("Post it yourself") always works; Instagram direct publishing (Meta Unified Login, system-user token,
 Development mode) is optional and switched on only after a first verification post the owner confirms. TikTok is
-manual only until WP10. Nothing is ever posted to test a connection. Times are entered in Melbourne time and stored in
+manual, plus the optional route through Zernio (WP10, below) when the server sets `TIKTOK_PUBLISH_PROVIDER=zernio`.
+Nothing is ever posted to test a connection. Times are entered in Melbourne time and stored in
 UTC. Staff see and draft posts of their own projects; approval, cancel, retry, resolve and every integration control
 are owner only.
 
 | Method | Route | Notes |
 | --- | --- | --- |
-| GET | `/api/publishing/eligibility?versions=a,b` | Session. Per version (1–5, preview ready): `eligibility` (`PlatformEligibility[]`: `allowedVariants`, `automationAllowedForStandard`, `reasons`, `manualStepHint`, `downloadLabel`), `methods` (`MethodOption[]` per platform; `manual` always available, `instagram_api` only with a connected account: `isVerification` until verified, unavailable while the switch is off), `captionSuffix` (CC BY credit), `defaultCoverTimeSec`, `priorTargets`; plus `quota.instagram`, `captionFooter`, `canApprove` |
+| GET | `/api/publishing/eligibility?versions=a,b` | Session. Per version (1–5, preview ready): `eligibility` (`PlatformEligibility[]`: `allowedVariants`, `automationAllowedForStandard`, `reasons`, `manualStepHint`, `downloadLabel`), `methods` (`MethodOption[]` per platform; `manual` always available, `instagram_api` only with a connected account: `isVerification` until verified, unavailable while the switch is off; `zernio` twice (`delivery` `publish` and `draft`) only with the flag on and a chosen account, each `isVerification` until its own verification, with `tiktokInteractions` seeds), `captionSuffix` (CC BY credit), `defaultCoverTimeSec`, `priorTargets`; plus `quota.instagram`, `quota.zernio { last24h, cap: 15 }`, `captionFooter`, `canApprove` |
 | GET | `/api/publishing/candidates` | Session. Recent preview-ready versions for the composer's picker (nothing ticked) |
 | GET | `/api/publishing/connections` | Session. Instagram connection facts (never the token): `configured`, `missingEnv`, `connectionStatus`, `lastError`, `tokenExpiresAt` (null = never), `tokenExpiringSoon` (7 days), `discoveryEmpty`, `accounts` (verified, `directPublishEnabled`, quota), handles, `captionFooter`, `canManage` |
 | GET | `/api/publishing/badges?versions=a,b` | Session. `{ badges: [{ versionId, platform, status, label }] }` for Studio and Library cards ("Instagram · Posted", "TikTok · Your turn", "… · Scheduled 15 Nov") |
 | PUT | `/api/publishing/settings` | Owner. `{ captionFooter ≤ 500 }` (stored in `settings.publishing` with `jsonb_set`) |
-| POST | `/api/publish-posts` | Session. `{ items: [{ editVersionId, caption, coverTimeSec, mode: now\|scheduled\|draft_handoff, schedule?: { date: YYYY-MM-DD, time: HH:mm }, targets: [{ platform, method, delivery?, variant }] (1–2, one per platform) }] (1–5), allowRepeat? }` → `{ posts: PublishPostDto[] }` (status `draft`). 400 for a caption over 2,200 graphemes (credit line included), a Melbourne time that does not exist ("That time doesn't exist in Melbourne…"), less than 10 minutes or more than 90 days ahead, a file the music rule refuses (e.g. Meta Sound Collection music to TikTok), or a method not on offer; 422 `UNSUPPORTED` for Zernio; 409 when the version already has a published, processing or submitted target on that platform unless `allowRepeat` |
-| POST | `/api/publish-posts/approve` | Owner. `{ postIds, consent?: { tiktokPublic } }`. Re-runs the music rule (400 when the licence changed), stores `music_check` with the licence snapshot, sets `approved_by/at`, audits `publish.approved`, queues `publish.prepare`. Idempotent. A Zernio target needs `consent.tiktokPublic` (400). Writes no feedback event and no `music_usage` row |
+| POST | `/api/publish-posts` | Session. `{ items: [{ editVersionId, caption, coverTimeSec, mode: now\|scheduled\|draft_handoff, schedule?: { date: YYYY-MM-DD, time: HH:mm }, targets: [{ platform, method, delivery?, variant }] (1–2, one per platform) }] (1–5), allowRepeat? }` → `{ posts: PublishPostDto[] }` (status `draft`). 400 for a caption over 2,200 graphemes (credit line included), a Melbourne time that does not exist ("That time doesn't exist in Melbourne…"), less than 10 minutes or more than 90 days ahead, a file the music rule refuses (e.g. Meta Sound Collection music to TikTok), or a method not on offer; 422 `UNSUPPORTED` for Zernio while the server flag is off; 409 when the version already has a published, processing or submitted target on that platform unless `allowRepeat` |
+| POST | `/api/publish-posts/approve` | Owner. `{ postIds, consent?: { tiktokPublic, tiktokInteractions?: { allowComment, allowDuet, allowStitch } } }`. Re-runs the music rule (400 when the licence changed), stores `music_check` with the licence snapshot, sets `approved_by/at`, audits `publish.approved`, queues `publish.prepare`. Idempotent. A Zernio target needs `consent.tiktokPublic` and `tiktokInteractions` (400), refuses a switch TikTok has turned off (400), and stores `provider_state.consent` with the binding (caption, cover, file, delivery, account, choices) the worker re-checks. Writes no feedback event and no `music_usage` row |
 | GET | `/api/publish-posts?view=queue\|history&cursor=` | Session. Queue = draft/approved/in progress or any destination waiting for the owner; history = the rest. Newest first |
 | GET / PATCH / DELETE | `/api/publish-posts/[id]` | GET adds `history` (audit entries). PATCH `{ caption?, coverTimeSec?, schedule?, targets? }`: a time change keeps the approval; anything else returns an approved post to `draft` (owner); 409 once a destination has started going out. DELETE: drafts only (409 otherwise), cover removed |
 | POST | `/api/publish-posts/[id]/cancel` | Owner. Destinations without `submitted_at` become `cancelled`; published ones stay. 409 for a draft (delete it instead) |
@@ -222,8 +223,8 @@ are owner only.
 | POST | `/api/publish-targets/[id]/undo-confirm` | Session. Manual confirmations only → back to the owner's turn (feedback is kept) |
 | POST | `/api/publish-targets/[id]/retry` | Owner. `failed` and retryable only → `queued` with the same idempotency key; queues `publish.target` (or `publish.prepare` when the file is missing) |
 | POST | `/api/publish-targets/[id]/resolve` | Owner. `{ action: post_without_music \| post_manually \| retry_anyway \| mark_posted }`. `post_without_music` (after a copyright match or a licence change): variant `no_music`, container cleared, prepared again. `post_manually`: method `manual` (variant switched to one the licence allows). `retry_anyway` (`check_before_retry` only): clears `submitted_at`, audited `publish.target.override_retry`; the worker reads the platform's status first |
-| POST | `/api/social-accounts/[id]/verification` | Owner. `{ result: seen\|not_seen, targetId }` for a published first verification post; `seen` sets `capabilities.verifiedDirectAt` |
-| PATCH | `/api/social-accounts/[id]` | Owner. `{ directPublishEnabled }`; 409 until the verification is recorded |
+| POST | `/api/social-accounts/[id]/verification` | Owner. `{ result: seen\|not_seen, targetId }` for a published first verification post (or a Zernio draft verification handed over to the TikTok inbox); `seen` sets `capabilities.verifiedDirectAt` (drafts: `verifiedDraftAt`) |
+| PATCH | `/api/social-accounts/[id]` | Owner. `{ directPublishEnabled?, draftsEnabled? }` (`draftsEnabled`: Zernio TikTok accounts); each 409 until its own verification is recorded |
 | GET | `/api/integrations/instagram/connect` | Owner. 302 to `https://www.facebook.com/{v}/dialog/oauth?client_id&redirect_uri&config_id&response_type=code&override_default_response_type=true&state` (no `scope`); state in the 10-minute `sa_oauth_meta` cookie (path `/api/integrations/instagram`). 422 without `META_APP_ID`, `META_APP_SECRET`, `META_LOGIN_CONFIG_ID` |
 | GET | `/api/integrations/instagram/callback` | Owner, same session. One code exchange (`GET /{v}/oauth/access_token`, 10 s, no retry), token encrypted on the `meta` connection, audit `integration.meta.connected`, queues `social.check` (reason `connect`), back to `/settings?tab=integrations&instagram=checking` (or `instagram_error=…`) |
 | POST | `/api/integrations/instagram/account` | Owner. `{ igUserId: 5–30 digits }` when discovery is empty → stored as `config.pendingIgUserId`, read-only check queued |
@@ -242,6 +243,29 @@ when due, automated ones get `publish.target`), `publish.target { targetId, post
 state machine), `publish.poll { …, pollNo }` (container status every 60 s ×5, then every 5 min up to 24 h, then the
 copyright check), `publish.dispatch {}` (every minute, key `every-minute`), `social.check { connectionId, reason }`
 (read-only; daily at 4:23 am Melbourne, key `daily`). The three per-target queues are pg-boss `stately`.
+
+### TikTok through Zernio (Stage C, WP10)
+
+Optional, behind `TIKTOK_PUBLISH_PROVIDER=zernio` plus `ZERNIO_API_BASE_URL` (`https://zernio.com/api`); without the
+flag nothing about Zernio is offered and the routes below answer 409 (the webhook 404). The web app never calls Zernio:
+it stores the key and queues the worker's read-only `social.check`. Facts: `docs/research/zernio-api.md`; design:
+publishing §7.2.
+
+| Method | Route | Notes |
+| --- | --- | --- |
+| GET | `/api/integrations/zernio` | Session. `ZernioConnectionDto`: `enabled`, `configured`, `missingEnv`, `connectionStatus`, `keyHint` (last four characters only; never the key), `lastError`, `lastCheckedAt`, `candidates` (TikTok accounts Zernio listed, each with a plain `problem` or null), `account` (lane, verified, draft verified, both switches, `last24h`), `webhookSigning`, `webhookUrl`, `canManage` |
+| POST | `/api/integrations/zernio` | Owner. `{ apiKey: 10–200 characters }` (no prefix check: `sk_` and `zrk_` keys) → `{ status, keyHint, jobId }`. Key encrypted on the `zernio` connection, audit `integration.zernio.connected`, read-only `social.check` queued |
+| POST | `/api/integrations/zernio/account` | Owner. `{ zernioAccountId }`, one of the listed candidates (400 otherwise). Keeps one Zernio TikTok row: choosing again replaces its Zernio id; a different handle starts unverified with both switches off. Audit `social_account.selected`; check queued |
+| POST | `/api/integrations/zernio/check` | Owner. → `{ jobId }` of a read-only `social.check`. Never posts |
+| DELETE | `/api/integrations/zernio` | Owner. Key wiped, account `disconnected` with both switches off, unsent Zernio targets → "reconnect", stored Zernio webhook deliveries deleted. Audit `integration.zernio.disconnected` |
+| POST | `/api/webhooks/zernio` | Public (no session, no CSRF), raw body ≤ 256 KB. `X-Zernio-Signature` checked (hex HMAC-SHA256 of the raw body, timing-safe) when `ZERNIO_WEBHOOK_SECRET` is set. Stores an envelope only (`id`, `event`, `postId`, `studioTargetId`, `platform`, `accountId`) under the event id when verified, otherwise under `unverified:<sha256(body)>`; a redelivery is one row and one `webhook.process`. Answers JSON 200 (`{ ok, duplicate }`) even for a bad signature; 400 for a body that is not JSON |
+
+Worker: `publish.target` runs the Zernio state machine (health → account list and cooldown → creator info → presign →
+`PUT` upload → `submitted_at` → `POST /v1/posts` with `Idempotency-Key` = target id and `metadata.studioTargetId`);
+`publish.poll` reads `GET /v1/posts/{id}` at 1, 2, 5 and 10 minutes, every 15 minutes to 6 hours, then every 50
+minutes to 50 hours, or after an unclear create looks the post up (`GET /v1/posts?updatedSince&accountId&fields`) four
+times before "check before retry"; a Retry of a failed post calls `POST /v1/posts/{id}/retry`; `webhook.process`'s
+`zernio` handler only queues a read (`account.disconnected` queues the check). No new job types.
 
 ## Square appointments (Stage C, WP6 and WP6b)
 

@@ -3,10 +3,11 @@ import { handlePublishPoll } from '../../handlers/publish-poll.js';
 import { handlePublishPrepare, preparePostsWaitingFor } from '../../handlers/publish-prepare.js';
 import { handlePublishTarget } from '../../handlers/publish-target.js';
 import { handleSocialCheck } from '../../handlers/social-check.js';
+import { handleZernioWebhook } from '../../publishing/zernio.js';
 import { defineHandler, type WorkerModule } from '../types.js';
 
 /**
- * Worker registrations of the publishing module (WP4; WP10 adds the Zernio webhook handler and branches). Handlers are
+ * Worker registrations of the publishing module (WP4, with WP10's Zernio webhook handler and branches). Handlers are
  * wrapped so this file can be loaded before the handler modules finish loading.
  */
 export const publishingModule: WorkerModule = {
@@ -25,6 +26,10 @@ export const publishingModule: WorkerModule = {
     // Daily read-only token, account and quota check at 4:23 am Melbourne time. Never posts.
     { type: 'social.check', cron: '23 4 * * *', payload: { connectionId: null, reason: 'daily' }, key: 'daily' },
   ],
+  // Zernio webhook deliveries are hints only: the handler finds the target and queues a read (design §7.2.5).
+  webhookHandlers: {
+    zernio: (ctx, run, event) => handleZernioWebhook(ctx, run, event),
+  },
   // Posts waiting for an export (or its music-free version) are prepared again as soon as the file is stored.
   exportReadyHooks: [
     async (ctx, event) => {

@@ -182,6 +182,26 @@ Other response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy: sam
 - **Media**: uploads stream from private storage to `rupload.facebook.com` (no public URL); owner downloads use
   expiring links. Deleting a project cancels its unsent posts and removes its `publishing/{postId}/` covers.
 
+### TikTok through Zernio (Stage C, WP10)
+
+- **Key**: the Zernio API key is stored only encrypted on the `zernio` connection row; the browser sees its last four
+  characters. Decrypted only in the worker, sent only as `Authorization: Bearer` to `ZERNIO_API_BASE_URL`, never in job
+  payloads, `provider_state`, audit data or logs (the HTTP helper redacts `Authorization`). Recommended: a restricted
+  key with only Accounts and Publishing. Disconnect wipes it.
+- **Consent and binding**: a Zernio post needs the owner's tick and their Comments / Duets / Stitches choices (owner
+  only, CSRF-checked); both consent flags and `PUBLIC_TO_EVERYONE` are sent only for a target approved that way, and
+  the worker refuses when the caption, cover, file, delivery or account changed after approval.
+- **Duplicate protection**: `submitted_at` before the create, `Idempotency-Key` = target id (24 h), the post id saved at
+  once, read-only lookup by `metadata.studioTargetId` after an unclear outcome, `/retry` for failed posts, never a
+  second create without the owner's audited "try again" (which reuses the same key).
+- **Upload address**: Zernio's presigned `uploadUrl` is untrusted: HTTPS on 443 only, no credentials, every resolved
+  address checked against the private and reserved ranges, the connection pinned to the checked address, redirects
+  refused, no `Authorization` header. Tests use the local fake only under `NODE_ENV=test`, and only its exact origin.
+- **Webhooks**: public route with a 256 KB limit; the HMAC is checked on the raw bytes with `timingSafeEqual`; only an
+  envelope of ids is stored; unverified deliveries are stored under `unverified:<sha256>` so a forged event can never
+  take or block a real event's slot; even a verified event only triggers a read with our key (no replay protection is
+  documented by Zernio).
+
 ## Square appointments (Stage C, WP6 and WP6b)
 
 - **Tokens**: Square access and refresh tokens live only in `integration_connections` (AES-256-GCM), decrypted in the

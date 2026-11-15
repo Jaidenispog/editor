@@ -8,6 +8,7 @@ import { decryptOptionalCredential } from '../lib/credentials.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { GraphApiError, MetaGraphClient } from '../lib/meta/graph.js';
 import { DISCOVERY_HINT, mapGraphError } from '../publishing/errors.js';
+import { checkZernio } from '../publishing/zernio.js';
 
 /** The permissions a Unified Login system-user configuration must grant (memo §4). */
 export const REQUIRED_META_SCOPES = ['instagram_basic', 'instagram_content_publish'] as const;
@@ -148,20 +149,22 @@ function pending(conn: ConnectionRow): boolean {
 }
 
 /**
- * `social.check`: read-only check of the publishing connections (Meta today; WP10 adds Zernio). Runs after connect,
- * on "Check connection", daily at 4:23 am Melbourne time and before a verification post. Never posts.
+ * `social.check`: read-only check of the publishing connections (Meta, and Zernio for TikTok when it is switched on).
+ * Runs after connect, on "Check connection", daily at 4:23 am Melbourne time and before a verification post. Never
+ * posts.
  */
 export async function handleSocialCheck(ctx: WorkerContext, run: TrackedRun, payload: JobPayload<'social.check'>): Promise<void> {
   const rows = payload.connectionId
     ? await ctx.db.select().from(schema.integrationConnections).where(eq(schema.integrationConnections.id, payload.connectionId))
-    : await ctx.db.select().from(schema.integrationConnections).where(eq(schema.integrationConnections.provider, 'meta'));
+    : await ctx.db.select().from(schema.integrationConnections).where(inArray(schema.integrationConnections.provider, ['meta', 'zernio']));
   const results: string[] = [];
   for (const conn of rows) {
-    if (conn.provider !== 'meta') continue;
-    results.push(await checkMeta(ctx, run, conn));
-  }
-  if (payload.reason !== 'daily') {
-    await writeWorkerAudit(ctx.db, { userId: null, action: 'integration.meta.checked', entityType: 'integration_connection', entityId: rows[0]?.id ?? null, data: { reason: payload.reason, result: results.join('; ') } }, ctx.logger);
+    if (conn.provider !== 'meta' && conn.provider !== 'zernio') continue;
+    const result = conn.provider === 'meta' ? await checkMeta(ctx, run, conn) : await checkZernio(ctx, run, conn);
+    results.push(result);
+    if (payload.reason !== 'daily') {
+      await writeWorkerAudit(ctx.db, { userId: null, action: `integration.${conn.provider}.checked`, entityType: 'integration_connection', entityId: conn.id, data: { reason: payload.reason, result } }, ctx.logger);
+    }
   }
   await run.message(results.length ? results.join('; ') : 'No publishing connection to check');
 }
