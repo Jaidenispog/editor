@@ -43,6 +43,7 @@ honest: sourced, dated, and never called "trending" without evidence.
 | "shown transparently in Settings with a reset" | Settings → Editing preferences: per-field source chip, evidence sentence, pin/unpin, "Reset what it learned" (§9.1) |
 | §2 optional reference-video upload | Kind `reference_video` in a project; ingest branch + `reference.analyse` job; suggestions the owner accepts per field; originals deleted after measuring (§4.3, §6.2) |
 | "never copy its content" | Reference assets are structurally excluded from footage, plans and renders (§10) |
+| Owner request 15 Nov 2026: "base the edits off my TikTok … the animations, transitions, and music" | No TikTok access (memo §11); the owner uploads their own posted videos as references. Reference style v2 measures transitions, beat sync, drop-timed reveals, zooms and music tempo/energy, and offers them as suggestions in the renderer's existing vocabulary; the reference sound is measured only, never used or kept (§4.3.1) |
 | §2 saved brand preferences: fonts, colours, logo, text style, pacing | Audit of the renderer (§4.5); gaps: logo end card / corner mark inside the safe zone, brand snapshot per version, font list limited to bundled fonts |
 | §3 uploaded audio with permission + licence tracking | Licence passport form and server rules (§4.6), usage ledger `music_usage` (§5.2) |
 | §3 commercially licensed catalogue | Owner downloads from a business-eligible subscription and uploads (memo §2); `MusicCatalogueProvider` interface only, disabled (§6.4) |
@@ -185,6 +186,646 @@ the page read-only (owner-only settings, docs/security.md).
 
 Failure states: "This file has no video" / "The video is shorter than 3 seconds, too short to measure" /
 "Measuring failed. Try again." / "Text estimate not available (AI not set up)".
+
+### 4.3.1 Reference style v2: transitions, beat sync and music
+
+Status: design only, written 2026-11-15. §4.3 (v1: length, pacing, colour, on-screen text) is built; this section
+extends it. Nothing below is built yet.
+
+**Why.** On 15 Nov 2026 the owner asked for the edits to be based on their TikTok account: "the animations,
+transitions, and music". The app cannot do that by reading TikTok: there is no permitted TikTok API for this, its
+terms forbid scraping (memo §11, which is why §1 already rules out TikTok data of any kind), and the build
+environment cannot open TikTok at all. Instead the owner uploads a few of their **own posted videos**, saved to their
+phone, as reference videos (the §4.3 flow). v2 measures what makes that editing recognisable and turns it into
+suggestions the owner accepts, using only what the renderer can already do.
+
+**Fixed rules for v2** (each is tested, §4.3.1.10):
+
+1. **Renderer vocabulary only.** Every suggestion is expressed in what exists today: `TRANSITION_TYPES`
+   (`packages/core/src/styles.ts`), segment `zoom` `from`/`to` (1–1.5), per-segment `speed`, hard cuts
+   (`transitionIn: null`) and the beat grid (`beatGrid`, `snapCutsToBeats`, `landRevealOnBeat` in
+   `packages/ai/src/rules/music.ts`). No new render effects in this round (§4.3.1.11 lists them for later).
+2. **Estimates, offered as suggestions.** Every measured value is labelled an estimate from the owner's videos and
+   only changes a setting when the owner presses **Use this** (the accept/dismiss pattern of §4.3). Nothing
+   silently changes their settings. No wording ever says "exact", "precise" or "detected perfectly".
+3. **The reference soundtrack is measured, never used.** It is decoded in the worker only to measure tempo, how cuts
+   line up with the beat and the energy shape. It is never used in an export, never sent to an AI model, never
+   kept as audio, PCM, a beat list, an energy curve or a fingerprint, and no attempt is made to recognise the song.
+   The original, proxy and frames are still deleted after measuring (§4.3 step 1, §6.2, §7). Only the numbers in the
+   v2 schema (§4.3.1.5) remain. Those numbers rank the owner's **own licensed tracks** (§4.3.1.7); nothing is
+   ever fetched.
+4. **Captions are not transcribed.** Reference ingest keeps skipping transcription (§7 `ingest.asset`); v2 adds
+   none. The optional on-screen text estimate stays as in §8.3: frames only, with the owner's tick, and the text is
+   never read out.
+5. **Plans still pass `validateEditPlan`.** No new validator errors are added and no rule is relaxed. Plans built
+   with accepted suggestions go through the same repair loop and checks.
+6. **No synthetic footage presented as the owner's.** Test fixtures are generated at test time, labelled
+   `SYNTHETIC TEST CLIP` in the picture, named `synthetic-*.mp4`, and never seeded into a development or preview
+   database (§4.3.1.10).
+
+#### 4.3.1.1 Owner flow
+
+1. Upload dialog (§4.3 step 1), new copy:
+   "**Add a reference video (style only).** Studio Assistant can't open TikTok pages. Save a few of your own posted
+   videos to your phone and upload them here, one at a time. It estimates the pace, colour, transitions, zooms, how
+   your cuts line up with the beat, and the tempo and energy of the music. Nothing from these videos is used in your
+   edits — not the footage and not the sound — and each file is deleted once it has been measured. Only upload
+   videos you made or are allowed to use."
+   Tip under the drop zone: "Best: the video as you exported it before posting. A video saved from the TikTok app may
+   carry a watermark and an end screen; a dark end screen in the last few seconds is skipped."
+   The text-estimate checkbox is unchanged (default unticked).
+2. Processing states as §4.3, with two new progress messages: "Measuring transitions" and "Measuring the beat".
+3. The Reference card (Studio `ReferenceStrip`) adds a v2 line, e.g. "28 s · 24 shots (median 0.9 s) · mostly
+   straight cuts with 6 white flashes · cuts on the beat (19 of 23, about 124 BPM) · punch-in zooms in 3 shots ·
+   punchy colour (estimates)". v1 suggestion rows stay as they are. A link **See your style from all your videos**
+   opens Settings → Editing preferences → **Your style from your videos** (§4.3.1.9), where the v2 suggestions are
+   offered, combined across every measured video.
+4. A reference measured before v2 shows "Measured before transitions and beat were added. Upload it again to
+   include it." Its originals are already deleted, so it cannot be re-measured; its v1 numbers still count for the
+   v1 rows of the summary.
+
+#### 4.3.1.2 Measurement pipeline (`reference.analyse`, worker, on the proxy)
+
+All passes read the reference's proxy (`makeProxy`: upright, SDR, ≤ 960 px tall, ≤ 60 fps, AAC 96 kbps) in the job
+temp dir, before the originals are deleted. FFmpeg 6.1 filters used — each confirmed present with
+`ffmpeg -hide_banner -filters` on FFmpeg 6.1.1 (Ubuntu 24.04), 2026-11-15: `select` (scene score), `signalstats`,
+`blurdetect`, `metadata`, `scale`, `fps`, `format`; plus `scdet`, `ssim`, `tpad`, `mestimate`, `ebur128` and
+`xfade`, which were checked and are either not needed or used only in tests (reasons in the signal sections below).
+
+- **Measured span**: the first `min(duration, 120 s)` (own posts are mostly under a minute; this bounds memory),
+  minus a trimmed end screen (below). The span is stored as `measuredSec`.
+- **Pass A — per-frame scores (one FFmpeg run, native proxy frame rate):**
+
+  ```
+  ffmpeg -i proxy.mp4 -map 0:v:0 -an -t <span> \
+    -vf "scale=144:256:flags=area,format=yuv420p,select='gte(scene\,0)',signalstats,blurdetect=block_width=16:block_height=16:planes=1,metadata=mode=print:file=-" \
+    -f null -
+  ```
+
+  (`scale=256:144` for landscape proxies.) Parsed per frame, with the same `metadata=mode=print` parser style as
+  `parseSignalStats` in `look.ts`: `pts_time`, `lavfi.scene_score` (0–1), `lavfi.signalstats.YAVG`, `YMIN`,
+  `YMAX`, `YDIF` (mean absolute luma change from the previous frame) and `lavfi.blur` (`nan` on flat frames is
+  read as null). `select='gte(scene,0)'` passes every frame and only attaches the score, the same score
+  `detectScenes` uses. `scdet` gives the same signal on a 0–100 scale (≈ 39 × the `select` score in the prototype)
+  and is not needed.
+- **Pass B — tiny grey frames for the shape tests (one FFmpeg run):**
+
+  ```
+  ffmpeg -i proxy.mp4 -map 0:v:0 -an -t <span> -vf "fps=30,scale=72:128:flags=area,format=gray" -f rawvideo pipe:1
+  ```
+
+  9,216 bytes per frame, ≤ 3,600 frames (≤ 34 MB) for 120 s, held in memory and dropped when the job ends. Pure
+  functions over these frames do what FFmpeg filters cannot report as numbers: lagged comparisons (normalised cross-
+  correlation, NCC, between frames before and after an event), the cross-fade linearity test, the moving-band test
+  for slides and wipes, and the scale fit for zooms. A lag-K SSIM can be built in FFmpeg
+  (`split[a][b];[b]tpad=start=K:start_mode=clone[d];[a][d]ssim=stats_file=-`) and was used to check the shapes in
+  the prototype, but one raw pass serves every test and keeps the logic unit-testable. `mestimate` exists, but
+  FFmpeg 6.1 exposes its motion vectors only as frame side data, which no text filter prints (`showinfo` prints
+  the side-data size only: "Motion vectors: (11520 bytes)" in the prototype), so it is not used.
+- **Pass C — audio, only when the proxy has an audio stream:** `decodePcm(proxy, { sampleRate: 22050, channels: 1 })`
+  (existing) → `detectBeats` (existing: tempo, beat times, confidence, 0.25 s RMS energy). The same code measures
+  the owner's tracks (`analyseMusic`), so reference and track numbers are comparable. The audio/video offset is
+  `start_time(audio) − start_time(video)` from `ffprobe -show_entries stream=codec_type,start_time` and is added to
+  every beat time before comparing with cut times. The PCM buffer lives only in memory. `analyseAudio`'s
+  `speechLikely` (already computed for references at ingest) is read to recognise mostly-talking videos.
+- **End-screen trim**: if the part after the last detected boundary lasts 1.5–5 s and its mean YAVG ≤ 40 (on the
+  0–255 scale), it is excluded from every measurement and stored as `endScreenTrimmedSec`.
+
+Code: FFmpeg runs and frame maths in `packages/media/src/analysis/reference-style.ts`
+(`measureReferenceStyle(proxyPath, { probe, speechLikely, ffmpegPath, ffprobePath, signal })`, honouring the
+`AbortSignal` between passes and inside the frame loops); classification of the results into suggestions in
+`packages/core/src/reference-style.ts` (pure, no FFmpeg).
+
+#### 4.3.1.3 Signals: how each is measured, when it is reportable, what it maps to
+
+Every threshold below is a starting value from the synthetic prototype (§4.3.1.12), to be tuned once the owner's
+real videos have been seen (§13.4). Frame counts assume 30 fps and scale with the proxy frame rate.
+
+| Signal | Measured with | Reportable when | Maps to |
+| --- | --- | --- | --- |
+| Joins between shots (hard / cross-fade / flash / motion) | Pass A scene score, YAVG, YDIF, blur; Pass B NCC, linearity, band and scale tests (§4.3.1.3a) | ≥ 5 classified joins in the video and "unclear" ≤ 30 % of joins | `editingStyle.transitionPalette` in `TRANSITION_TYPES` (§4.3.1.5) |
+| Beat sync | Cut times (Pass A) against the reference's own beat grid (Pass C), ±1 frame and ±80 ms (§4.3.1.3b) | tempo confidence ≥ 0.35, ≥ 8 cuts, aligned share ≥ 60 % **and** above chance (binomial p < 0.01) | `editingStyle.beatSync = 'on'` and `beatsPerCut` 1, 2, 4 or 8 |
+| Drop-timed reveal | Largest 1-s energy rise ≥ 6 dB on the reference's RMS energy; cut, flash or punch-in within ±150 ms (§4.3.1.3c) | drop found **and** beat grid measured | `editingStyle.reveal = 'strongest_beat'` |
+| Zooms in shots | Pass B scale fit at 15 % and 85 % of each shot, plus jumps at cuts (§4.3.1.3d) | ≥ 6 shots of ≥ 0.6 s checked | `editingStyle.zoom` (`none` / `push_in` / `punch_in` with a scale) |
+| Music tempo and energy shape | Pass C tempo, 1-s smoothed RMS energy → 8-point shape, dynamic range, clear drop (§4.3.1.3e) | tempo confidence ≥ 0.35 | `editingStyle.musicFit`, used only by `rankTracksForPreferences` |
+| Pace (v1 field, corrected) | Shot lengths between v2 boundaries, no merging or splitting | ≥ 3 shots | `pacing` (v1 rule, §6.2) |
+
+##### 4.3.1.3a Transitions
+
+Detected in this order on the measured span; each frame belongs to at most one event.
+
+1. **Flashes and dips (white/black).** Baseline `Yb` = median YAVG of the 0.5 s before the event. A white event is a
+   run of frames with YAVG ≥ max(200, Yb + 60); a black event a run with YAVG ≤ 30 and `Yb − YAVG ≥ 0.5 × Yb`.
+   The event spans from the first frame where |YAVG − Yb| ≥ 15 to the frame where YAVG settles within 15 of the
+   next shot's level (capped at 1.5 s); its time is the frame of peak (white) or trough (black) luma. A run at the
+   extreme for more than 0.6 s is a black/white screen (title card, end screen), not a transition, and is not
+   counted. Kind: `fade_white` / `fade_black`. If NCC(frame before, frame after) ≥ 0.6, the flash happened inside
+   one shot (`inShot`); it maps the same way, because the renderer can only place it at a join.
+   *Prototype*: an `xfade=fadewhite` of 0.2 s read YAVG 125 → 244 then back over 5 frames; `fadeblack` 0.3 s read
+   125 → 5. FFmpeg's `fadewhite`/`fadeblack` reach their extreme about 20 % into the transition (measured at 0.2,
+   0.5 and 1.0 s durations), which the planner uses to put an accent's peak on the beat (§4.3.1.6).
+2. **Hard cuts.** Frame `t` is a cut when its scene score ≥ max(0.18, 8 × the median score over ±1 s), it is the
+   largest score within ±2 frames, both neighbours score ≤ 0.5 × it, it is not inside a flash event, and
+   NCC(frame t−2, frame t+2) < 0.5 (rules out fast motion and camera flashes). *Prototype*: real cuts scored
+   0.26–0.91; one scored 0.264, below `detectScenes`' default 0.3, which is why v2 does not reuse that threshold.
+   A busy single shot (Game-of-Life pattern) reached 0.27 on the frame after a cut, rejected by the ±2-frame
+   local-maximum rule.
+3. **Punch-in jumps.** A cut where the scale fit (§4.3.1.3d step 2) between the frame before and the frame
+   after finds `s` in 1.08–1.6 with residual ≤ 0.4 × the unscaled residual is reclassified `punch_in`: the same
+   shot, cropped in. It still counts as a cut for pace and beat sync, but not as a transition; it feeds the zoom
+   signal.
+4. **Gradual joins.** Candidate windows are runs of 4–45 frames (0.13–1.5 s, the `TransitionSchema` range) where
+   scene score stays below the cut threshold but YDIF ≥ 1.6 × its median over ±1.5 s for ≥ 80 % of the frames, and
+   the frames just outside the window differ (NCC < 0.6). Each window is then tested in turn:
+   - **Cross-fade** (`cross_fade`): every inner frame fits `F ≈ (1 − α)·F_start + α·F_end` with residual ≤
+     0.35 × the mean |F_end − F_start|, and α rises with time (Spearman ≥ 0.8). *Prototype*: a 0.5 s join kept
+     scene scores ≤ 0.03 while YDIF sat at 1.9 × baseline and YAVG ramped linearly between the two shots' levels.
+   - **Slide/wipe**: per-frame change concentrates in a band (≥ 55 % of the |ΔF| in the top 30 % of rows or
+     columns) whose centroid moves the same way for ≥ 3 frames. Rows → `slide_vertical` with direction up/down;
+     columns → `wipe_horizontal` with direction left/right. *Prototype*: an `xfade=slideup` of 0.3 s kept scene
+     scores ≤ 0.09 while YDIF ramped from 11 to 37.
+   - **Zoom transition** (`zoom`): the frame-to-frame scale fit is ≥ 1.03 per frame in the same direction for ≥ 3
+     frames.
+   - **Whip-like** (`whip_like`): `lavfi.blur` ≥ 1.8 × the median of the neighbouring shots for ≤ 0.3 s together with
+     a moving band; direction from the band.
+   - Otherwise `unclear` (counted, never mapped).
+   Known limit: FFmpeg's own `xfade=zoomin` passes through a dark frame (YAVG 39 in the prototype), so it reads as
+   a dip to black. That matters only for round-trip tests, which therefore do not use `zoomin` (§4.3.1.10).
+
+**Mapping of measured kinds to the renderer's vocabulary:**
+
+| Measured kind | `TRANSITION_TYPES` value | Note |
+| --- | --- | --- |
+| `hard` | none (`transitionIn: null`) | |
+| `fade_white` | `fadewhite` | accent (§4.3.1.5) |
+| `fade_black` | `fadeblack` | accent |
+| `cross_fade` | `fade` | FFmpeg's `xfade=fade` is the linear cross-fade; `xfade=dissolve` is a dithered pixel dissolve (checked: black→white mid-frame YLOW 16 / YHIGH 235 for `dissolve` against 125/125 for `fade`). Both read as a cross-fade at phone size; `fade` is the faithful match. |
+| `slide_vertical` up / down | `slideup` / `slidedown` | flashy |
+| `wipe_horizontal` left / right | `wipeleft` / `wiperight` | flashy |
+| `whip_like` left / right | `wipeleft` / `wiperight` | nearest available; a real whip blur is out of scope (§4.3.1.11) |
+| `zoom` | `zoomin` | flashy |
+| `punch_in` | not a transition | segment zoom (§4.3.1.3d) |
+| `unclear` | — | not counted in shares |
+
+`circleopen` is never suggested (nothing measures it).
+
+**Palette** (`paletteFromCounts`, pure). Flashes are treated as accents on top of the ordinary joins, so they are
+kept out of the base: classified = joins − unclear − punch-ins; `flash` = (white + black) ÷ classified; base =
+classified − flashes; `hard`, `cross` (cross-fades) and `motion` (slides + wipes + zooms + whip-like) are shares of
+the base.
+
+| Family | Rule (first match wins) | `transitionPalette` |
+| --- | --- | --- |
+| Straight cuts only | hard ≥ 0.85 and flash < 0.08 | `{ hardCutShare: 1, types: [], durationSec: 0.3, accent: null }` |
+| Straight cuts with flashes | hard ≥ 0.6 and flash ≥ 0.08 | `hardCutShare` = hard, rounded to 0.05; `types` = base kinds other than hard with share ≥ 0.1; `accent` = majority flash colour, `durationSec` = median flash length clamped 0.15–0.3, `everyBeats` = 4 or 8 when ≥ 60 % of flashes peak within ±80 ms of a beat and the median spacing of consecutive flashes rounds to 4 or 8 beats (needs ≥ 3 flashes and a measured beat), else null (accent only at the reveal) |
+| Cross-fades | cross ≥ 0.3 | `types: ['fade', …]`, `durationSec` = median cross-fade length rounded to 0.05, clamped 0.3–1.0; `hardCutShare` = hard; accent as above when flash ≥ 0.08 |
+| Movement | motion ≥ 0.25 | `types` = mapped motion kinds by count (≤ 3), `durationSec` = median clamped 0.2–0.6; `hardCutShare` = hard |
+| Mixed | otherwise | `hardCutShare` = hard; `types` = the two most used mapped base kinds with share ≥ 0.1 |
+
+Example: 20 joins measured as 15 hard, 4 white flashes peaking on every 4th beat and 1 unclear gives
+"straight cuts with flashes": `{ hardCutShare: 1, types: [], durationSec: 0.3, accent: { type: 'fadewhite',
+everyBeats: 4, durationSec: 0.2 } }`, worded "Straight cuts, with a quick white flash every 4 beats".
+
+##### 4.3.1.3b Beat sync
+
+- Needs Pass C with `bpm` not null, `confidence ≥ 0.35` (stricter than `detectBeats`' own 0.2), and not
+  (`speechLikely` and confidence < 0.5). Otherwise `beat.status = 'not_measured'` with reason `no_audio`,
+  `no_clear_beat` or `mostly_speech`; never reported as "not on the beat".
+- Cuts = hard cuts + punch-in jumps + flash peaks (the moment the picture changes). Fewer than 8 → `too_few_cuts`.
+- For each cut, the offset to the nearest beat (after the audio/video offset). Counted: `within1Frame`
+  (|offset| ≤ 1/fps), `within80ms`, the median signed offset in ms (shown as "your cuts land about 20 ms before the
+  beat") and `offBeatHalf` (cuts within ±80 ms of a half-beat but not a beat; noted only, not used in v2).
+- **Chance correction**: random cuts hit a ±80 ms window with probability `p0 = min(1, 0.16 × bpm / 60)` (0.32 at
+  120 BPM, 0.40 at 150 BPM). Reportable only when `within80ms ≥ max(ceil(0.6 × cuts), kMin)`, where `kMin` is the
+  smallest k with binomial tail P(X ≥ k | cuts, p0) ≤ 0.01. Examples (computed): 15 cuts at 120 BPM → kMin 10;
+  30 cuts at 120 BPM → 17; 8 cuts at 120 BPM → 7. The ±1-frame share is shown for information only.
+- **Cut every N beats**: for consecutive aligned cuts, `n = round(Δt / beatInterval)`; histogram over 1, 2, 4, 8 and
+  other. The mode is suggested as `beatsPerCut` when it holds ≥ 50 % of the gaps; else `beatsPerCut: null`
+  (beat-synced, rhythm left to the style).
+
+##### 4.3.1.3c Drop-timed reveal
+
+- **Drop**: from the reference's 0.25 s RMS energy, power smoothed with a 1 s moving mean;
+  `rise(t)` = 10·log10(mean power over [t, t + 1 s] ÷ mean power over [t − 2 s, t]). The drop is the largest rise
+  for t in [1.5 s, span − 1 s]; it is **found** when the rise ≥ 6 dB and the level after it is within 3 dB of the
+  video's 75th-percentile level (a real lift into a loud part, not a single knock). The time is refined to the
+  nearest beat in [t − 0.4 s, t + 0.15 s] when a beat grid is measured. Stored: `atSec`, `atShare` (position as a
+  share of the span) and `riseDb`.
+  `ebur128` was tried for this: on a percussive click track its momentary loudness (100 ms frames) dropped
+  15–35 LU between hits, so a rise found on it is noisy; the smoothed RMS energy is steadier and is exactly what the
+  owner's tracks already store (`music_tracks.beats.energy`), so the same function finds the strongest beat of a
+  track (§4.3.1.6).
+- **Visual event at the drop**: the nearest hard cut, flash peak or punch-in jump within ±150 ms → `cut`, `flash`
+  or `zoom` with its offset in ms; otherwise `none`. Without a measured beat grid the visual event is not measured
+  (null).
+- Combined (§4.3.1.4): suggested when ≥ 60 % of the videos with a found drop have an event there, with at least 2
+  agreeing videos (or 1 of 1). Maps to `editingStyle.reveal = 'strongest_beat'`; if most events are flashes and a
+  palette accent exists, the reveal also gets the accent.
+
+##### 4.3.1.3d Zooms in shots
+
+Conservative by design: a camera moving closer and a digital zoom look the same and are both reported as "zoom or
+moving closer".
+
+1. Shots of ≥ 0.6 s between v2 boundaries, ignoring 0.1 s at each end.
+2. **Scale fit** between the Pass B frames at 15 % and 85 % of the shot: for scale s from 0.80 to 1.40 in steps of
+   0.01 and anchor points on a 3 × 3 grid (0.3/0.5/0.7), predict the later frame by cropping the earlier one around
+   the anchor by 1/s and scaling back (bilinear), comparing only the inner 80 % of the frame; keep the s with the
+   lowest mean absolute error `e(s)`.
+3. A shot has a zoom when |s − 1| ≥ 0.04, `e(best) ≤ 0.5 × e(1)`, `e(1) ≥ 4` grey levels (enough texture and
+   change to tell) and the fits 15 % → 50 % and 50 % → 85 % point the same way. s > 1 is a push-in, s < 1 a pull-out.
+4. Punch-in jumps come from §4.3.1.3a step 3.
+
+*Prototype*: a `zoompan` push-in from 1.0 to 1.15 over 2 s measured 1.14 between 0.1 s and 1.9 s (true ratio 1.128)
+with residual ratio 0.14, and 1.08 between 0.5 s and 1.5 s (true 1.073); a static test pattern measured 1.00; a
+chaotic pattern gave residual ratio 0.91 (rejected); a smooth gradient had `e(1)` = 1.96 (rejected as too little
+texture).
+
+Mapping (combined): punch-in jumps ≥ 15 % of cuts → `{ mode: 'punch_in', scale: median clamped 1.08–1.25,
+shareOfCuts: rounded share clamped 0.1–0.5 }`; else push-ins in ≥ 30 % of checked shots →
+`{ mode: 'push_in', scale: median clamped 1.03–1.12 }`; else, with ≥ 12 checked shots and no zoom at all →
+`{ mode: 'none' }` ("No zooms seen in 31 shots"); otherwise no suggestion.
+
+##### 4.3.1.3e Music tempo and energy shape
+
+- Tempo: `beat.bpm` when confidence ≥ 0.35 (cut alignment does not need to be reportable).
+- Energy shape: the measured span in 8 equal parts; per part the mean power in dB relative to the loudest part,
+  mapped to 0–1 by (dB + 24) ÷ 24, clamped. `dynamicRangeDb` = 90th − 10th percentile of the 1-s smoothed dB curve.
+  Shape word for display only: `steady` (range < 4 dB), `builds` (second half ≥ 4 dB louder than the first),
+  `drop` (a drop was found), else `varied`.
+- Combined → `musicFit = { bpmLow, bpmHigh, prefersClearDrop, dynamicRangeDb }`: tempo range = min–max of the
+  agreeing videos' tempos (each folded by ×2 or ÷2 into ±6 % of the median when that is closer, as half/double time
+  is common), widened by 3 % each side; `prefersClearDrop` when ≥ 60 % of videos with a measured tempo have a drop.
+
+#### 4.3.1.4 Combining several videos into "your style"
+
+`summariseReferenceStyle(profiles, effectivePreferences)` (pure, `packages/core/src/reference-style.ts`) reads the
+latest 12 ready reference profiles (all projects). Each video counts once.
+
+- **Continuous values** (median shot, tempo, hard-cut share, cross-fade length, zoom scale): the median over the
+  videos where the signal was reportable. A video **agrees** when its own value is within tolerance of that median:
+  tempo ±6 % (octave-folded), hard-cut share ±0.15, median shot ±25 %, scale ±0.04.
+- **Categories** (palette family, accent colour and `everyBeats`, `beatsPerCut`, zoom mode, drop event,
+  `prefersClearDrop`): the majority value; agreeing videos are those with that value.
+- **Shares pooled**: palette shares use the summed join counts of the agreeing videos (videos with more joins carry
+  more evidence); per-video agreement still uses each video's own family.
+- **Reportable**: agreeing ÷ measured ≥ 0.6 and (measured ≥ 2, or exactly one video was uploaded). With one video
+  every row says "from 1 video". When videos split (for example 1 of 2), the row says "Your videos differ here" and
+  offers no button.
+- Each summary row carries `measured`, `agreeing`, `total` and the reasons videos were not measured, shown as
+  "Seen in 3 of 4 videos (1 had no clear beat)".
+- v1 fields (length, pace, colour, on-screen text) are combined the same way (median length rounded to 5 s,
+  majority pace/colour/text density) so the summary is the single place to accept a style; older v1-only profiles
+  count for these rows only.
+
+#### 4.3.1.5 Schemas (Zod 4, `packages/core`, no migration)
+
+`ReferenceStyleProfile` v2 (`packages/core/src/reference.ts`), stored in `media_assets.reference_profile` like v1:
+
+```ts
+export const BOUNDARY_KINDS = ['hard', 'fade_white', 'fade_black', 'cross_fade', 'slide_vertical', 'wipe_horizontal',
+  'zoom', 'whip_like', 'punch_in', 'unclear'] as const;
+
+export const ReferenceStyleSignalsSchema = z.object({
+  analysisVersion: z.number().int().positive(),     // REFERENCE_STYLE_ANALYSIS_VERSION at measuring time
+  estimate: z.literal(true),                        // every number here is an estimate
+  measuredSec: z.number().nonnegative(),
+  endScreenTrimmedSec: z.number().nonnegative(),
+  fps: z.number().positive(),
+  shots: z.object({ count: z.number().int().nonnegative(), medianSec: z.number().nonnegative(),
+                    p25Sec: z.number().nonnegative(), p75Sec: z.number().nonnegative() }),   // raw v2 boundaries
+  transitions: z.object({
+    joins: z.number().int().nonnegative(),
+    counts: z.partialRecord(z.enum(BOUNDARY_KINDS), z.number().int().nonnegative()),
+    directions: z.object({ up: z.number().int(), down: z.number().int(), left: z.number().int(), right: z.number().int() }),
+    crossFadeMedianSec: z.number().nullable(),
+    flashMedianSec: z.number().nullable(),
+    flashesOnBeat: z.number().int().nullable(),     // null when the beat was not measured
+    flashEveryBeats: z.number().nullable(),
+    family: z.enum(['straight_only', 'straight_flash', 'cross_fades', 'movement', 'mixed']).nullable(),
+    reportable: z.boolean(),
+  }),
+  beat: z.discriminatedUnion('status', [
+    z.object({ status: z.literal('measured'), bpm: z.number().positive(), confidence: z.number().min(0).max(1),
+      cuts: z.number().int(), within1Frame: z.number().int(), within80ms: z.number().int(),
+      chanceShare80ms: z.number().min(0).max(1), offBeatHalf: z.number().int(), medianOffsetMs: z.number(),
+      beatsPerCutCounts: z.object({ one: z.number().int(), two: z.number().int(), four: z.number().int(),
+                                    eight: z.number().int(), other: z.number().int() }),
+      beatsPerCut: z.union([z.literal(1), z.literal(2), z.literal(4), z.literal(8)]).nullable(),
+      reportable: z.boolean() }),
+    z.object({ status: z.literal('not_measured'), reason: z.enum(['no_audio', 'no_clear_beat', 'mostly_speech', 'too_few_cuts']),
+      bpm: z.number().positive().nullable() }),     // tempo may still be known with too few cuts
+  ]),
+  drop: z.object({ status: z.enum(['found', 'none', 'not_measured']), atSec: z.number().nullable(),
+    atShare: z.number().min(0).max(1).nullable(), riseDb: z.number().nullable(),
+    visualEvent: z.enum(['cut', 'flash', 'zoom', 'none']).nullable(), eventOffsetMs: z.number().nullable() }),
+  zoom: z.object({ shotsChecked: z.number().int(), pushIns: z.number().int(), pullOuts: z.number().int(),
+    punchIns: z.number().int(), medianPushScale: z.number().nullable(), medianPunchScale: z.number().nullable() }),
+  music: z.object({ status: z.enum(['measured', 'not_measured']), bpm: z.number().nullable(),
+    energyShape: z.array(z.number().min(0).max(1)).length(8).nullable(),
+    shapeWord: z.enum(['steady', 'builds', 'drop', 'varied']).nullable(),
+    dynamicRangeDb: z.number().nullable(), hasClearDrop: z.boolean() }),
+});
+
+export const ReferenceStyleProfileV1Schema = /* today's ReferenceStyleProfileSchema, unchanged */;
+export const ReferenceStyleProfileV2Schema = ReferenceStyleProfileV1Schema.extend({
+  version: z.literal(2),
+  style: ReferenceStyleSignalsSchema.nullable(),     // null only for a v1 profile read through readReferenceProfile
+});
+export const ReferenceStyleProfileSchema = z.discriminatedUnion('version', [ReferenceStyleProfileV1Schema, ReferenceStyleProfileV2Schema]);
+/** Backwards-compatible read: v1 → v2 shape with style null (never written back, so stored v1 stays recognisable). */
+export function readReferenceProfile(raw: unknown): ReferenceStyleProfileV2;
+```
+
+No beat times, cut times, energy curve, audio or frames are stored; the shot quartiles, counts, ratios, the 8-point
+shape and the drop position are all that remain. Every caller that parses `reference_profile`
+(`handlers/reference.ts`, `apps/web/src/lib/references.ts`, the status DTO) switches to `readReferenceProfile`.
+v2 `shotCount`/`shotSec`/`cutsPer10Sec` (the v1 fields) are filled from `style.shots`, which corrects a v1 bias:
+v1 used `detectScenes` defaults (`minShotSec 0.8` merges, `maxShotSec 5` splits), so a montage of 0.4 s shots was
+measured as ≥ 0.8 s and suggested "balanced" instead of "fast". Stored v1 profiles keep their numbers.
+
+`EditingPreferences` addition (`packages/core/src/settings.ts`), all defaulted so stored settings parse and plans
+are unchanged until the owner accepts something:
+
+```ts
+export const EDITING_STYLE_FIELDS = ['transitionPalette', 'beatSync', 'beatsPerCut', 'reveal', 'zoom', 'musicFit'] as const;
+
+export const TransitionPaletteSchema = z.object({
+  hardCutShare: z.number().min(0).max(1),                    // share of joins left as straight cuts
+  types: z.array(TransitionTypeSchema).max(3),               // non-accent transitions, most used first
+  durationSec: z.number().min(0.15).max(1),                  // typical length of those, rounded to 0.05
+  accent: z.object({
+    type: z.enum(['fadewhite', 'fadeblack']),
+    everyBeats: z.union([z.literal(4), z.literal(8)]).nullable(),   // null = only at the reveal
+    durationSec: z.number().min(0.15).max(0.3),
+  }).nullable(),
+});
+export const ZoomUseSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('style') }),                   // each style's own zooms (today)
+  z.object({ mode: z.literal('none') }),
+  z.object({ mode: z.literal('push_in'), scale: z.number().min(1.03).max(1.12) }),
+  z.object({ mode: z.literal('punch_in'), scale: z.number().min(1.08).max(1.25), shareOfCuts: z.number().min(0.1).max(0.5) }),
+]);
+export const MusicFitSchema = z.object({
+  bpmLow: z.number().min(40).max(220), bpmHigh: z.number().min(40).max(220),
+  prefersClearDrop: z.boolean(), dynamicRangeDb: z.number().nullable(),
+});
+export const REFERENCE_SUMMARY_FIELDS = [...REFERENCE_SUGGESTION_FIELDS, ...EDITING_STYLE_FIELDS] as const;
+
+editingStyle: z.object({
+  transitionPalette: TransitionPaletteSchema.nullable().default(null),   // null = each style's own transitions
+  beatSync: z.enum(['auto', 'on', 'off']).default('auto'),
+  beatsPerCut: z.union([z.literal(1), z.literal(2), z.literal(4), z.literal(8)]).nullable().default(null),
+  reveal: z.enum(['style', 'strongest_beat']).default('style'),
+  zoom: ZoomUseSchema.default({ mode: 'style' }),
+  musicFit: MusicFitSchema.nullable().default(null),
+  /** Where each non-default value came from (server-managed). */
+  sources: z.partialRecord(z.enum(EDITING_STYLE_FIELDS), z.object({
+    by: z.enum(['owner', 'reference']), at: z.string(),
+    referenceAssetIds: z.array(z.string()).max(12).default([]), referenceName: z.string().max(200).default(''),
+  })).default({}),
+  /** Owner decisions on summary rows; a dismissed row comes back only if its suggested value changes. */
+  summaryDecisions: z.partialRecord(z.enum(REFERENCE_SUMMARY_FIELDS), z.object({
+    decision: z.enum(['accepted', 'dismissed']), valueKey: z.string().max(400), at: z.string(),
+  })).default({}),
+}).default(DEFAULT_EDITING_STYLE),
+```
+
+`valueKey` is the stable JSON of the suggested value. The `editingStyle` fields are not learnable from feedback in
+this round (plan facts do not carry them), so they are plain declared values with their own `sources`; the v1 fields
+keep using `learning.pinned`, whose `PinSchema` gains `referenceAssetIds: z.array(z.string()).max(12).default([])`
+for summary accepts (`referenceAssetId: null`, `referenceName: 'Your videos (4)'`).
+
+**Suggestion rows** (`SummarySuggestion`): `{ field: ReferenceSummaryField, value, valueKey, wording,
+evidence: { measured, agreeing, total, notMeasured: Array<{ reason, count }> }, alsoChanges: Array<{ field, value }>,
+state: 'open' | 'matches' | 'differs' | 'accepted' | 'dismissed' }`. `alsoChanges` makes side effects visible
+before the owner presses the button: a palette containing a flashy type (anything outside
+`RESTRAINED_TRANSITIONS`) also sets `transitions: 'varied'` (pinned `by: 'reference'`); `beatsPerCut` is offered
+with `beatSync: 'on'` as one row.
+
+**Accepting** (`POST /api/references/summary/decide`, §9.2): v1 fields set the declared value and pin it
+(as §6.2); `editingStyle` fields set the value and `sources[field] = { by: 'reference', … }`; `summaryDecisions`
+records the decision and `valueKey`. The owner can change any of them later in Settings (source becomes
+`owner`) or press **Go back to each style's own** (resets `editingStyle` to its defaults, keeps v1 fields). Audit
+`reference.summary_decided` / `preferences.editing_style_changed`.
+
+#### 4.3.1.6 What accepted suggestions change in the five edits
+
+Precedence, unchanged in spirit: a revision request (for example "remove the flashy transitions", "ignore the
+beat") > this generation's form and the Sound panel > standing instructions > `editingStyle` > the style's
+defaults. `effectiveSettings` (`packages/ai/src/rules/settings.ts`) gains `editingStyle`, resolved from the
+effective preferences; with the defaults every plan is byte-identical to today's (tested).
+
+**Rules planner** (`packages/ai/src/rules/editing-style.ts`, called from the style builders and `planner.ts`):
+
+- **Joins**: join i (not the first segment, and not a join the style reserves, see the table) becomes a palette
+  transition when `frac(i × 0.618 + attempt × 0.37) ≥ hardCutShare` (a low-discrepancy sequence: the share holds
+  within one join and each take differs); type `types[k mod types.length]`, length `durationSec`, shortened to fit
+  the existing `TRANSITION_TOO_LONG` limits or dropped to a hard cut when it cannot fit.
+- **Accent on the beat**: with music, beat-synced styles put the accent on joins whose cut falls on beat index
+  ≡ 0 (mod `everyBeats`) counted from where the music starts (the grid's bar convention), at most one per 2 s. The
+  transition starts at `beat − 0.2 × duration`, so its white or black peak lands on the beat (§4.3.1.3a), and the
+  segments either side are lengthened so the total length stays the same. `audio.beatAlignment.alignedCutTimesSec`
+  reports the peak time.
+- **Beat sync**: `PlannerInput.beatSync` defaults to `editingStyle.beatSync` when neither the form nor the Sound
+  panel set it. `on` runs `snapCutsToBeats` for styles that do not cut on the beat by themselves (existing).
+- **Cut every N beats**: the beat montage's beats-per-shot options become [N, 2N] (or [2N, 4N] when N beats last
+  under 0.4 s); other styles round each shot to a whole number of N-beat steps before snapping, inside their own
+  `minShotSec`–`maxShotSec` (the style's range wins; the plan note says so).
+- **Reveal on the strongest beat**: `strongestBeat(track)` runs the §4.3.1.3c drop function on the track's stored
+  energy curve and beat grid. When the owner left the music start on automatic, the music start is chosen so this
+  beat falls on the reveal (the first `result` segment) at 45–80 % of the edit, within the track's bounds. When the
+  owner fixed the start, the reveal moves to the strongest beat if it lies at 35–85 % of the edit; otherwise the
+  existing `landRevealOnBeat` (nearest downbeat) applies. No clear drop in the track (rise < 6 dB) → nearest
+  downbeat, with the note "No clear drop in this track — the reveal lands on a downbeat."
+- **Zoom**: `none` → every segment `zoom: null` (style push-ins included); `push_in` → the style's existing zoom
+  places use `{ from: 1, to: scale }`, and process shots ≥ 1.5 s alternate push-ins; `punch_in` → on `shareOfCuts`
+  of the hard cuts that land on a beat, instead of cutting to another shot the current shot continues (same asset,
+  contiguous source time) as a new segment with a static `{ from: scale, to: scale }`, when ≥ 0.8 s of footage
+  remains. Scale is capped at `min(scale, 1.25, max(1.10, sourceShortSide ÷ 1080))` so exports do not soften;
+  the AI prompt's "subtle zooms (1.0–1.1)" line gains "or up to the accepted punch-in scale".
+- **Music fit**: no planner effect; ranking only (§4.3.1.7).
+
+Each style keeps its character, so the five edits stay different:
+
+| Style | Palette joins | Accent | Beat sync / every N beats | Reveal on strongest beat | Zoom |
+| --- | --- | --- | --- | --- | --- |
+| Beat montage | all body joins | on every `everyBeats`, and at the final shot | always on the beat; N applies | final result shot | push-in / punch-in apply |
+| Cinematic reveal | process joins (calm types only, unless the family is "straight cuts", which makes them hard cuts) | only the pre-reveal join (replaces its dissolve/dip) | snapping when `on`; N applies to process shots | the held reveal | push-in replaces its subtle push-ins; punch-in only before the reveal |
+| Before and after | bridge joins | the before → after join | snapping when `on` | the after shot | apply |
+| Clean promo | `hardCutShare` and cross-fade length only | never (stays calm; note: "Clean promo stays calm, so it keeps straight cuts but no flashes") | snapping when `on` | final shot, on a downbeat only | push-in only; never punch-in |
+| Process story | all joins | at the result only | snapping when `on`; N applies | first result shot | apply |
+
+A revision hint `transitions: restrained` drops flashy palette types and accents for that edit (accents become hard
+cuts), exactly as today's `tameTransition`; `none` makes every join a hard cut.
+
+**AI planner brief** (`packages/ai/src/anthropic/prompts.ts`): `job.editingStyle` =
+`{ transitionPalette, beatSync, beatsPerCut, reveal: { mode, targetOutputSec | null }, zoom }`, where
+`targetOutputSec` is the strongest beat on the output timeline computed by the worker with the same function as the
+rules planner (so the model never has to find the drop). `allowedTransitionsFor` adds the palette types (after the
+calm/none filter). New system-prompt lines: "When job.editingStyle is present it describes the owner's own editing,
+measured from their videos: keep about hardCutShare of the joins as straight cuts; use only the palette types; place
+accent transitions so their brightest or darkest moment (about 20 % into the transition) lands on every
+everyBeats-th beat; with beatsPerCut, make shots last whole multiples of that many beats; with reveal.targetOutputSec,
+start the first result shot there; zoom.punch_in means continuing the same shot with a static zoom of that scale
+instead of cutting away." The validator context gains `extraStyleTransitions` (the palette types), so palette
+choices do not raise `OFF_STYLE_TRANSITION` warnings; errors are unchanged.
+
+#### 4.3.1.7 Music ranking (`packages/core/src/music-ranking.ts`)
+
+`rankTracksForPreferences` gains `opts.fit?: MusicFit` and `RankableTrack.drop?: { riseDb: number } | null`
+(computed when tracks are listed, from the stored energy curve, with `strongestBeat`):
+
+- +2 when the track's BPM is in `[bpmLow, bpmHigh]`; +1 when only half or double its BPM is (reason "Half-time
+  feel close to your videos").
+- +1 when `prefersClearDrop` and the track has a drop of ≥ 6 dB.
+- Reasons: "Tempo close to your videos (118–126 BPM)", "Builds to a clear drop, like your videos". Tracks without a
+  BPM get no tempo points ("tempo unknown").
+- Unchanged: only the owner's own tracks; unusable tracks stay last with their reason; nothing is chosen
+  automatically; "No music" stays a first-class choice. The fit never fetches, plays or looks up anything.
+
+#### 4.3.1.8 Owner-facing wording (Australian English)
+
+| Situation | Wording |
+| --- | --- |
+| Summary header | "**Your style from your videos** — estimated from 4 of your videos · updated 15 Nov 2026, 3:10 pm" |
+| Honesty line under the header | "These are estimates from your videos, not exact measurements. Check the next few edits and change anything that doesn't feel like you. Nothing from the videos is used in your edits, and the files were deleted after measuring." |
+| Transitions (straight + flash) | "Mostly straight cuts (about 80 %), with a quick white flash every 4 beats. Seen in 3 of 4 videos." → **Use straight cuts with a white flash every 4 beats** · "Also turns on bolder transitions" (when `alsoChanges` has it) |
+| Transitions (cross-fades) | "Soft cross-fades of about half a second between most shots." → **Use half-second cross-fades** |
+| Beat | "Your cuts land on the beat: 19 of 23 within 80 ms (about 124 BPM). Seen in 4 of 4 videos." → **Cut on the beat, about every 2 beats** |
+| Beat not measured | "Beat: not measured — the sound in this video has no clear beat." / "… it's mostly talking." / "… it has no sound." / "… it has too few cuts to tell." |
+| Not above chance | "Some cuts are near a beat, but no more than you'd expect by chance, so we're not suggesting beat-synced cuts." |
+| Reveal | "The music's biggest lift lands on a cut or flash in 3 of 4 videos." → **Land the finished look on the strongest beat of your track** |
+| Zoom | "Quick punch-in zooms on about 1 in 5 cuts (estimate)." → **Use punch-in zooms (up to 1.2×)** · "No zooms seen in 31 shots." → **Keep shots unzoomed** |
+| Music | "Music around 118–126 BPM that builds to a clear drop." → **Suggest tracks from your library around 115–130 BPM with a clear drop** · "Only your own licensed tracks are suggested. The sound from your videos is never used or kept." |
+| Videos differ | "Your videos differ here: 1 cuts on the beat, 1 doesn't." (no button) |
+| Matches | "Matches your settings" (no button) |
+| Older measurement | "Measured before transitions and beat were added. Upload it again to include it." |
+| End screen | "Skipped a dark end screen in the last 3 s." |
+| Plan note (rules planner) | "Straight cuts with a white flash on every 4th beat, from your style." / "The finished look lands on the biggest lift in 'Track' (estimate)." |
+
+Never used: "exact", "precisely", "detected", "trending", "viral", "your TikTok". The style is "from your videos".
+
+#### 4.3.1.9 Settings → Editing preferences → "Your style from your videos"
+
+New card above **Reference videos** in `preferences-tab.tsx` (component `YourStyleSummary`,
+`apps/web/src/app/(app)/settings/_components/your-style-summary.tsx`), data from `GET /api/references/summary`.
+
+- Header and honesty line (§4.3.1.8). **Use all suggestions** (open rows only; a confirm lists every change,
+  including `alsoChanges`) and **Go back to each style's own** (confirm: "Transitions, beat, reveal, zoom and music
+  matching go back to each style's own. Length, pace, colour and text stay as they are.").
+- Rows in this order: Pace, Length, Colour, On-screen text, Transitions, Cutting to the beat, Big moment (reveal),
+  Zooms, Music. Each row: what was seen (plain sentence), the agreement chip ("Seen in 3 of 4 videos"), and either
+  **Use this** / **No thanks**, "Matches your settings", "Your videos differ here" or the not-measured reason. A
+  small "In use: from your videos" chip on accepted rows, with **Change**.
+- **Videos** list under the rows: thumbnail, file name, measured date (Melbourne time), the per-video line, "older
+  measurement" chip where it applies, **Open project**.
+- States: loading skeleton; empty ("Upload a few of your own posted videos with **Add a reference video** in any
+  project and the editor will estimate your style. Nothing has been measured yet."); measuring ("2 videos are still
+  being measured"); only older measurements; nothing reportable ("Not enough to go on yet — 1 video had no clear
+  beat and too few joins. Another video or two will help."); load error with **Try again**; staff see it read-only.
+  Works at 360 px (rows stack).
+
+#### 4.3.1.10 Tests
+
+**Synthetic reference fixtures with known ground truth.** Generated at test time by
+`packages/media/test/fixtures/make-reference-fixtures.ts` (FFmpeg `lavfi` only; nothing committed), 540 × 960,
+30 fps, 48 kHz audio; every frame carries a small `SYNTHETIC TEST CLIP` label; files are named `synthetic-*.mp4`
+and each has a ground-truth JSON beside it. Shots come from 8 visually different sources (`testsrc2`,
+`mandelbrot`, `cellauto`, `smptebars`, `gradients`, `life`, `rgbtestsrc`, `testsrc`) with temporal noise and hue
+offsets. The click track is
+`aevalsrc='0.8*sin(2*PI*55*t)*exp(-30*mod(t\,0.5))+0.3*sin(2*PI*1800*t)*exp(-60*mod(t\,0.5))'` (120 BPM; at
+30 fps every beat is on a frame, so cuts can be placed exactly).
+
+| Fixture | Built with | Ground truth | Tolerance assertions |
+| --- | --- | --- | --- |
+| R1 hard cuts, 120 BPM | 1.0 s shots concatenated (a cut every 2 beats, on the beat) + click track, 16 s | 15 hard cuts at 1, 2, …, 15 s | joins 15 ± 1, hard ≥ 14; tempo 120 ± 1.5; `within1Frame` ≥ 13; `within80ms` ≥ 14; \|median offset\| ≤ 15 ms; `beatsPerCut` 2; beat reportable; family `straight_only`; no zoom found |
+| R2 flash every 4th beat | R1, but the joins at 2, 4, …, 14 s are `xfade=fadewhite` 0.2 s starting 0.04 s before the beat | 7 flashes (peaks on beats), 8 hard cuts | `fade_white` 7 ± 1; hard 8 ± 1; `flashesOnBeat` ≥ 6; `flashEveryBeats` 3.5–4.5; `flashMedianSec` 0.2 ± 0.07; palette `{ hardCutShare: 1, accent: { type: 'fadewhite', everyBeats: 4 } }` |
+| R3 cross-fades | 6 shots × 2.5 s joined with `xfade=fade` 0.5 s; pink noise at −30 dBFS | 5 cross-fades, no beat | `cross_fade` ≥ 4; hard ≤ 1; `crossFadeMedianSec` 0.5 ± 0.1; beat `not_measured` (`no_clear_beat`); palette `types[0] = 'fade'`, `durationSec` 0.5 ± 0.1 |
+| R3b pixel dissolve | as R3 with `xfade=dissolve` | 5 cross-fades | same as R3 (proves the `fade` mapping) |
+| R4 zooms | shot A static 3 s; shot B 3 s `zoompan` 1.0 → 1.2 about the centre (from a 2× upscaled source); shot C 3 s with a jump to a 1.25× crop at 1.5 s | 1 push-in, 1 punch-in jump, 2 hard cuts | `pushIns` 1, scale between 15 % and 85 % = truth ± 0.03; `punchIns` 1, scale 1.25 ± 0.04, not counted as a transition; `pullOuts` 0; static shots \|s − 1\| < 0.02 |
+| R5 drop on a cut | 120 BPM, −18 dB until 8.0 s, then 0 dB; hard cut + white flash peaking at 8.0 s; other cuts every 2 s | drop at 8.0 s | drop `found`, `atSec` 8.0 ± 0.15, `riseDb` ≥ 10; `visualEvent` `cut` or `flash`, \|offset\| ≤ 150 ms |
+| R5b drop, no event | R5 audio; cuts only at 7 and 9 s around the drop | drop at 8.0 s, nothing there | `visualEvent` `none` |
+| R6 slides and wipes | 5 joins: `slideup`, `slidedown`, `wipeleft`, `wiperight`, `slideup`, 0.3 s each | 5 motion joins | ≥ 4 classified motion with the right axis and direction; 0 classified `cross_fade` |
+| R7 busy single shot | 15 s of `life` and `cellauto` with crop jitter (`crop=x='20*sin(7*t)'`), no cuts | 0 joins | joins ≤ 1; zooms 0 |
+| R8 dark end screen | R1 + 3 s near-black with a small plain white box | trim 3 s | `endScreenTrimmedSec` 3 ± 0.2; no joins counted inside it |
+| R9 talking | hard cuts over the speech-like signal from `packages/media/test/analysis-fixtures.ts` | no musical beat | beat `not_measured` (`mostly_speech` or `no_clear_beat`), never "off the beat" |
+| R10 124 BPM, every beat | a cut on each beat of a 124 BPM click for 15 s (beats not on the frame grid) | one cut per beat (≈ 31) | tempo 124 ± 2; `within1Frame` ≥ 85 %; `beatsPerCut` 1 |
+| R11 random cuts | 15 cuts at seeded random times over the 120 BPM click | chance alignment | beat `reportable: false`; no beat-sync suggestion |
+
+**Unit (vitest, no FFmpeg)**: `packages/media` frame maths on hand-built metric arrays and tiny frames (cut rule
+edges, flash run lengths, linearity residual, band centroid direction, scale fit on a synthetic 72 × 128 frame
+zoomed by known factors, `nan` blur); `packages/core/test/reference-style.test.ts`: binomial `kMin` table (15 cuts at
+p0 0.32 → 10; 30 → 17; 8 → 7), `beatsPerCut` histogram, `findDrop` on synthetic energy curves (step rise, single
+knock rejected, alternating click windows smoothed), `paletteFromCounts` for each family and the worked example in
+§4.3.1.3a, `summariseReferenceStyle` (1 of 1, 3 of 4 agree, 1 of 2 → differs, octave-folded tempos, older profiles
+count only for v1 rows), `readReferenceProfile` (v1 → v2 with `style: null`, v2 round trip), `alsoChanges` for a
+flashy palette, `valueKey` stability, wording never contains "exact"/"precise"/"trending"/"viral";
+`music-ranking.test.ts`: in-range BPM above out-of-range, half-time +1, drop +1, unusable still last, no fit = today's
+order.
+
+**Measurement on fixtures (`packages/media/test/reference-style.test.ts`, needs FFmpeg like the other media
+tests)**: every row of the fixture table, plus: the `AbortSignal` stops the passes; a proxy without audio gives
+beat/music `not_measured` and still measures transitions.
+
+**Planner (`packages/ai/test/rules-editing-style.test.ts`)**, on the existing synthetic footage analyses and a
+synthetic 120 BPM track with a drop at 12 s:
+
+- Defaults: all five plans are identical to today's (stored snapshot).
+- Accepted `{ transitionPalette: straight + fadewhite every 4, beatSync: 'on', beatsPerCut: 2, reveal:
+  'strongest_beat', zoom: punch_in 1.2 at 0.25 }`: all five plans pass `validateEditPlan` with no errors; the five
+  plans differ from the defaults (plan facts compared) and still differ from each other; beat montage: every join
+  that is not an accent is a hard cut (`hardCutShare` 1), ≥ 1 `fadewhite`, every `fadewhite` peak (start + 0.2 × duration) within ±40 ms of a beat
+  whose index from the music start is ≡ 0 (mod 4); median shot ÷ beat interval in 1.5–2.5; process story: ≥ 70 % of
+  cuts within ±40 ms of a beat; reveal: the first result segment starts within ±0.1 s of the track's strongest beat
+  (music start automatic); punch-in: ≥ 1 pair of consecutive segments on the same asset with contiguous source
+  times and a static zoom of 1.2, and no zoom above 1.25; clean promo has no `fadewhite` and no punch-in;
+  a revision "remove the flashy transitions" removes every accent and passes `restrainedTransitionsOnly`
+  validation; dismissed suggestions → plans equal the defaults; deterministic for the same input.
+- AI brief: `buildPlannerJob` includes `editingStyle` with `targetOutputSec` and `allowedTransitions` contains the
+  palette types; a fake AI plan using palette types raises no `OFF_STYLE_TRANSITION` warning.
+
+**Integration (`TEST_DATABASE_URL` + FFmpeg)**: `apps/worker/test/reference.integration.test.ts` extended — ingest R2
+and R5 as `reference_video`: a version 2 profile is stored with `style` filled; afterwards the storage prefix of the
+asset holds only the thumbnail; the profile JSON contains no array longer than 8 numbers (no beat times or energy
+curve); the fake text estimator is called with frames only, and not at all without the tick; no AI call is made
+for audio. Web (`apps/web/test`): `GET /api/references/summary` and `POST …/summary/decide` (owner-only, CSRF,
+`valueKey` mismatch → 409, accept writes `editingStyle` + `sources` + `summaryDecisions` and the audit row).
+**Round trip** (slow, optional in CI): render the beat montage from the planner test with the accepted palette,
+run `measureReferenceStyle` on the preview, expect `fade_white` peaks within ±80 ms of beats for ≥ 70 % of accents
+and family `straight_flash` (no `zoomin` in this test, §4.3.1.3a known limit).
+
+**Only with the owner's real videos (§13.4)**: 3–5 of their own posted videos. For a 15 s excerpt of each, a person
+counts cuts and flashes frame by frame in a player; acceptance: cut count within ±10 %, flash count within ±1,
+tempo within ±2 BPM (or an octave, noted). Thresholds are tuned only after this and recorded in
+`docs/HANDOVER.md`.
+
+#### 4.3.1.11 Out of scope for this round (later, once the owner's real videos have been seen)
+
+New render effects and vocabulary, each needing renderer work and its own validator rules:
+
+- Speed ramps inside a segment (eased speed curves); today speed is constant per segment.
+- Whip-pan blur transitions; horizontal slides (`slideleft`/`slideright` exist in FFmpeg's `xfade` but are not in
+  `TRANSITION_TYPES`).
+- Camera shake, zoom pulses on every beat ("bounce"), eased or overshooting zoom curves (today: linear `zoompan`).
+- A flash inside a shot without a join (an overlay effect); v2 places flashes only at joins.
+- Text animation styles (kinetic or per-word captions, typewriter, stickers) beyond `none/fade/rise/pop`.
+- Glitch/RGB-split, masks and shape transitions, colour grades beyond the four looks.
+- Half-beat (eighth-note) cutting grids; `offBeatHalf` is measured but unused.
+- Learning these fields from favourites and downloads (plan facts would need them).
+- Weighting videos by views or likes (needs TikTok analytics, which the app does not have).
+
+Never in scope: reading or scraping TikTok, recognising or fetching the reference's song, using any part of a
+reference's audio or picture in an edit.
+
+#### 4.3.1.12 Prototype notes (what the numbers above rest on)
+
+A throw-away prototype (not committed) ran on FFmpeg 6.1.1 on 2026-11-15 with synthetic 360 × 640, 30 fps clips
+analysed at 144 × 256: hard cuts every 1 s; `xfade` `fadewhite` 0.2 s, `fadeblack` 0.3 s, `dissolve` 0.5 s,
+`slideup` 0.3 s and `zoomin` 0.4 s every 2 s; a `zoompan` push-in 1.0 → 1.15. The scene-score, YAVG, YDIF, scale-fit,
+`fadewhite` peak-position and `ebur128` observations quoted in §4.3.1.3 come from it. These are synthetic clips, not
+the owner's videos: phone footage with handheld motion, low light, filters and TikTok re-encoding will move every
+threshold, which is why the owner-video check in §4.3.1.10 comes before any tuning is called done.
 
 ### 4.4 Brand (Settings → Branding) — additions only
 
@@ -559,6 +1200,13 @@ business."), `cc_by` needs non-empty `attributionText`.
 }
 ```
 
+Reference style v2 (§4.3.1.5): new profiles are written as `version: 2` with the same fields plus
+`style: ReferenceStyleSignals`; `ReferenceStyleProfileSchema` becomes a discriminated union of v1 and v2 and every
+reader uses `readReferenceProfile` (v1 → v2 shape with `style: null`). `EditingPreferencesSchema` gains the
+`editingStyle` object (`transitionPalette`, `beatSync`, `beatsPerCut`, `reveal`, `zoom`, `musicFit`, `sources`,
+`summaryDecisions`, all defaulted), and `PinSchema` gains `referenceAssetIds` (default `[]`). No migration: both
+live in existing jsonb columns.
+
 `PlanFacts` (`packages/core/src/plan-facts.ts`, computed with `computeTimeline`):
 
 ```ts
@@ -645,6 +1293,10 @@ generation and which styles are pre-ticked; it never hides a style.
 - A suggestion equal to the current effective value is kept with `reason` "matches your settings" (no button).
 - Accept → declared value set, field pinned `{ by: 'reference', referenceAssetId, referenceName }`,
   `decisions[field]='accepted'`.
+- v2 (§4.3.1): shots come from the v2 boundaries (no merging or splitting) instead of `detectScenes` defaults; the
+  transition, beat, drop, zoom and music signals and their suggestions are computed by
+  `packages/core/src/reference-style.ts` and offered, combined across videos, in the "Your style from your videos"
+  summary (§4.3.1.4, §4.3.1.9).
 
 ### 6.3 Live trend items
 
@@ -745,7 +1397,7 @@ worker refuses to start if a type has no handler — `main.ts`). All handlers us
 | Type | Payload (Zod) | Dedupe / idempotency | Queue settings | What it does / calls |
 | --- | --- | --- | --- | --- |
 | `preferences.recompute` | `{ reason: z.enum(['feedback','reset','settings','schedule']).default('feedback') }` | `singletonKey: 'preferences:recompute'`, `startAfterSeconds: 10` (debounce). Pure recompute from events, so a duplicate run is harmless. Writes only `data→preferences→learned` and `styleAffinity` with `jsonb_set` in one `UPDATE … WHERE id='default'`, never the whole settings object. | retryLimit 2, retryDelay 10, backoff, expire 300 s, heartbeat 60 | Reads `feedback_events`; `computeLearnedPreferences`. On failure writes `learned.error`. Also scheduled nightly `17 3 * * *` (`Australia/Melbourne`) so recency decay applies. `refId` = `'preferences'`. |
-| `reference.analyse` | `{ assetId: z.string(), projectId: z.string(), useVision: z.boolean().default(false) }` | `singletonKey: 'reference:' + assetId`; skips if `reference_profile` exists; deleting originals is last and tolerant of "already gone". | retryLimit 2, retryDelay 15, backoff, expire 1800 s, heartbeat 60 | Enqueued by `ingest.asset` at the end for `kind='reference_video'`. Downloads proxy, `measureLook`, uses stored shots; if `useVision` and AI configured: `estimateOnScreenText` on ≤ 8 frames (`recordAiUsage(…, 'reference:text', usage)`). Writes profile, then deletes original + proxy + frames (keeps thumbnail), sets `originalsDeletedAt`. |
+| `reference.analyse` | `{ assetId: z.string(), projectId: z.string(), useVision: z.boolean().default(false) }` | `singletonKey: 'reference:' + assetId`; skips if `reference_profile` exists; deleting originals is last and tolerant of "already gone". | retryLimit 2, retryDelay 15, backoff, expire 1800 s, heartbeat 60 | Enqueued by `ingest.asset` at the end for `kind='reference_video'`. Downloads proxy, `measureLook`, uses stored shots; if `useVision` and AI configured: `estimateOnScreenText` on ≤ 8 frames (`recordAiUsage(…, 'reference:text', usage)`). Writes profile, then deletes original + proxy + frames (keeps thumbnail), sets `originalsDeletedAt`. **v2 (§4.3.1.2), payload unchanged:** after `measureLook`, `measureReferenceStyle` on the proxy (Pass A per-frame scores, Pass B tiny grey frames, Pass C beats/energy when there is audio; first 120 s; progress "Measuring transitions" / "Measuring the beat"); writes a `version: 2` profile. A failed audio pass marks beat/drop/music `not_measured`; a failed Pass A/B fails the attempt (pg-boss retries; originals are still there because deletion stays last). Skip rule: any stored profile (v1 or v2) is not re-measured. |
 | `trends.refresh` | `{ watchId: z.string().nullable() }` (null = all enabled watches) | `singletonKey: 'trends:' + (watchId ?? 'all')`; items upserted on `(watch_id, external_id)`; items not in the new result for that watch are deleted. | retryLimit 1, retryDelay 300, expire 300 s, heartbeat 60 | `null` → enqueues one job per enabled watch and exits. Per watch: Instagram (§8.1) or YouTube (§8.2). Scheduled daily `41 5 * * *` Melbourne. Manual refresh allowed once per 6 h per watch (route-enforced). |
 | `edits.revise` (changed) | add `mode: 'audio'` to the enum and `audio: AudioPatchSchema.optional()` | unchanged (`newVersionId`; skips if the version already has a plan) | unchanged | `mode 'audio'`: load parent plan → `applyAudioPatch` → `validateEditPlan` (same context builder) → store with `planSource 'manual'`, `plannerModel null` → enqueue `render.preview` (`singletonKey preview:<id>`). `mode 'revise'` with an `audio` patch that needs a re-cut: music track = `patch.trackId ?? parentPlan.audio.music?.trackId ?? null` (falls back to `generation.settings.musicTrackId` only when there is no parent plan); passes `musicStartSec`, `beatSync`, `revealOnBeat` to the planner. |
 | `render.preview` (changed) | unchanged | unchanged | unchanged | Builds `RenderBrand` from settings (with logo), stores the snapshot in `edit_versions.render_brand`. |
@@ -869,6 +1521,9 @@ All under `/api`, session required, JSON errors as in `docs/api.md`, CSRF guard 
 | POST | `/api/uploads/[id]/complete` (changed) | — | `{ assetId, kind: 'reference_video' }`; queues `ingest.asset` | studio access; audit `reference.uploaded` |
 | GET | `/api/references` | — | `{ references: Array<ReferenceDto & { projectId, projectTitle }> }` | owner |
 | POST | `/api/references/[assetId]/decide` | `{ accept: SuggestionField[], dismiss: SuggestionField[] }` | `{ profile, preferences }` | owner; audit `reference.suggestions_decided` |
+| GET | `/api/references/summary` (v2, §4.3.1.9) | — | `{ summary: ReferenceStyleSummary, suggestions: SummarySuggestion[], videos: { total, measured, olderMeasurement, measuring, failed } }` | signed in (staff read-only) |
+| POST | `/api/references/summary/decide` (v2) | `{ accept: ReferenceSummaryField[], dismiss: ReferenceSummaryField[], valueKeys: Record<field, string> }` | `{ summary, preferences }`; 409 `CONFLICT` "Your style summary changed — check the new suggestion." when a `valueKey` no longer matches | owner; audit `reference.summary_decided` |
+| PUT | `/api/settings` (v2 change) | `preferences.editingStyle` value fields editable; `sources` and `summaryDecisions` rejected with `VALIDATION`; a changed field records `sources[field] = { by: 'owner' }` | unchanged | owner; audit `preferences.editing_style_changed` |
 | DELETE | `/api/assets/[id]` (existing) | — | — | studio access; works for references |
 
 ### 9.3 Music
@@ -923,6 +1578,7 @@ stacked rows). No new navigation item.
 | Studio style controls (`style-controls.tsx`, changed) | Music select with "Suggested for you" group and licence chips; defaults from effective preferences | no tracks (link to Settings → Music) / suggestions empty |
 | Export dialog (changed) | `MusicClearanceNotice` (cleared platforms, `meta_only` label, CC BY credit copy, blocked with two actions) | — |
 | Settings → Editing preferences (`preferences-tab.tsx`, rewritten) | `LearnedPreferencesTable`, `RecentChoicesList`, `ResetLearningDialog`, `MusicTasteFields`, `ReferenceSuggestionsList` | loading / nothing learned yet / learning off / recompute error / staff read-only |
+| Settings → Editing preferences (v2, §4.3.1.9) | `YourStyleSummary` (`your-style-summary.tsx`) above Reference videos: rows with agreement chips, **Use this** / **No thanks**, **Use all suggestions**, **Go back to each style's own**, videos list; `ReferenceStrip` gains the v2 line and the "See your style from all your videos" link | loading / empty / measuring / only older measurements / nothing reportable / error / staff read-only |
 | Settings → Branding (`branding-tab.tsx`, changed) | `LogoPlacementControl` + `SafeZonePreviewFrame` (static CSS 9:16 frame) | no logo / placement chosen |
 | Settings → Music (`music-tab.tsx`, changed) | `LicencePassportForm` (3 steps, shared with the Studio dialog), genres/moods chips per track, `MusicReferences` (Spotify) with fixed notice and mode switch | empty library / not confirmed / expired / meta-only / CC BY-NC refused / link-only / embed |
 | Settings → Trends (`trends-tab.tsx`, changed) | `LiveSignalsSection` with `TrendSourceCard` ×2, `NotedTrendsSection` + `NoteTrendDialog`, `CuratedSection` | per §4.11–4.12 |
@@ -942,7 +1598,8 @@ Plain-language copy rules: no job names, model names or error codes in normal vi
 - **CSRF**: all new state-changing routes go through `handleApi` (same-origin check).
 - **Audit log** (`apps/web/src/lib/audit.ts`): `preferences.pinned`, `preferences.unpinned`,
   `preferences.learning_toggled`, `preferences.learning_reset`, `reference.uploaded`,
-  `reference.suggestions_decided`, `music.licence_updated` (exists), `music.reference_added`,
+  `reference.suggestions_decided`, `reference.summary_decided` (v2), `preferences.editing_style_changed` (v2),
+  `music.licence_updated` (exists), `music.reference_added`,
   `music.reference_removed`, `music.spotify_mode_changed`, `music.export_blocked`, `trends.watch_added`,
   `trends.watch_removed`, `trends.noted`, `settings.logo_placement_changed`. The worker writes
   `trends.source_unavailable` / `trends.source_needs_reauth` when a watch changes state.
@@ -957,6 +1614,11 @@ Plain-language copy rules: no job names, model names or error codes in normal vi
   the style-support computation in `apps/web/src/lib/assets.ts` (already filters `kind='video'`), the status DTO's clip list and the planner input; the validator context only lists
   `kind='video'` assets, so a plan that referenced a reference asset would fail with `UNKNOWN_ASSET` before rendering.
   A unit test asserts this.
+- **Reference sound (v2, §4.3.1)**: decoded to PCM in worker memory only, to measure tempo, beat alignment and
+  energy; never written out (the proxy that carries it is deleted as before), never sent to an AI model, never
+  fingerprinted or looked up, never used in an export. Stored: only the summary numbers of
+  `ReferenceStyleSignals` (no beat times, cut times or energy curve; an integration test asserts no array longer
+  than 8 numbers). The tiny grey frames of Pass B live in memory for the job and are never stored.
 - **Spotify**: stored fields are URL, type, id, notes; no metadata fetched or cached; iframe only on authenticated
   pages (`(app)` layout); `Content-Security-Policy` work (docs/security.md "not done yet") must include
   `frame-src https://open.spotify.com` when the CSP is written; `Referrer-Policy: same-origin` already sends no
@@ -999,6 +1661,9 @@ Plain-language copy rules: no job names, model names or error codes in normal vi
   only with/without clip audio, start shift beyond track end rejected); `needsRecut` matrix.
 - `profileReference` thresholds (pacing boundaries 1.0/2.2 s, colour rules, duration rounding/limits, text density
   null when not measured).
+- Reference style v2: unit, fixture-measurement, planner, integration and round-trip tests as listed in §4.3.1.10
+  (synthetic fixtures R1–R11 with ground truth and tolerances; five-edit planner changes when suggestions are
+  accepted; defaults byte-identical).
 - Music: `normaliseLicence` (meta_only forcing), `cc_by_nc` refused by schema, `cc_by` without credit refused,
   `musicClearanceFor` (no music / cleared / restricted / expired / unconfirmed / unknown / no promotional use /
   meta_only), `rankTracksForPreferences` (genre, mood, artist match, BPM fit, unusable reasons, never auto-picks).
@@ -1052,6 +1717,9 @@ Plain-language copy rules: no job names, model names or error codes in normal vi
 - Whether the learned defaults feel right after a few weeks of real favourites/downloads (thresholds are
   starting values; adjust from the owner's feedback).
 - Colour and pacing classifications on real reference videos; text-density estimates.
+- Reference style v2 on 3–5 of the owner's own posted videos: cut/flash counts against a frame-by-frame count of a
+  15 s excerpt, tempo against the known track tempo (acceptance and tuning rule in §4.3.1.10); whether the five
+  edits with accepted suggestions feel like the owner's own editing.
 - Whether the owner's music library plan covers organic posts, website and boosts (provider's written confirmation,
   memo §2).
 - Whether Meta Sound Collection tracks trigger copyright matches (publishing smoke test, memo §2 open question).
@@ -1132,6 +1800,24 @@ Modify:
 - `packages/config/src/*` (`YOUTUBE_API_KEY` optional), `.env.example`
 - Docs: `docs/api.md`, `docs/architecture.md` (Stage B section), `docs/security.md` (new audit actions, Spotify CSP note), `docs/testing.md`, `docs/HANDOVER.md`
 
+Reference style v2 (§4.3.1), when built:
+
+- Create: `packages/media/src/analysis/reference-style.ts` (+ `test/reference-style.test.ts`,
+  `test/fixtures/make-reference-fixtures.ts`); `packages/core/src/reference-style.ts` (`alignCutsToBeats`,
+  `binomialMinAligned`, `findDrop`, `energyShape`, `paletteFromCounts`, `summariseReferenceStyle`, wording)
+  (+ `test/reference-style.test.ts`); `packages/ai/src/rules/editing-style.ts` (+ `test/rules-editing-style.test.ts`);
+  `apps/web/src/app/api/references/summary/route.ts`, `…/summary/decide/route.ts`;
+  `apps/web/src/app/(app)/settings/_components/your-style-summary.tsx`.
+- Modify: `packages/core/src/reference.ts` (v2 schema, union, `readReferenceProfile`), `settings.ts`
+  (`editingStyle`), `preference-learning.ts` (`PinSchema.referenceAssetIds`), `music-ranking.ts` (`fit`, `drop`),
+  `plan-validation.ts` (`extraStyleTransitions` warning context only), `index.ts`; `packages/media/src/analysis/index.ts`;
+  `packages/ai/src/types.ts` (`editingStyle`, `PlannerMusic.energy`/`energyStepSec`), `rules/settings.ts`,
+  `rules/music.ts` (`strongestBeat`), `rules/styles.ts`, `rules/planner.ts`, `anthropic/prompts.ts`;
+  `apps/worker/src/handlers/reference.ts`, `handlers/generate.ts` / `lib/plan-context.ts` (beat-sync default, track
+  energy into `PlannerMusic`); `apps/web/src/lib/references.ts`, `settings-merge.ts`, `music.ts` (ranking inputs),
+  `components/studio/{reference-strip,upload-zone}.tsx`, `settings/_components/preferences-tab.tsx`;
+  `apps/worker/test/reference.integration.test.ts`; docs `docs/api.md`, `docs/testing.md`, `docs/HANDOVER.md`.
+
 ---
 
 ## 16. Open questions
@@ -1156,3 +1842,8 @@ Modify:
    overridden with the owner's own URLs).
 8. Thresholds in §6.1/§6.2 (weights, half-life, pacing/colour cut-offs) are starting values; agree to tune them after
    the owner has used the app for a few weeks.
+9. Reference style v2 (§4.3.1) thresholds come from synthetic clips only (§4.3.1.12). Which of the owner's posted
+   videos best represent "their style" (recent ones, favourites), and how many, is the owner's choice; 3–5 is the
+   suggested starting point. Tune only after the real-video check in §13.4.
+10. Should accepted v2 suggestions also be offered per project (for example a different style for promos)? Designed
+    as one global "your style"; revisit if the owner asks.
