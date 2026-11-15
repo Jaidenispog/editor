@@ -5,12 +5,10 @@
  * called. Skipped unless TEST_DATABASE_URL is set.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
-import { execa } from 'execa';
 import { and, eq } from 'drizzle-orm';
 import { loadEnv } from '@studio/config';
 import { CancelledError, MusicLicenceSchema, NonRetryableError, newId, type JobType, type MusicLicence } from '@studio/core';
@@ -19,6 +17,7 @@ import { JobQueue, queuePolicyFor } from '@studio/queue';
 import { LocalDiskStore, storageKeys } from '@studio/storage';
 import { probeMedia } from '@studio/media';
 import { createAiProviders } from '@studio/ai';
+import { ensureSamples, SAMPLES_DIR as SAMPLES } from '@studio/media/test/sample-footage';
 import type { WorkerContext } from '../src/context.js';
 import { JobInterruptedError, type TrackedRun } from '../src/lib/job-tracker.js';
 import { encryptCredential } from '../src/lib/credentials.js';
@@ -35,7 +34,6 @@ import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 import { startFakeGraphServer, type FakeGraphServer } from './fakes/graph-server.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..', '..');
-const SAMPLES = path.join(REPO, 'data', 'samples');
 const skip = !testDatabaseUrl();
 
 interface Queued {
@@ -163,8 +161,10 @@ describe.skipIf(skip)('publishing on synthetic footage with a fake Graph API', (
     return { postId, targetIds };
   }
 
+  // Generates the synthetic footage when it is missing (first test file to ask does it; the others wait for it).
+  beforeAll(ensureSamples, 300_000);
+
   beforeAll(async () => {
-    if (!existsSync(path.join(SAMPLES, 'sample_music_120bpm.mp3'))) await execa('bash', [path.join(REPO, 'scripts', 'make-sample-footage.sh'), SAMPLES]);
     fake = await startFakeGraphServer();
     const t = await createTestDatabase();
     handle = t.handle;

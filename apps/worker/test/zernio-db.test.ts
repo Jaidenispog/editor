@@ -7,18 +7,17 @@
  * called. Skipped unless TEST_DATABASE_URL is set.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
-import { execa } from 'execa';
 import { and, eq } from 'drizzle-orm';
 import { loadEnv } from '@studio/config';
 import { CancelledError, NonRetryableError, newId, type JobType, type TiktokInteractions, type ZernioConsent } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
 import { LocalDiskStore, storageKeys } from '@studio/storage';
 import { createAiProviders } from '@studio/ai';
+import { ensureSamples, SAMPLES_DIR as SAMPLES } from '@studio/media/test/sample-footage';
 import type { WorkerContext } from '../src/context.js';
 import type { TrackedRun } from '../src/lib/job-tracker.js';
 import { encryptCredential } from '../src/lib/credentials.js';
@@ -36,7 +35,6 @@ import { FAKE_TIKTOK_ACCOUNT_ID, startFakeZernioServer, type FakeZernioServer } 
 import { startFakeGraphServer, type FakeGraphServer } from './fakes/graph-server.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..', '..');
-const SAMPLES = path.join(REPO, 'data', 'samples');
 const skip = !testDatabaseUrl();
 
 interface Queued {
@@ -184,8 +182,10 @@ describe.skipIf(skip)('TikTok via Zernio with a fake Zernio API (WP10)', () => {
     return { postId, targetIds };
   }
 
+  // Generates the synthetic footage when it is missing (first test file to ask does it; the others wait for it).
+  beforeAll(ensureSamples, 300_000);
+
   beforeAll(async () => {
-    if (!existsSync(path.join(SAMPLES, 'sample_a_portrait_sdr.mp4'))) await execa('bash', [path.join(REPO, 'scripts', 'make-sample-footage.sh'), SAMPLES]);
     zernio = await startFakeZernioServer();
     graph = await startFakeGraphServer();
     const t = await createTestDatabase();

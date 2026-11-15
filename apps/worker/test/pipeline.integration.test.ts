@@ -7,12 +7,10 @@
  * Requires ffmpeg and TEST_DATABASE_URL. Synthetic footage is not a substitute for real haircut clips.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
-import { execa } from 'execa';
 import { asc, eq } from 'drizzle-orm';
 import { loadEnv } from '@studio/config';
 import { CancelledError, JOB_TYPES, MusicLicenceSchema, STYLE_IDS, checkMusicForPlatforms, computeTimeline, newId, type JobType, type StyleId } from '@studio/core';
@@ -20,6 +18,7 @@ import { schema, type DatabaseHandle } from '@studio/db';
 import { LocalDiskStore, storageKeys } from '@studio/storage';
 import { probeMedia, quantiseTimeline } from '@studio/media';
 import { createAiProviders } from '@studio/ai';
+import { ensureSamples, SAMPLES_DIR as SAMPLES } from '@studio/media/test/sample-footage';
 import type { WorkerContext } from '../src/context.js';
 import { INTERRUPTED_MESSAGE, type TrackedRun } from '../src/lib/job-tracker.js';
 import { handleIngestAsset, refreshProjectReadiness } from '../src/handlers/ingest.js';
@@ -29,7 +28,6 @@ import { handleAnalyseMusic } from '../src/handlers/music.js';
 import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..', '..');
-const SAMPLES = path.join(REPO, 'data', 'samples');
 const skip = !testDatabaseUrl();
 
 /** A TrackedRun without the queue. `stoppedBy` says who aborts the signal: the owner (cancel) or the queue (shutdown). */
@@ -57,10 +55,10 @@ describe.skipIf(skip)('worker pipeline on synthetic footage', () => {
   const projectId = newId();
   const assetIds: Record<string, string> = {};
 
+  // Generates the synthetic footage when it is missing (first test file to ask does it; the others wait for it).
+  beforeAll(ensureSamples, 300_000);
+
   beforeAll(async () => {
-    if (!existsSync(path.join(SAMPLES, 'sample_b_rotated_hevc_hlg.mov'))) {
-      await execa('bash', [path.join(REPO, 'scripts', 'make-sample-footage.sh'), SAMPLES]);
-    }
     const t = await createTestDatabase();
     handle = t.handle;
     drop = t.drop;
@@ -123,8 +121,8 @@ describe.skipIf(skip)('worker pipeline on synthetic footage', () => {
   });
 
   afterAll(async () => {
-    await drop();
-    await rm(root, { recursive: true, force: true });
+    await drop?.();
+    if (root) await rm(root, { recursive: true, force: true });
   });
 
   it('ingests every clip, converting HDR and rotation and tolerating missing audio', async () => {
