@@ -174,6 +174,25 @@ History of the background runs:
       browser tests (about 35 minutes). Stage C scripts take `E2E_SKIP_BUILD=1` after Stage A has built.
     - **What remains:** WP10 Zernio (blocked on docs access), and everything that needs the owner's real accounts and
       footage (README "Not yet done").
+16. WP10 TikTok via Zernio built, reviewed and pushed (1,478 unit tests, integration 12/12, Stage A 51/51, Stage B
+    77/77, Stage C bookings 124/124, website 114/114, **TikTok 105/105**):
+    - The owner approved a personal cloud environment "editor" for this repository that allows docs.zernio.com and
+      zernio.com (plus package registries); this session uses it. Its one-line setup script (`pnpm install`) has not
+      run in a fresh session yet.
+    - Research: `docs/research/zernio-api.md` (dated 15 Nov 2026, every fact quoted with its page) and publishing §7.2
+      rewritten from the docs, checked by an adversarial verifier (176 claims; 13 corrected). Open items only block
+      the first live verification post, not the code.
+    - Review: 7 issues (incl. a draft that could show as published, Zernio wording with the flag off, rate limits read
+      as "reconnect") and the poll safety-net follow-up, all fixed; round 2 fixed forged hints displacing genuine ones
+      and an orphaned poll row keeping a target on "Checking…"; the lead kept verified hints across key refusals.
+    - New browser test `apps/web/e2e/run-stage-c-tiktok.sh` (port 4300, `studio_e2e_c3`; flag on, then off).
+    - **Lesson recorded:** a push once went out while the TikTok browser test had 2 failures (the test still expected
+      wording the review had removed). Push only through `scratchpad/push-if-green.sh <verify output> 5`, which
+      refuses unless every step exited 0 and all five browser tests report 0 failures.
+    - In progress: reference style v2 (run `wf_d3892033-bcb`): measure transitions, beat-synced cuts, tempo and
+      drop-timed reveals from the owner's own videos. The owner asked to base the edits on their TikTok
+      (@jc_chopz); TikTok is not reachable from here and must not be scraped, so they were asked for 3–5 of their
+      own videos (attached here or via Google Drive) to calibrate the editor and decide which effects to add.
       **WP10 Zernio stays blocked:** the plan requires docs.zernio.com to be read first; this environment's proxy
       refuses docs.zernio.com and zernio.com (CONNECT 403) and WebFetch cannot resolve them. Needs the owner to
       allow those hosts (a network change) before WP10 can start.
