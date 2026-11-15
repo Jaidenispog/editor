@@ -331,15 +331,25 @@ Detected in this order on the measured span; each frame belongs to at most one e
    cuts is two cuts, not a flash. A uniform run at the extreme for more than 0.6 s is a black/white screen; only a
    screen at the very start or after the last join is a title or end screen and left out of the shots — the cut (or
    fade) into a screen inside the video counts as a join. A long bright or dark run with picture detail is just a
-   shot. Kind: `fade_white` / `fade_black`. If NCC(frame before, frame after) ≥ 0.6, the flash happened inside
-   one shot (`inShot`); it maps the same way, because the renderer can only place it at a join.
+   shot. Uniformity is judged frame by frame, not on the brightest or darkest frame alone: inside a long run, a screen
+   is uniform frames for more than 0.6 s that start within 0.5 s of the run (a cut or ramp into it) or right after a
+   cut (scene score ≥ 0.18 within a frame); the detailed frames before it go to the cut test, so a bright shot followed
+   by a white end card keeps its cut, and a light shot that drifts towards a uniform frame stays a shot. Kind:
+   `fade_white` / `fade_black`. If NCC(frame before, frame after) ≥ 0.6, the flash happened inside one shot
+   (`inShot`); it maps the same way, because the renderer can only place it at a join.
    *Prototype*: an `xfade=fadewhite` of 0.2 s read YAVG 125 → 244 then back over 5 frames; `fadeblack` 0.3 s read
    125 → 5. FFmpeg's `fadewhite`/`fadeblack` reach their extreme about 20 % into the transition (measured at 0.2,
    0.5 and 1.0 s durations), which the planner uses to put an accent's peak on the beat (§4.3.1.6).
 2. **Hard cuts.** Frame `t` is a cut when its scene score ≥ max(0.18, 8 × the median score over ±1 s), it is the
    largest score within ±2 frames, both neighbours score ≤ 0.5 × it, it is not inside a flash event, and
-   NCC(frame t−2, frame t+2) < 0.5 (rules out fast motion and camera flashes). *Prototype*: real cuts scored
-   0.26–0.91; one scored 0.264, below `detectScenes`' default 0.3, which is why v2 does not reuse that threshold.
+   NCC(frame t−2, frame t+2) < 0.5 (rules out fast motion and camera flashes), unless the frames either side look
+   clearly less alike than the frames within each side (by 0.25: two different shots that look alike). The frames 1/30 s
+   either side are also tested for a shift along each axis: when a shift halves their difference *and* the shifted
+   frames look alike (NCC of the overlap ≥ 0.5 and at most 0.1 below the NCC within each side), the spike is a slide or
+   camera move, not a cut. The likeness check matters: a detailed shot cut against a smooth one (a gradient, a plain
+   wall) can halve the difference just by cropping, with the shifted frames as unlike as before. *Prototype*: real
+   cuts scored 0.26–0.91; one scored 0.264, below `detectScenes`' default 0.3, which is why v2 does not reuse that
+   threshold.
    A busy single shot (Game-of-Life pattern) reached 0.27 on the frame after a cut, rejected by the ±2-frame
    local-maximum rule. A spike inside a short burst of change (busy on both sides, or a spike below 0.35 followed by
    a burst) belongs to a gradual join and is left for step 4 (FFmpeg's `zoomin` and blur transitions both have one).
@@ -764,7 +774,11 @@ New card above **Reference videos** in `preferences-tab.tsx` (component `YourSty
 30 fps, 48 kHz audio; every frame carries a small `SYNTHETIC TEST CLIP` label; files are named `synthetic-*.mp4`
 and each has a ground-truth JSON beside it. Shots come from 8 visually different sources (`testsrc2`,
 `mandelbrot`, `cellauto`, `smptebars`, `gradients`, `life`, `rgbtestsrc`, `testsrc`) with temporal noise and hue
-offsets. The click track is
+offsets. Builds are reproducible: every random input is pinned (`gradients` colours, which it otherwise picks at
+random whatever its `seed`; the `anoisesrc`, `life` and `cellauto` seeds; the `noise` seed), x264 encodes 4 slices on
+4 threads (its frame threads now and then encode a few frames differently), and the top row FFmpeg 6.1's `slideup`
+leaves undefined on its first frame is painted black; two builds of every fixture give the same sha256. The click
+track is
 `aevalsrc='0.8*sin(2*PI*55*t)*exp(-30*mod(t\,0.5))+0.3*sin(2*PI*1800*t)*exp(-60*mod(t\,0.5))'` (120 BPM; at
 30 fps every beat is on a frame, so cuts can be placed exactly).
 
@@ -784,6 +798,7 @@ offsets. The click track is
 | R10 124 BPM, every beat | a cut on each beat of a 124 BPM click for 15 s (beats not on the frame grid) | one cut per beat (≈ 31) | tempo 124 ± 2; `within1Frame` ≥ 85 %; `beatsPerCut` 1 |
 | R11 random cuts | 15 cuts at seeded random times over the 120 BPM click | chance alignment | beat `reportable: false`; no beat-sync suggestion |
 | X1–X8 review edge cases | dark and bright shots of 2 s between hard cuts; 0.3 s bright inserts between hard cuts; `fadeblack` 0.4 s; `zoomin` 0.4 s out of textured shots; `hblur` 0.4 s; `smoothleft/up/right/down`; 0.5 s and 1 s cross-fades with hard cuts on the 120 BPM beat at 60 and 25 fps | flash and screen rules, zoom gate, blur transitions, soft wipes, frame-rate independence | X1 5 hard, no flash or screen, 6 shots; X2 4 hard, no flash; X3 5 dips; X4 ≥ 4 of 5 zoom, no flash or cross-fade; X5 no zoom or cross-fade; X6 ≥ 4 of 5 right axis and direction, no cross-fade; X7/X8 ≥ 3 of 4 cross-fades within 0.15 s of their length (a 1 s one among them), cuts within a frame, beat 120 ± 1.5 BPM with ≥ 85 % of cuts within 80 ms |
+| X9–X11 regression cases | X2 with the last shot's gradient colours that lost a cut while FFmpeg still picked them at random (X9 light grey to blue, X10 light yellow-green); X2 with the last shot a white end card after a brighter insert (X11) | a cut into a smooth shot is not a slide; screens are uniform frame by frame | X9/X10 4 hard within a frame of the truth, no flash or screen; X11 3 hard (the bright shot keeps its cut), one end screen from 5.3 s |
 
 **Unit (vitest, no FFmpeg)**: `packages/media` frame maths on hand-built metric arrays and tiny frames (cut rule
 edges, flash run lengths, linearity residual, band centroid direction, scale fit on a synthetic 72 × 128 frame

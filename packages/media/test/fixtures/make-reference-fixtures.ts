@@ -8,6 +8,14 @@ import { fileURLToPath } from 'node:url';
  * FFmpeg `lavfi` sources only; nothing is committed and nothing is ever seeded into a development or preview database.
  * 540 × 960, 30 fps unless a spec sets `fps` (the 60 and 25 fps edge cases), 48 kHz audio; every frame carries a small "SYNTHETIC TEST CLIP" label; files are named
  * `synthetic-*.mp4` with a ground-truth JSON beside each.
+ *
+ * Reproducible: every random input is pinned, so building a fixture twice on the same machine gives the same file.
+ * `gradients` picks random colours unless `c0`/`c1` are set (its `seed` only places the gradient line), `anoisesrc`,
+ * `life` and `cellauto` pick a random seed unless one is given, and the `noise` seed is written out although FFmpeg's
+ * default is already fixed. x264 splits each frame into 4 slices on 4 threads: its default frame threads now and then
+ * encode a few frames differently from run to run (seen on X9's bright insert), and their number follows the CPU. The
+ * one row FFmpeg 6.1's `slideup` leaves undefined is painted black (see `buildFixture`). Another FFmpeg build or CPU type
+ * can still round pixels differently.
  */
 
 const FONT = fileURLToPath(new URL('../../../../assets/fonts/Inter-Regular.otf', import.meta.url));
@@ -23,7 +31,7 @@ const sourcesAt = (fps: number) =>
     `mandelbrot=s=${W}x${H}:r=${fps}:end_pts=1000000`,
     `cellauto=s=${W}x${H}:r=${fps}:rule=110:scroll=0:seed=3`,
     `smptebars=s=${W}x${H}:r=${fps}`,
-    `gradients=s=${W}x${H}:r=${fps}:speed=0.02:seed=7`,
+    `gradients=s=${W}x${H}:r=${fps}:speed=0.02:seed=7:c0=0x3b6db3:c1=0xe8a23a`,
     `life=s=${W}x${H}:r=${fps}:mold=10:ratio=0.3:seed=5:life_color=#ff8000:death_color=#002040`,
     `rgbtestsrc=s=${W}x${H}:r=${fps}`,
     `testsrc=s=${W}x${H}:r=${fps}`,
@@ -34,7 +42,7 @@ export function clickTrack(bpm = 120, gain = '1'): string {
   const p = (60 / bpm).toFixed(6);
   return `aevalsrc='(${gain})*(0.8*sin(2*PI*55*t)*exp(-30*mod(t\\,${p}))+0.3*sin(2*PI*1800*t)*exp(-60*mod(t\\,${p})))':s=48000:c=mono`;
 }
-export const PINK_NOISE = 'anoisesrc=color=pink:amplitude=0.03:r=48000';
+export const PINK_NOISE = 'anoisesrc=color=pink:amplitude=0.03:r=48000:seed=17';
 /** Speech-like: voiced tones with an irregular syllable envelope and pauses (no steady pulse). */
 export const SPEECH_LIKE =
   "aevalsrc='0.35*sin(2*PI*(130+25*sin(2*PI*2.3*t))*t)*(0.55+0.45*sin(2*PI*3.7*t+sin(2*PI*1.3*t)))*gt(sin(2*PI*0.37*t)+0.4*sin(2*PI*1.1*t)\\,-0.5)+0.08*sin(2*PI*(260+40*sin(2*PI*1.7*t))*t)':s=48000:c=mono";
@@ -78,7 +86,7 @@ function shotInput(s: ShotSpec, lenFrames: number, index: number, fps: number): 
   const src = s.lavfi ?? sources[(s.source ?? index) % sources.length]!;
   return {
     args: ['-f', 'lavfi', '-t', ((lenFrames + 2) / fps).toFixed(4), '-i', src],
-    chain: `${s.filter ? `${s.filter},` : ''}scale=${W}:${H},setsar=1,hue=h=${hue},noise=alls=${noise}:allf=t`,
+    chain: `${s.filter ? `${s.filter},` : ''}scale=${W}:${H},setsar=1,hue=h=${hue},noise=alls=${noise}:allf=t:all_seed=123457`,
   };
 }
 
@@ -111,7 +119,13 @@ export async function buildFixture(dir: string, spec: FixtureSpec): Promise<stri
     const join = spec.joins[j - 1]!;
     const out = `j${j}`;
     if (join.type === 'cut') graph.push(`[${cur}][s${j}]concat=n=2:v=1:a=0,settb=1/${FPS}[${out}]`);
-    else graph.push(`[${cur}][s${j}]xfade=transition=${join.transition}:duration=${join.durationSec}:offset=${join.atSec},settb=1/${FPS}[${out}]`);
+    else {
+      // FFmpeg 6.1's `slideup` leaves the top row of its first frame undefined (it differs from run to run), so that one
+      // row is painted black to keep the fixture the same on every build.
+      const half = 0.5 / FPS;
+      const topRow = join.transition === 'slideup' ? `,drawbox=x=0:y=0:w=iw:h=1:color=black:t=fill:enable='between(t,${(join.atSec - half).toFixed(6)},${(join.atSec + half).toFixed(6)})'` : '';
+      graph.push(`[${cur}][s${j}]xfade=transition=${join.transition}:duration=${join.durationSec}:offset=${join.atSec}${topRow},settb=1/${FPS}[${out}]`);
+    }
     cur = out;
   }
   graph.push(`[${cur}]drawtext=fontfile='${FONT}':text='SYNTHETIC TEST CLIP':fontsize=22:fontcolor=white:box=1:boxcolor=black@0.6:x=12:y=h-34,format=yuv420p[vout]`);
@@ -133,6 +147,10 @@ export async function buildFixture(dir: string, spec: FixtureSpec): Promise<stri
     ...(spec.audio ? ['-map', `${n}:a`, '-c:a', 'aac', '-b:a', '128k', '-ar', '48000'] : []),
     '-c:v',
     'libx264',
+    '-threads',
+    '4',
+    '-x264-params',
+    'sliced-threads=1',
     '-preset',
     'veryfast',
     '-crf',
@@ -220,7 +238,7 @@ export function fixtureSpecs(): Record<string, FixtureSpec> {
     },
     r7: {
       name: 'r7-busy-single-shot',
-      shots: [{ lavfi: `life=s=${W}x${H}:r=${FPS}:mold=10:ratio=0.3:life_color=#ffd000:death_color=#103050[l];cellauto=s=${W}x${H / 3}:r=${FPS}:rule=30[c];[l][c]overlay=0:${H / 3}[out0]`, filter: `crop=w=iw-60:h=ih-60:x='30+20*sin(7*t)':y='30+20*cos(5*t)'` }],
+      shots: [{ lavfi: `life=s=${W}x${H}:r=${FPS}:mold=10:ratio=0.3:seed=11:life_color=#ffd000:death_color=#103050[l];cellauto=s=${W}x${H / 3}:r=${FPS}:rule=30:seed=13[c];[l][c]overlay=0:${H / 3}[out0]`, filter: `crop=w=iw-60:h=ih-60:x='30+20*sin(7*t)':y='30+20*cos(5*t)'` }],
       joins: [],
       totalSec: 15,
       audio: clickTrack(120),
@@ -295,6 +313,14 @@ export function edgeFixtureSpecs(): Record<string, FixtureSpec> {
     bpm: 120,
   };
   const textured = [0, 1, 3, 7, 0, 2].map((source): ShotSpec => ({ source }));
+  // X2 with the last shot's gradient colours set to two pairs that lost a cut when FFmpeg still picked them at random.
+  const x2LastShot = (c0: string, c1: string): ShotSpec[] => [
+    { source: 0 },
+    { source: 1, filter: 'eq=brightness=0.5' },
+    { source: 2 },
+    { source: 3, filter: 'eq=brightness=0.5' },
+    { lavfi: `gradients=s=${W}x${H}:r=${FPS}:speed=0.02:seed=7:c0=0x${c0}:c1=0x${c1}` },
+  ];
   return {
     x1: {
       name: 'x1-dark-and-bright-shots',
@@ -325,5 +351,19 @@ export function edgeFixtureSpecs(): Record<string, FixtureSpec> {
     },
     x7: { name: 'x7-cross-fades-and-beat-cuts-60fps', shots: mixedShots, joins: mixed, totalSec: 20, audio: clickTrack(120), truth: mixedTruth, fps: 60 },
     x8: { name: 'x8-cross-fades-and-beat-cuts-25fps', shots: mixedShots, joins: mixed, totalSec: 20, audio: clickTrack(120), truth: mixedTruth, fps: 25 },
+    // The cut into a smooth light-to-blue gradient once read as a slide: shifting the frame halved the difference just
+    // by cropping, although the shifted frames do not look alike.
+    x9: { name: 'x9-bright-insert-then-smooth-shot', shots: x2LastShot('ecf0de1c', '1277d485'), joins: cuts([2, 2.3, 5, 5.3]), totalSec: 8, audio: PINK_NOISE, truth: { cuts: [2, 2.3, 5, 5.3], flashes: 0 } },
+    // A light gradient that drifts towards a nearly uniform frame once made the insert and itself a white end screen.
+    x10: { name: 'x10-bright-insert-then-light-shot', shots: x2LastShot('dffcc3a7', 'c7e014c1'), joins: cuts([2, 2.3, 5, 5.3]), totalSec: 8, audio: PINK_NOISE, truth: { cuts: [2, 2.3, 5, 5.3], flashes: 0, screens: 0 } },
+    // A bright shot with detail, then a cut to a white end card: the card is an end screen, the bright shot keeps its cut.
+    x11: {
+      name: 'x11-bright-shot-then-white-end-card',
+      shots: [{ source: 0 }, { source: 1, filter: 'eq=brightness=0.5' }, { source: 2 }, { source: 3, filter: 'eq=brightness=0.6' }, { lavfi: `color=c=white:s=${W}x${H}:r=${FPS}`, filter: 'drawbox=x=220:y=440:w=100:h=60:color=0x303030:t=fill', noise: 0, hue: 0 }],
+      joins: cuts([2, 2.3, 5, 5.3]),
+      totalSec: 8,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 2.3, 5], endScreenStartSec: 5.3, flashes: 0 },
+    },
   };
 }

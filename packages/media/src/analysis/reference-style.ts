@@ -33,6 +33,13 @@ export const REFERENCE_STYLE_MEASURE = {
   cutMaxNcc: 0.5,
   /** …unless that NCC is at least this much below the NCC within each side (different shots that look alike). */
   cutNccDrop: 0.25,
+  /**
+   * A shift along an axis explains a spike (a slide or camera move, not a cut) only when the shifted frames look alike:
+   * NCC of their overlap at least `cutMaxNcc` and at most this much below the NCC within each side. Stricter than
+   * `cutNccDrop`, because the best of many shifts can line up two different shots by chance (a detailed shot cut
+   * against a smooth one halves the difference just by cropping).
+   */
+  cutShiftNccDrop: 0.1,
   /** A spike below this scene score followed by a burst of change is the start of a transition, not a cut. */
   cutWeakScore: 0.25,
   flashWhiteMin: 200,
@@ -272,6 +279,42 @@ export function shiftFit(a: Uint8Array, b: Uint8Array, w: number, h: number, axi
     if (e < best.error) best = { shift: d, error: e };
   }
   return { ...best, errorAtZero };
+}
+
+/** NCC of the parts of two frames that overlap when `b(p) ≈ a(p + shift)` along one axis (as in {@link shiftFit}). */
+export function shiftedNcc(a: Uint8Array, b: Uint8Array, w: number, h: number, axis: 'x' | 'y', shift: number): number {
+  const dx = axis === 'x' ? shift : 0;
+  const dy = axis === 'y' ? shift : 0;
+  const x0 = Math.max(0, -dx);
+  const x1 = Math.min(w, w - dx);
+  const y0 = Math.max(0, -dy);
+  const y1 = Math.min(h, h - dy);
+  let n = 0;
+  let sa = 0;
+  let sb = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      sa += a[(y + dy) * w + x + dx]!;
+      sb += b[y * w + x]!;
+      n++;
+    }
+  }
+  if (!n) return 0;
+  const ma = sa / n;
+  const mb = sb / n;
+  let num = 0;
+  let da = 0;
+  let db = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const p = a[(y + dy) * w + x + dx]! - ma;
+      const q = b[y * w + x]! - mb;
+      num += p * q;
+      da += p * p;
+      db += q * q;
+    }
+  }
+  return da > 0 && db > 0 ? num / Math.sqrt(da * db) : 0;
 }
 
 function spearman(values: number[]): number {
@@ -516,7 +559,9 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     for (let q = Math.max(0, from); q <= Math.min(n - 1, to); q++, k++) if (busy[q]) c++;
     return k ? c / k : 0;
   };
-  const peakSpread = (k: number) => percentileSpread(g(frames[k]!.t));
+  const uniformAt = (k: number) => percentileSpread(g(frames[k]!.t)) <= M.flashUniformSpread;
+  /** The largest scene score within a frame of `k` (the grey frames are on a 1/30 s grid, the scores on the proxy's). */
+  const sceneNear = (k: number) => Math.max(frames[k - 1]?.scene ?? 0, frames[k]!.scene, frames[k + 1]?.scene ?? 0);
 
   // 1. Flashes and dips: a nearly uniform white or black frame, entered from a steady picture or by a blend towards
   //    the extreme. A bright or dark shot keeps its detail and is left to the cut test.
@@ -533,20 +578,31 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     const test = kind === 'white' ? isWhite : isBlack;
     let runEnd = i;
     while (runEnd + 1 < n && test(y[runEnd + 1]!)) runEnd++;
-    let peak = i;
-    for (let k = i; k <= runEnd; k++) if (kind === 'white' ? y[k]! > y[peak]! : y[k]! < y[peak]!) peak = k;
-    const uniform = peakSpread(peak) <= M.flashUniformSpread;
     if ((runEnd - i + 1) / fps > M.screenMinSec) {
-      // A long uniform run is a title or end screen; a long bright or dark run with detail is just a shot.
-      if (uniform) {
-        let s = i;
-        while (s - 1 >= 0 && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(0.5)) s--;
-        screenRuns.push({ from: s, entry: i, to: runEnd, kind });
-        for (let k = s; k <= runEnd; k++) used[k] = 1;
+      // A title or end screen is nearly uniform frames at the extreme for more than 0.6 s, judged frame by frame (not by
+      // the brightest or darkest frame alone). Frames with picture detail are a shot and go to the cut test, also when
+      // a screen follows them in the same run: a cut into the uniform frames starts the screen there, so a bright shot
+      // before a white end card keeps its cut. Without a cut the uniform frames must come within 0.5 s of the start of
+      // the run (a cut or ramp into the screen); a shot that drifts towards white or black stays a shot.
+      for (let k = i; k <= runEnd; k++) {
+        if (!uniformAt(k)) continue;
+        let e = k;
+        while (e + 1 <= runEnd && uniformAt(e + 1)) e++;
+        const cutInto = k > i && sceneNear(k) >= M.cutMinScore;
+        if ((e - k + 1) / fps > M.screenMinSec && (cutInto || k - i <= sec(0.5))) {
+          let s = cutInto ? k : i;
+          if (!cutInto) while (s - 1 >= 0 && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(0.5)) s--;
+          screenRuns.push({ from: s, entry: cutInto ? k : i, to: e, kind });
+          for (let q = s; q <= e; q++) used[q] = 1;
+        }
+        k = e;
       }
       i = runEnd;
       continue;
     }
+    let peak = i;
+    for (let k = i; k <= runEnd; k++) if (kind === 'white' ? y[k]! > y[peak]! : y[k]! < y[peak]!) peak = k;
+    const uniform = uniformAt(peak);
     let s = i;
     while (s - 1 >= 0 && !used[s - 1] && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(1.5)) s--;
     const nextLevel = medianOf(y.slice(Math.min(n, runEnd + 1 + sec(0.2)), Math.min(n, runEnd + 1 + sec(0.5))));
@@ -606,17 +662,24 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     const gs = 1 / grey.fps;
     const a = g(t - 2 * gs);
     const b = g(t + 2 * gs);
+    /** How alike the frames within each side are (each shot's own motion and noise). */
+    const within = Math.min(ncc(g(t - 4 * gs), a), ncc(b, g(t + 4 * gs)));
     const fit = () => scaleFit(g(t - gs), g(t + gs), grey.width, grey.height, { min: 1, max: M.punchMax });
-    // The picture sliding or wiping along an axis is a transition (or camera motion), not a cut.
+    // The picture sliding or wiping along an axis is a transition (or camera motion), not a cut. The shift has to
+    // explain the change: the shifted frames must look alike, nearly as alike as the frames within each side. A shift
+    // that only lowers the difference by cropping (a detailed shot cut against a smooth one) leaves the cut a cut.
+    const before = g(t - gs);
+    const after = g(t + gs);
     const moving = (['y', 'x'] as const).some((axis) => {
-      const r = shiftFit(g(t - gs), g(t + gs), grey.width, grey.height, axis, Math.round((axis === 'y' ? grey.height : grey.width) / 3));
-      return Math.abs(r.shift) >= 2 && r.error <= 0.5 * r.errorAtZero;
+      const r = shiftFit(before, after, grey.width, grey.height, axis, Math.round((axis === 'y' ? grey.height : grey.width) / 3));
+      if (Math.abs(r.shift) < 2 || r.error > 0.5 * r.errorAtZero) return false;
+      const alike = shiftedNcc(before, after, grey.width, grey.height, axis, r.shift);
+      return alike >= M.cutMaxNcc && alike >= within - M.cutShiftNccDrop;
     });
     if (moving) continue;
     // Frames either side that still look alike rule out a cut (fast motion, a camera flash), unless they look clearly
     // less alike than the frames within each side do (two different but similar-looking shots).
     const across = ncc(a, b);
-    const within = Math.min(ncc(g(t - 4 * gs), a), ncc(b, g(t + 4 * gs)));
     const correlated = across >= M.cutMaxNcc && across >= within - M.cutNccDrop;
     const f = fit();
     const punch = f.scale >= M.punchMin && f.scale <= M.punchMax && f.error <= M.punchResidualRatio * f.errorAtOne;

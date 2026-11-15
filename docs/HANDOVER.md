@@ -199,6 +199,13 @@ History of the background runs:
     are screens, gradual limits in seconds with a fixed 1/30 s change measure (60 fps proxies), zoom joins gated by
     the scale-fit residual, blur transitions never cross-fades, soft wipes told from cross-fades by the per-column/row
     blend spread; edge fixtures X1–X8 (design §4.3.1.10).
+    Second fix-up: the X2 test was flaky because `gradients` picks random colours whatever its `seed` (also
+    `anoisesrc`, R7's `life`/`cellauto`, x264 frame threads and FFmpeg 6.1's `slideup` first frame varied between
+    builds); all pinned, two builds of every fixture are byte-identical. The colours exposed two measuring bugs, both
+    fixed with regression fixtures X9–X11: a cut into a smooth shot read as a slide (the shifted frames must now look
+    alike), and a long bright run counted as a white screen because its brightest frame was uniform (now frame by
+    frame). The planner's last resort steps down: first without the transitions from the owner's videos (keeping the
+    beat, beats per cut, the reveal and zooms), then without the editing style, each with its own plan note.
     **Next:** run it on 3–5 of the owner's real posted videos and tune the thresholds (design §4.3.1.10); every
     threshold is a starting value from synthetic clips.
 

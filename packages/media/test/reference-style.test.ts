@@ -14,6 +14,7 @@ import {
   parseFrameScores,
   percentileSpread,
   scaleFit,
+  shiftedNcc,
   shiftFit,
   type ReferenceStyleMeasurement,
 } from '../src/analysis/reference-style.js';
@@ -124,6 +125,28 @@ describe('reference style frame maths (no FFmpeg)', () => {
     const r = shiftFit(a, up, W, H, 'y', 40);
     expect(r.shift).toBe(10);
     expect(r.error).toBeLessThan(0.5 * r.errorAtZero);
+    // The shifted frames line up: the overlap correlates as the same picture.
+    expect(shiftedNcc(a, up, W, H, 'y', 10)).toBeGreaterThan(0.99);
+    expect(shiftedNcc(a, up, W, H, 'y', 0)).toBeLessThan(0.9);
+  });
+
+  it('a shift that only crops does not make two different pictures alike', () => {
+    // A detailed frame (bright above, dark below) cut against a smooth dark-to-light ramp: shifting by a third of the
+    // frame halves the difference just by cropping, but the overlap stays unlike (the false slide behind a lost cut).
+    const tex = texture(5);
+    const detail = new Uint8Array(W * H);
+    const ramp = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const v = tex[y * W + x]!;
+        detail[y * W + x] = Math.max(0, Math.min(255, Math.round(y < (2 * H) / 3 ? 0.5 * v + 120 : 0.5 * v - 20)));
+        ramp[y * W + x] = Math.round(80 + (150 * y) / (H - 1));
+      }
+    }
+    const r = shiftFit(detail, ramp, W, H, 'y', Math.round(H / 3));
+    expect(Math.abs(r.shift)).toBeGreaterThanOrEqual(2);
+    expect(r.error).toBeLessThanOrEqual(0.5 * r.errorAtZero);
+    expect(Math.abs(shiftedNcc(detail, ramp, W, H, 'y', r.shift))).toBeLessThan(0.5);
   });
 });
 
@@ -307,9 +330,25 @@ describe.skipIf(!ffmpeg)('reference style on SYNTHETIC fixtures (FFmpeg)', () =>
     expect(sig('x1').shots.count).toBe(6);
   });
 
-  it('X2: a short bright insert between two hard cuts is two cuts, not a white flash', () => {
-    expect(count('x2', 'fade_white')).toBe(0);
-    expect(count('x2', 'hard')).toBe(4);
+  // X9 and X10 are X2 with the last shot's colours that lost a cut while FFmpeg still picked them at random: the cut into
+  // a smooth gradient read as a slide (cropping halved the difference), and a light gradient drifting towards a nearly
+  // uniform frame turned the insert and itself into a white end screen.
+  it.each(['x2', 'x9', 'x10'])('%s: a short bright insert between two hard cuts is two cuts, not a white flash', (key) => {
+    expect(count(key, 'fade_white')).toBe(0);
+    expect(count(key, 'hard')).toBe(4);
+    const truth = truths.get(key)!['cuts'] as number[];
+    for (const t of truth) expect(results.get(key)!.details.events.some((e) => e.kind === 'hard' && Math.abs(e.timeSec - t) <= 1 / 30 + 1e-6), `cut at ${t}`).toBe(true);
+    expect(results.get(key)!.details.screens).toEqual([]);
+  });
+
+  it('X11: a bright shot keeps its cut when a white end card follows it', () => {
+    const m = results.get('x11')!;
+    const truth = truths.get('x11')! as { cuts: number[]; endScreenStartSec: number };
+    expect(count('x11', 'hard')).toBe(3);
+    expect(count('x11', 'fade_white')).toBe(0);
+    for (const t of truth.cuts) expect(m.details.events.some((e) => e.kind === 'hard' && Math.abs(e.timeSec - t) <= 1 / 30 + 1e-6), `cut at ${t}`).toBe(true);
+    expect(m.details.screens).toHaveLength(1);
+    expect(Math.abs(m.details.screens[0]![0] - truth.endScreenStartSec)).toBeLessThanOrEqual(1 / 30 + 1e-6);
   });
 
   it('X3: dips to black are read as dips', () => {

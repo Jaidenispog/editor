@@ -236,9 +236,12 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   zoompan truth) and a 1.25× punch-in jump (± 0.04, not a transition), R5/R5b a drop at 8 s (± 0.15 s, ≥ 10 dB) with
   and without a cut there, R6 slides and wipes (axis and direction, no cross-fades), R7 a busy single shot (no joins),
   R8 a 3 s dark end screen skipped (± 0.2 s), R9 talking (beat not measured, never "off the beat"), R10 a cut on every
-  beat at 124 BPM, R11 random cuts (not reportable), a proxy without sound, numbers only (no array longer than 8) and
-  the AbortSignal. The frame maths also has FFmpeg-free unit tests (parser, scale fit on known zooms, cross-fade vs
-  wipe, band direction, shifts).
+  beat at 124 BPM, R11 random cuts (not reportable), the review edge cases X1–X11 (bright and dark shots, bright
+  inserts, dips, zooms, blurs, soft wipes, 60 and 25 fps, a cut into a smooth shot, a white end card), a proxy without
+  sound, numbers only (no array longer than 8) and the AbortSignal. Fixture builds are reproducible (every random
+  input pinned, x264 on fixed slice threads), so a failure repeats on the next run. The frame maths also has
+  FFmpeg-free unit tests (parser, scale fit on known zooms, cross-fade vs wipe, band direction, shifts and whether the
+  shifted frames really look alike).
 - Unit: `packages/core/test/reference-style.test.ts` (binomial kMin table 15 → 10, 30 → 17, 8 → 7; reasons the beat was
   not measured; drop on a step, single knock rejected, click windows smoothed; every palette family and the worked
   example; v1 → v2 reads; summary 1 of 1, 1 of 2 differs, 3 of 4 pooled, octave-folded tempos, older profiles only for

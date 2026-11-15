@@ -1,6 +1,7 @@
 import {
   AppError,
   CancelledError,
+  DEFAULT_EDITING_STYLE,
   EDIT_PLAN_VERSION,
   STYLES,
   VERTICAL_1080,
@@ -21,7 +22,7 @@ import { collectFootage, type Candidate, type Footage } from './footage.js';
 import { alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
 import { ACCENT_PEAK_FRACTION, alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, isAccent, notePalette, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
 import { clamp, hashString, round, seededRandom } from './random.js';
-import { beatSyncFor, effectiveSettings, tameTransition, type EffectiveSettings } from './settings.js';
+import { beatSyncFor, effectiveSettings, tameTransition, type EffectiveSettings, type ResolvedEditingStyle } from './settings.js';
 import { STYLE_BUILDERS, applyOpening, type BuildContext, type Recipe } from './styles.js';
 import { buildCaptions, resolveText } from './text.js';
 
@@ -92,10 +93,20 @@ export class RulesPlanner implements EditPlanner {
   }
 }
 
+/** Plan notes for the editing-style fallback (owner-facing). */
+export const STYLE_FALLBACK_NOTES = {
+  transitionsOnly: "The transitions from your videos could not be fitted to this footage at this length, so this version uses the style's own transitions.",
+  transitionsKeepRest: "The transitions from your videos could not be fitted to this footage at this length, so this version uses the style's own transitions and keeps the rest of your editing style.",
+  wholeStyle: "Your editing style could not be fitted to this footage at this length, so this version uses the style's own timing and transitions.",
+} as const;
+
 /**
- * Last resort for the owner's accepted editing style: when the edit cannot be built with it but can without it, the
- * edit is built with each style's own timing and transitions and the plan says so; the owner's settings stay as they
- * are. Errors that also happen without the editing style (and cancellations) are passed on unchanged.
+ * Last resort for the owner's accepted editing style, one step at a time. When the edit cannot be built with it, it is
+ * built again without the transitions from the owner's videos (long cross-fades use up length the footage may not
+ * have) but with the rest of the style: cutting to the beat, beats per cut, the reveal and zooms. Only when that also
+ * fails is it built with each style's own timing and transitions. The plan says which part was left out; the owner's
+ * settings stay as they are. Errors that also happen without the editing style (and cancellations) are passed on
+ * unchanged.
  */
 export function buildWithStyleFallback(
   input: PlannerInput,
@@ -103,15 +114,36 @@ export function buildWithStyleFallback(
   footage: Footage,
   build: (input: PlannerInput, s: EffectiveSettings, footage: Footage) => EditPlan = buildPlan,
 ): EditPlan {
-  if (!s.styleFromVideos) return build(input, s, footage);
+  const es = s.styleFromVideos;
+  if (!es) return build(input, s, footage);
   const before = { notes: [...s.notes], emphasise: [...s.emphasise], deemphasise: [...s.deemphasise] };
+  const again = (styleFromVideos: ResolvedEditingStyle | null, note: string) =>
+    build(input, { ...s, styleFromVideos, notes: [...before.notes, note], emphasise: [...before.emphasise], deemphasise: [...before.deemphasise] }, footage);
   try {
     return build(input, s, footage);
   } catch (err) {
-    if (!(err instanceof AppError) || err.code !== 'PROCESSING_FAILED') throw err;
-    const plain: EffectiveSettings = { ...s, ...before, styleFromVideos: null, notes: [...before.notes, "Your editing style could not be fitted to this footage at this length, so this version uses the style's own timing and transitions."] };
-    return build(input, plain, footage);
+    if (!couldNotBuild(err)) throw err;
   }
+  if (es.palette) {
+    const rest: ResolvedEditingStyle = { ...es, palette: null, accent: null };
+    // With nothing else accepted, leaving out the transitions is leaving out the whole editing style.
+    if (!hasPlanningValues(rest)) return again(null, STYLE_FALLBACK_NOTES.transitionsOnly);
+    try {
+      return again(rest, STYLE_FALLBACK_NOTES.transitionsKeepRest);
+    } catch (err) {
+      if (!couldNotBuild(err)) throw err;
+    }
+  }
+  return again(null, STYLE_FALLBACK_NOTES.wholeStyle);
+}
+
+function couldNotBuild(err: unknown): boolean {
+  return err instanceof AppError && err.code === 'PROCESSING_FAILED';
+}
+
+/** True when the editing style (without its transitions) still changes how the rules planner builds an edit. */
+function hasPlanningValues(es: ResolvedEditingStyle): boolean {
+  return es.beatSync !== DEFAULT_EDITING_STYLE.beatSync || es.beatsPerCut !== DEFAULT_EDITING_STYLE.beatsPerCut || es.reveal !== DEFAULT_EDITING_STYLE.reveal || es.zoom.mode !== DEFAULT_EDITING_STYLE.zoom.mode;
 }
 
 /** Shortens the target to the music when the chosen track is a little shorter than the edit. */
