@@ -120,6 +120,28 @@ describe('make-sample-footage.sh with a stand-in ffmpeg', () => {
     expect(existsSync(t.lock)).toBe(false);
   }, TIMEOUT);
 
+  it('treats an owner that was killed but not yet reaped (a zombie) as gone', async () => {
+    const t = fresh();
+    // The background `sleep 0` exits at once; its parent becomes `sleep 30`, which never reaps it.
+    const parent = execa('bash', ['-c', 'sleep 0 & echo $!; exec sleep 30'], { reject: false });
+    try {
+      let zombie = '';
+      parent.stdout.on('data', (chunk: Buffer) => (zombie += chunk.toString()));
+      await waitFor(() => zombie.includes('\n'));
+      zombie = zombie.trim();
+      await waitFor(async () => (await execa('ps', ['-o', 'stat=', '-p', zombie], { reject: false })).stdout.trim().startsWith('Z'));
+      await mkdir(t.lock, { recursive: true });
+      await writeFile(t.owner, `${zombie} ${host} ${now()}\n`);
+      const result = await t.run();
+      expect(result.exitCode, result.all).toBe(0);
+      expect(result.all).toContain(`pid ${zombie} on ${host} is no longer running`);
+      expect(samplesComplete(t.dir)).toBe(true);
+    } finally {
+      parent.kill();
+      await parent;
+    }
+  }, TIMEOUT);
+
   it('takes over a lock held for longer than a generation can take, even by a live process', async () => {
     const t = fresh();
     await mkdir(t.lock, { recursive: true });

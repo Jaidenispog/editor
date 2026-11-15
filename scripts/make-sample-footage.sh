@@ -75,7 +75,13 @@ try_lock() {
   return 2
 }
 
-pid_alive() { kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1; }
+# True while process $1 runs. A zombie (killed, not yet reaped by its parent) counts as gone: where nothing reaps
+# orphans promptly (a container's PID 1, for one), it would otherwise hold the lock until it went stale.
+pid_alive() {
+  kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1 || return 1
+  case "$(ps -o stat= -p "$1" 2>/dev/null || true)" in Z*|' Z'*) return 1 ;; esac
+  return 0
+}
 
 # True when the lock can be taken over: its owner process has exited (checked on this computer only), or it has been
 # held for longer than a generation can take. Sets OWNER_SEEN (the owner line judged) and STALE_REASON.
