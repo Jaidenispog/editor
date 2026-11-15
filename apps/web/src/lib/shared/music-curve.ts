@@ -1,3 +1,5 @@
+import { editLengthForTrack } from '@studio/core';
+
 /**
  * Helpers for the music start-point picker. Isomorphic (no server imports): the server shrinks the stored
  * energy curve before sending it, the browser maps slider positions to seconds.
@@ -43,4 +45,19 @@ export function latestMusicStart(trackSec: number | null | undefined, editSec: n
 
 function round3(v: number): number {
   return Math.round(v * 1000) / 1000;
+}
+
+/**
+ * What the picker says when the start cannot be chosen (the track is not longer than the edit), with what happens to
+ * the length by the rule the planners use (`editLengthForTrack`): the edit is trimmed to end before the music, or the
+ * track is too short for the edit.
+ */
+export function automaticStartNote(trackSec: number | null | undefined, editSec: number): string {
+  if (!trackSec || !(trackSec > 0)) return 'The length of this track is not known yet, so the music starts at the beginning.';
+  const length = editLengthForTrack(editSec, trackSec);
+  if (!length.ok) return length.message;
+  const lead = trackSec < editSec ? 'This track is shorter than the edit' : 'This track is not much longer than the edit';
+  return length.trimmed
+    ? `${lead}, so the music starts at the beginning and the edit will be trimmed to ${length.targetSec} s so it ends before the music does.`
+    : `${lead}, so the music starts at the beginning.`;
 }

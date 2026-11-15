@@ -9,6 +9,7 @@ import {
   STYLES,
   clearanceSummary,
   computeTimeline,
+  editLengthForTrack,
   effectivePreferences,
   formatSeconds,
   isEmptyAudioPatch,
@@ -68,6 +69,17 @@ export function assertMusicStartFits(startSec: number, editSec: number, trackSec
 }
 
 /**
+ * With the music start on automatic the planners trim an edit to a chosen track that is a little shorter (the shared
+ * rule, `editLengthForTrack` in @studio/core: a 45-second edit with a 40-second track becomes 39.8 s). A track too short
+ * for that would fail every edit in the worker, so it is refused here, before anything is queued, with the same message.
+ */
+export function assertTrackLongEnough(editSec: number, trackSec: number | null): void {
+  if (trackSec === null || !(trackSec > 0)) return;
+  const length = editLengthForTrack(editSec, trackSec);
+  if (!length.ok) throw new AppError('VALIDATION', length.message, { details: [{ path: 'musicTrackId', message: length.message }] });
+}
+
+/**
  * Starts a generation: checks the clips are ready and every chosen style is supported, then in one
  * transaction creates the generation, one edit per style (in the fixed style order) and a v1 version in
  * "planning", and finally queues edits.generate. The settings are remembered on the project.
@@ -101,6 +113,7 @@ export async function startGeneration(projectId: string, user: SessionUser, raw:
     if (track.status !== 'ready') throw new AppError('CONFLICT', 'That music track is still being analysed. Wait for it to finish or choose another one.');
     if (!track.licence.confirmedByOwnerAt) throw new AppError('VALIDATION', 'Confirm the licence for that track in Settings → Music before using it.');
     if (settings.musicStartSec !== null) assertMusicStartFits(settings.musicStartSec, settings.durationSec, track.durationSec);
+    else assertTrackLongEnough(settings.durationSec, track.durationSec);
   } else if (settings.musicStartSec !== null) {
     throw new AppError('VALIDATION', 'Choose a music track before picking where the music starts.', { details: [{ path: 'musicStartSec', message: 'No music chosen' }] });
   }

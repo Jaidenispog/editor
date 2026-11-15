@@ -355,12 +355,25 @@ suite('access rules, clip order, shot tags, music library and music start (datab
     expect(tooLate.status).toBe(400);
     expect(tooLate.json.error.message).toMatch(/leaves 10 seconds of the track, but the edit is 20 seconds/);
 
+    // With the start on automatic the planners trim an edit to a track a little shorter than it (40 s → 39.8 s for 45 s),
+    // but a track too short for that is refused before anything is queued, with the planners' own message.
+    const tooShort = await post({ musicTrackId: trackId, durationSec: 50 });
+    expect(tooShort.status).toBe(400);
+    expect(tooShort.json.error.message).toBe('The chosen track is 40 seconds long, which is shorter than the 50-second edit. Choose a longer track or a shorter length.');
+    expect(tooShort.json.error.details).toEqual([{ path: 'musicTrackId', message: tooShort.json.error.message }]);
+
     const ok = await post({ musicTrackId: trackId, musicStartSec: 12.5 });
     expect(ok.status).toBe(201);
     const generation = await getDb().query.generations.findFirst({ where: eq(schema.generations.id, ok.json.generationId) });
     expect(generation?.settings).toMatchObject({ musicTrackId: trackId, musicStartSec: 12.5, durationSec: 20 });
     const project = await getDb().query.projects.findFirst({ where: eq(schema.projects.id, ownerProjectId) });
     expect(project?.lastSettings?.musicStartSec).toBe(12.5);
+
+    await getDb().update(schema.generations).set({ status: 'failed' }).where(eq(schema.generations.id, ok.json.generationId));
+    const trimmed = await post({ musicTrackId: trackId, durationSec: 45 });
+    expect(trimmed.status).toBe(201);
+    const trimmedGeneration = await getDb().query.generations.findFirst({ where: eq(schema.generations.id, trimmed.json.generationId) });
+    expect(trimmedGeneration?.settings).toMatchObject({ musicTrackId: trackId, musicStartSec: null, durationSec: 45 });
   }, 60_000);
 
   it('uploads a licensed track from Settings into the library', async () => {

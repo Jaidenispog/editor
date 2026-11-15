@@ -2,7 +2,7 @@
 
 import { useId } from 'react';
 import { formatSeconds } from '@/lib/format';
-import { latestMusicStart } from '@/lib/shared/music-curve';
+import { automaticStartNote, latestMusicStart } from '@/lib/shared/music-curve';
 import type { MusicOptionDto } from '@/lib/shared/studio-dto';
 
 const CURVE_WIDTH = 600;
@@ -69,7 +69,7 @@ export function MusicStartPicker({
         </label>
       </div>
       {!canChoose ? (
-        <p className="text-xs text-charcoal-500">This track is not much longer than the edit, so the music starts at the beginning.</p>
+        <p className="text-xs text-charcoal-500">{automaticStartNote(track.durationSec, editSec)}</p>
       ) : manual ? (
         <div>
           <div className="flex items-baseline justify-between gap-2">

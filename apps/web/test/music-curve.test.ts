@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { moveInOrder } from '../src/lib/shared/clip-order';
-import { downsampleEnergy, latestMusicStart } from '../src/lib/shared/music-curve';
+import { automaticStartNote, downsampleEnergy, latestMusicStart } from '../src/lib/shared/music-curve';
 
 describe('downsampleEnergy', () => {
   it('keeps short curves as they are (clamped to 0–1)', () => {
@@ -20,6 +20,19 @@ describe('downsampleEnergy', () => {
     expect(downsampleEnergy([], 0.25)).toBeNull();
     expect(downsampleEnergy(null, 0.25)).toBeNull();
     expect(downsampleEnergy([0.5], 0)).toBeNull();
+  });
+});
+
+describe('automaticStartNote', () => {
+  it('says the edit is trimmed to end before a track a little shorter than it, as the planners do', () => {
+    expect(automaticStartNote(40, 45)).toBe('This track is shorter than the edit, so the music starts at the beginning and the edit will be trimmed to 39.8 s so it ends before the music does.');
+    expect(automaticStartNote(45.05, 45)).toBe('This track is not much longer than the edit, so the music starts at the beginning and the edit will be trimmed to 44.9 s so it ends before the music does.');
+    expect(automaticStartNote(45.2, 45)).toBe('This track is not much longer than the edit, so the music starts at the beginning.');
+  });
+
+  it('says when the track is too short for the edit, and when its length is not known', () => {
+    expect(automaticStartNote(30, 45)).toBe('The chosen track is 30 seconds long, which is shorter than the 45-second edit. Choose a longer track or a shorter length.');
+    expect(automaticStartNote(null, 45)).toBe('The length of this track is not known yet, so the music starts at the beginning.');
   });
 });
 
