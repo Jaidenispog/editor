@@ -10,7 +10,7 @@ import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
 import type { PublishPostDto, TargetDto } from '@/lib/shared/publishing-dto';
 import { ConfirmPostedDialog } from './confirm-posted-dialog';
-import { TARGET_LABELS, methodLabel } from './labels';
+import { TARGET_LABELS, methodLabel, verificationNotice } from './labels';
 import { ManualSteps } from './manual-steps';
 
 /**
@@ -83,7 +83,7 @@ export function TargetCard({ post, target, isOwner, onChanged }: { post: Publish
         </p>
       ) : null}
       {target.isVerification && post.status !== 'draft' && target.status !== 'published' ? (
-        <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">This is a real, public post on {target.handle}.</p>
+        <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">{verificationNotice(target.method, target.delivery, target.handle)}</p>
       ) : null}
       {target.awaitingVerificationAnswer && isOwner && target.accountId ? (
         <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50 p-3">

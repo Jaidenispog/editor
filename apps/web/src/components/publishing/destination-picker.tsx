@@ -4,7 +4,7 @@ import { TARGET_PLATFORM_NAMES, formatDateTime, type TargetPlatform } from '@stu
 import { Switch } from '@/components/ui/switch';
 import type { EligibilityDto, EligibilityItemDto } from '@/lib/shared/publishing-dto';
 import type { DestinationDraft } from './composer-state';
-import { methodLabel } from './labels';
+import { methodLabel, verificationNotice } from './labels';
 
 /**
  * One platform's switch (off by default), its method choice with the reason any option is greyed out, and the file
@@ -54,7 +54,7 @@ export function DestinationPicker({
                     {!o.available && o.reason ? <span className="block text-xs text-charcoal-600">{o.reason}</span> : null}
                     {o.isVerification && o.available ? (
                       <span className="block text-xs text-amber-800">
-                        {o.method === 'zernio' && o.delivery === 'draft' ? `This sends a real draft to the TikTok inbox of ${o.handle}.` : `This is a real, public post on ${o.handle}.`} Choose an edit you&apos;re happy to share.
+                        {verificationNotice(o.method, o.delivery, o.handle)} Choose an edit you&apos;re happy to share.
                       </span>
                     ) : null}
                     {o.method === 'zernio' && o.delivery === 'draft' ? <span className="block text-xs text-charcoal-600">Choose the cover, sound and caption in the TikTok app.</span> : null}
