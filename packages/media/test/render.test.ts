@@ -8,7 +8,7 @@ import { AppError, CancelledError, VERTICAL_1080, VERTICAL_PREVIEW, computeTimel
 import { ffprobeRaw, probeMedia } from '../src/ffprobe.js';
 import { runFfmpegToBuffer } from '../src/ffmpeg.js';
 import { escapeFilterPath, layoutAssDocument, renderEditPlan, verifyExport, type RenderInputs, type RenderResult } from '../src/render/index.js';
-import { ASSET_IDS, FONTS_DIR, MUSIC_TRACK_ID, SAMPLE_FILES, TEST_BRAND, samplePlan, shortPlan } from './render-fixtures.js';
+import { ASSET_IDS, FONTS_DIR, MUSIC_TRACK_ID, SAMPLE_FILES, TEST_BRAND, ensureSamples, samplePlan, shortPlan } from './render-fixtures.js';
 
 const RENDER_TIMEOUT = 240_000;
 
@@ -105,6 +105,7 @@ async function textMask(assPath: string, width: number, height: number, duration
 }
 
 beforeAll(async () => {
+  await ensureSamples();
   workDir = await mkdtemp(join(tmpdir(), 'studio-render-'));
   const [a, b, c, music] = await Promise.all([probeMedia(SAMPLE_FILES.a), probeMedia(SAMPLE_FILES.b), probeMedia(SAMPLE_FILES.c), probeMedia(SAMPLE_FILES.music)]);
   expect(b.video?.isHdr).toBe(true);

@@ -1,8 +1,10 @@
-import { existsSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { classifyColourLook } from '@studio/core';
 import { SATURATION_FULL_SCALE, measureLook, parseSignalStats, summariseLook } from '../src/analysis/look.js';
-import { SAMPLE_FILES } from './render-fixtures.js';
+import { SAMPLE_FILES, ensureSamples, hasFfmpeg } from './render-fixtures.js';
+
+const ffmpegAvailable = await hasFfmpeg();
+if (!ffmpegAvailable) console.warn('ffmpeg/ffprobe not found on PATH: skipping the look measurement that needs them.');
 
 /** Captured from `ffmpeg -f lavfi -i testsrc2=s=160x90:d=1:r=2 -vf "signalstats,metadata=mode=print:file=-"` (two frames, trimmed). */
 const CAPTURED = `frame:0    pts:0       pts_time:0
@@ -41,12 +43,16 @@ describe('measureLook parser', () => {
     expect(summariseLook([])).toBeNull();
   });
 
-  it.skipIf(!existsSync(SAMPLE_FILES.c))('measures a real clip with ffmpeg', async () => {
-    const look = await measureLook(SAMPLE_FILES.c);
-    for (const v of [look.meanLuma, look.meanSaturation, look.contrast]) {
-      expect(v).toBeGreaterThanOrEqual(0);
-      expect(v).toBeLessThanOrEqual(1);
-    }
-    expect(['natural', 'clean', 'cinematic', 'punchy']).toContain(classifyColourLook(look));
+  describe.skipIf(!ffmpegAvailable)('on the synthetic footage', () => {
+    beforeAll(ensureSamples, 300_000);
+
+    it('measures a real clip with ffmpeg', async () => {
+      const look = await measureLook(SAMPLE_FILES.c);
+      for (const v of [look.meanLuma, look.meanSaturation, look.contrast]) {
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(1);
+      }
+      expect(['natural', 'clean', 'cinematic', 'punchy']).toContain(classifyColourLook(look));
+    });
   });
 });
