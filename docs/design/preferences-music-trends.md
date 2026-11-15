@@ -712,15 +712,17 @@ effective preferences; with the defaults every plan is byte-identical to today's
   "Cross-fades as in your videos, from your style.") reaches the plan. The build adds its step's note itself
   (`EffectiveSettings.styleFallback`), right after the notes it was given, once it knows whether it kept joins from
   the earlier version. A revision keeps the shots it can from the earlier version, each with its join ("keep
-  everything the request does not mention"), so leaving out the transitions changes only the shots it adds. When a
-  revision kept such joins, the three notes read instead:
+  everything the request does not mention"), so leaving out the transitions changes only the shots it adds; the kept
+  joins (the owner's transitions among them) stay as they were unless the request itself changes transitions
+  ("remove the flashy transitions" turns kept slides into dissolves, with its own note). When a revision kept such
+  joins, the three notes read instead:
   - "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this
-    version use the style's own transitions and the joins kept from the earlier version are unchanged."
+    version use the style's own transitions; this does not change the joins kept from the earlier version."
   - "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this
-    version use the style's own transitions, the joins kept from the earlier version are unchanged, and the rest of
-    your editing style is kept."
+    version use the style's own transitions and the rest of your editing style is kept; this does not change the
+    joins kept from the earlier version."
   - "Your editing style could not be fitted to this footage at this length, so the shots added in this version use
-    the style's own timing and transitions, and the joins kept from the earlier version are unchanged."
+    the style's own timing and transitions; this does not change the joins kept from the earlier version."
 
   A revision rebuilt from scratch (the beat montage, which is rebuilt on the beat grid, or an earlier version whose
   clips are gone) keeps no joins and uses the first wordings. The "finished look lands on the biggest lift" note is

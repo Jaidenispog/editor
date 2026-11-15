@@ -103,16 +103,17 @@ export const STYLE_FALLBACK_NOTES = {
 
 /**
  * The same notes for a revision that kept shots from the earlier version (owner-facing). A revision keeps the joins of
- * the shots it keeps ("keep everything the request does not mention"), so only the shots it adds get the style's own
- * transitions, and the earlier version's joins (the transitions from your videos included) stay.
+ * the shots it keeps ("keep everything the request does not mention"), so leaving out the transitions from the owner's
+ * videos changes only the shots it adds; the kept joins (the owner's transitions among them) stay as they were, unless
+ * the request itself changes transitions ("remove the flashy transitions"), which has its own note.
  */
 export const STYLE_FALLBACK_REVISION_NOTES = {
   transitionsOnly:
-    "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this version use the style's own transitions and the joins kept from the earlier version are unchanged.",
+    "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this version use the style's own transitions; this does not change the joins kept from the earlier version.",
   transitionsKeepRest:
-    "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this version use the style's own transitions, the joins kept from the earlier version are unchanged, and the rest of your editing style is kept.",
+    "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this version use the style's own transitions and the rest of your editing style is kept; this does not change the joins kept from the earlier version.",
   wholeStyle:
-    "Your editing style could not be fitted to this footage at this length, so the shots added in this version use the style's own timing and transitions, and the joins kept from the earlier version are unchanged.",
+    "Your editing style could not be fitted to this footage at this length, so the shots added in this version use the style's own timing and transitions; this does not change the joins kept from the earlier version.",
 } as const satisfies Record<StyleFallbackStep, string>;
 
 /** The plan note for a fallback step: the revision wording when the build kept joins from the earlier version. */

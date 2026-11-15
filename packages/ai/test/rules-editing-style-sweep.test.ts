@@ -364,6 +364,18 @@ describe('in a revision, the fallback keeps the earlier version\'s joins and its
     expect(sameApartFromRationale(plan, plain)).toBe(false);
   });
 
+  it('leaves to the request its own change to kept joins ("remove the flashy transitions"), with its own note', () => {
+    const slides: EditingStyle = { ...DEFAULT_EDITING_STYLE, transitionPalette: { hardCutShare: 0.2, types: ['fade', 'slideup'], durationSec: 0.5, accent: null } };
+    const preferences = { ...DEFAULT_SETTINGS.preferences, transitions: 'varied' as const, editingStyle: slides };
+    const prev = planner.plan(input('before_after', music, 30, 0, slides, { preferences }));
+    expect(prev.segments.some((seg) => seg.transitionIn?.type === 'slideup')).toBe(true);
+    const plan = planner.plan(input('before_after', music, 30, 0, slides, { preferences, previousPlan: prev, revisionInstruction: 'Make it 60 seconds and remove the flashy transitions' }));
+    // Leaving out the owner's transitions changed only the added shots; the request turned the kept slides into dissolves.
+    expect(plan.rationale).toContain(STYLE_FALLBACK_REVISION_NOTES.transitionsOnly);
+    expect(plan.rationale).toContain('Flashy transitions were replaced with simple dissolves.');
+    expect(plan.segments.some((seg) => seg.transitionIn?.type === 'slideup')).toBe(false);
+  });
+
   it('uses the wording for a new edit when the revision could keep nothing from the earlier version', () => {
     const prev = planner.plan(input('before_after', music, 30, 0, fadesOnly));
     // The earlier version's clips are gone, so the revision is rebuilt from scratch: no join is kept.
