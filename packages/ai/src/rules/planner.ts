@@ -5,6 +5,7 @@ import {
   STYLES,
   VERTICAL_1080,
   computeTimeline,
+  paletteTransitionTypes,
   validateEditPlan,
   type AudioPlan,
   type EditPlan,
@@ -18,6 +19,7 @@ import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '..
 import { fitDuration, play, startTimes, totalDuration, grow, shrink, type Draft } from './draft.js';
 import { collectFootage, type Candidate, type Footage } from './footage.js';
 import { alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
+import { ACCENT_PEAK_FRACTION, alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, isAccent, notePalette, planReveal, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
 import { clamp, hashString, round, seededRandom } from './random.js';
 import { effectiveSettings, tameTransition, type EffectiveSettings } from './settings.js';
 import { STYLE_BUILDERS, applyOpening, type BuildContext, type Recipe } from './styles.js';
@@ -124,12 +126,13 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   };
   const needsGrid = input.styleId === 'beat_montage' || Boolean(input.music && s.musicOn);
   const preferStart = previous?.audio.music?.startOffsetSec;
-  const fullGrid = needsGrid ? beatGrid(s.musicOn ? input.music : null, s.target, s.attempt, preferStart, input.musicStartSec ?? null) : null;
+  const es = s.styleFromVideos;
+  let fullGrid = needsGrid ? beatGrid(s.musicOn ? input.music : null, s.target, s.attempt, preferStart, input.musicStartSec ?? null) : null;
   const beatMode = beatSyncFor(input, s);
   // "Cut to the beat: Off" keeps natural shot lengths: the builders get no grid, but the music still starts on a beat.
   // The beat montage is cut on the beat by definition, so it keeps its grid.
   const beatsOff = beatMode === 'off' && input.styleId !== 'beat_montage';
-  const grid = beatsOff ? null : fullGrid;
+  let grid = beatsOff ? null : fullGrid;
   if (beatsOff && fullGrid?.fromMusic) s.notes.push('Shot lengths follow the footage rather than the beat, as asked.');
   const ctx: BuildContext = {
     input,
@@ -143,6 +146,7 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
 
   const fresh = STYLE_BUILDERS[input.styleId](ctx);
   const recipe = fresh.recipe;
+  recipe.transitionFor = withPalette(ctx, recipe.transitionFor);
   let drafts = fresh.drafts;
   if (previous && !recipe.exact) {
     const mapped = draftsFromPlan(ctx, previous);
@@ -176,8 +180,22 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     });
   if (!recipe.exact) fit();
   recipe.finish(drafts);
-  if (grid?.fromMusic && !recipe.exact && beatMode === 'on' && snapCutsToBeats(drafts, grid) > 0) ctx.notes.push('Cuts are nudged onto the beat of the music where the footage allows.');
-  if (grid?.fromMusic && input.revealOnBeat) {
+  if (es && input.styleId === 'beat_montage' && grid) applyMontagePalette(ctx, drafts, grid);
+  else if (es) notePalette(ctx);
+  const everyN = es?.beatsPerCut ?? null;
+  if (grid?.fromMusic && !recipe.exact && beatMode === 'on' && everyN) {
+    if (snapCutsToBeatSteps(drafts, grid, everyN, s.style.pacing.minShotSec) > 0) ctx.notes.push(`Shots last whole steps of ${everyN} beat${everyN === 1 ? '' : 's'} where the style's shot lengths allow, from your style.`);
+  } else if (grid?.fromMusic && !recipe.exact && beatMode === 'on' && snapCutsToBeats(drafts, grid) > 0) ctx.notes.push('Cuts are nudged onto the beat of the music where the footage allows.');
+  if (es && grid?.fromMusic && !recipe.exact) alignAccentsToBeats(drafts, grid);
+  // "Land the finished look on the strongest beat" (from the owner's videos): with the music start on automatic the
+  // start moves (by whole bars) so the track's biggest lift falls where the reveal is; then the reveal is nudged onto it.
+  const reveal = es?.reveal === 'strongest_beat' && fullGrid?.fromMusic && !previous ? planRevealFor(ctx, drafts, fullGrid) : null;
+  if (reveal?.musicStartSec !== null && reveal?.musicStartSec !== undefined && input.music) {
+    fullGrid = beatGrid(input.music, s.target, s.attempt, undefined, reveal.musicStartSec);
+    if (grid) grid = fullGrid;
+  }
+  if (reveal) applyReveal(ctx, drafts, grid ?? fullGrid, reveal);
+  else if (grid?.fromMusic && input.revealOnBeat) {
     if (landRevealOnBeat(drafts, grid)) ctx.notes.push('The first shot of the finished cut starts on a beat.');
     else ctx.notes.push('The reveal could not be moved onto a beat with this footage, so it stays where the cut works best.');
   }
@@ -210,11 +228,13 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     Object.keys(footage.transcripts).length > 0 &&
     (input.styleId === 'process_story' || (previous?.captions.length ?? 0) > 0);
 
+  if (es) applyZoomStyle(ctx, drafts, grid ?? fullGrid);
   const state: ComposeState = {
     bannedText: new Set<string>(),
     captionsOn: captionsWanted,
     musicOn: Boolean(input.music && s.musicOn),
     musicOffset: fullGrid?.fromMusic ? fullGrid.startOffsetSec : 0,
+    accentPeaks: Boolean(es?.accent),
   };
   const vctx: PlanValidationContext = {
     assets: input.assets,
@@ -222,6 +242,7 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     transcripts: footage.transcripts,
     durationBounds: { min: s.target * (1 - TARGET_SLACK), max: s.target * (1 + TARGET_SLACK) },
     restrainedTransitionsOnly: s.transitions !== 'style',
+    ...(es?.palette ? { extraStyleTransitions: paletteTransitionTypes(es.palette) } : {}),
   };
 
   let lastErrors: PlanIssue[] = [];
@@ -246,6 +267,14 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
       : `The ${name} could not be built from this footage.`,
     { details: { errors: loose.errors.length ? loose.errors : lastErrors } },
   );
+}
+
+/** The reveal plan for this edit from where the reveal currently sits (see planReveal). */
+function planRevealFor(ctx: BuildContext, drafts: Draft[], grid: BeatGrid): ReturnType<typeof planReveal> {
+  const r = revealIndex(ctx.input.styleId, drafts);
+  const felt = r > 0 ? feltCutTime(drafts, r) : null;
+  const fixed = typeof ctx.input.musicStartSec === 'number' ? grid.startOffsetSec : null;
+  return planReveal(ctx.input, ctx.s, felt, fixed, grid.startOffsetSec);
 }
 
 function makeFillerAdder(recipe: Recipe): (drafts: Draft[], allowReuse: boolean) => boolean {
@@ -464,6 +493,8 @@ interface ComposeState {
   captionsOn: boolean;
   musicOn: boolean;
   musicOffset: number;
+  /** Report an accent's peak (not its end) as the moment of the cut (only with an accepted accent). */
+  accentPeaks: boolean;
 }
 
 function overlapsSpeech(d: Draft, transcripts: Footage['transcripts']): boolean {
@@ -525,7 +556,10 @@ function compose(
       duckUnderOriginal: true,
     };
   }
-  const cutTimes = starts.slice(1).map((t, i) => t + (drafts[i + 1]?.transitionIn?.durationSec ?? 0));
+  const cutTimes = starts.slice(1).map((t, i) => {
+    const tr = drafts[i + 1]?.transitionIn ?? null;
+    return t + (state.accentPeaks && isAccent(tr) ? ACCENT_PEAK_FRACTION * tr!.durationSec : (tr?.durationSec ?? 0));
+  });
   const beatAlignment =
     musicPlan && grid?.fromMusic ? { bpm: grid.bpm && grid.bpm > 0 ? round(grid.bpm, 1) : null, alignedCutTimesSec: alignedCuts(grid, cutTimes) } : null;
 
@@ -566,7 +600,9 @@ function colourFor(s: EffectiveSettings, previous: EditPlan | null): EditPlan['c
 function beatSyncFor(input: PlannerInput, s: EffectiveSettings): 'auto' | 'on' | 'off' {
   if (input.beatSync && input.beatSync !== 'auto') return input.beatSync;
   const hinted = s.revisionHints?.beatSync;
-  return hinted === 'on' || hinted === 'off' ? hinted : 'auto';
+  if (hinted === 'on' || hinted === 'off') return hinted;
+  // The owner's accepted style applies when neither the form nor the Sound panel nor a revision chose.
+  return s.styleFromVideos?.beatSync ?? 'auto';
 }
 
 /** A factual one-paragraph description of the edit that was actually built (max 280 characters). */

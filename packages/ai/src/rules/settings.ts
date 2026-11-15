@@ -1,7 +1,13 @@
 import {
+  RESTRAINED_TRANSITIONS,
   STYLES,
   computeTimeline,
   effectivePreferences,
+  isDefaultEditingStyle,
+  type BeatsPerCut,
+  type EditingStyle,
+  type TransitionPalette,
+  type ZoomUse,
   parseRevisionInstruction,
   type ColourPreset,
   type EditPlan,
@@ -15,6 +21,20 @@ import { clamp } from './random.js';
 
 /** Transitions the rules planner treats as calm (the validator also accepts fadewhite). */
 export const CALM_TRANSITIONS: readonly TransitionType[] = ['fade', 'dissolve', 'fadeblack'];
+
+/**
+ * The owner's accepted editing style (design §4.3.1.6) after revision hints: flashy palette types and accents are
+ * dropped for "remove the flashy transitions", and "no transitions" leaves only hard cuts.
+ */
+export interface ResolvedEditingStyle {
+  palette: TransitionPalette | null;
+  /** The accent to place (null when there is none or a revision tamed the transitions). */
+  accent: TransitionPalette['accent'];
+  beatSync: 'auto' | 'on' | 'off';
+  beatsPerCut: BeatsPerCut | null;
+  reveal: 'style' | 'strongest_beat';
+  zoom: ZoomUse;
+}
 
 /** Every knob the style builders read, after combining preferences, instructions and revision hints. */
 export interface EffectiveSettings {
@@ -39,7 +59,24 @@ export interface EffectiveSettings {
   revisionHints: RevisionHints | null;
   /** Mentions of a skin fade in the owner's own words (the only case "Skin fade" text is honest). */
   ownerMentionsSkinFade: boolean;
+  /** The editing style accepted from the owner's own videos; null when every value is the default. */
+  styleFromVideos: ResolvedEditingStyle | null;
   notes: string[];
+}
+
+/** Resolves the accepted editing style for this plan; null with the defaults (plans are then unchanged). */
+export function resolveEditingStyle(style: EditingStyle | undefined, transitionsHint: 'none' | 'restrained' | null): ResolvedEditingStyle | null {
+  if (!style || isDefaultEditingStyle(style)) return null;
+  let palette = style.transitionPalette;
+  let accent = palette?.accent ?? null;
+  if (palette && transitionsHint === 'none') {
+    palette = { ...palette, hardCutShare: 1, types: [], accent: null };
+    accent = null;
+  } else if (palette && transitionsHint === 'restrained') {
+    palette = { ...palette, types: palette.types.filter((t) => RESTRAINED_TRANSITIONS.includes(t)), accent: null };
+    accent = null;
+  }
+  return { palette, accent, beatSync: style.beatSync, beatsPerCut: style.beatsPerCut, reveal: style.reveal, zoom: style.zoom };
 }
 
 /** Hints for this call: explicit hints win, otherwise the revision instruction is parsed. */
@@ -121,11 +158,29 @@ export function effectiveSettings(input: PlannerInput): EffectiveSettings {
     revising,
     revisionHints: hints,
     ownerMentionsSkinFade: /\bskin[\s-]?fade\b/i.test(`${prefs.standingInstructions} ${input.instructions} ${input.revisionInstruction ?? ''}`),
+    styleFromVideos: null,
     notes: [],
   };
-  if (prefs.standingInstructions.trim()) applyHints(s, parseRevisionInstruction(prefs.standingInstructions));
-  if (input.instructions.trim()) applyHints(s, parseRevisionInstruction(input.instructions));
-  if (hints) applyHints(s, hints);
+  let transitionsHint: 'none' | 'restrained' | null = null;
+  const noteHint = (h: RevisionHints) => {
+    if (h.transitions === 'none') transitionsHint = 'none';
+    else if (h.transitions === 'restrained' && transitionsHint !== 'none') transitionsHint = 'restrained';
+  };
+  if (prefs.standingInstructions.trim()) {
+    const h = parseRevisionInstruction(prefs.standingInstructions);
+    applyHints(s, h);
+    noteHint(h);
+  }
+  if (input.instructions.trim()) {
+    const h = parseRevisionInstruction(input.instructions);
+    applyHints(s, h);
+    noteHint(h);
+  }
+  if (hints) {
+    applyHints(s, hints);
+    noteHint(hints);
+  }
+  s.styleFromVideos = resolveEditingStyle(prefs.editingStyle, transitionsHint);
   s.pacing = clamp(s.pacing, 0.55, 1.7);
   return s;
 }

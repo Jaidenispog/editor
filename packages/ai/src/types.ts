@@ -87,6 +87,12 @@ export interface PlannerMusic {
   bpm: number | null;
   beatTimesSec: number[];
   title: string;
+  /**
+   * The track's stored loudness curve (RMS per `energyStepSec`, loudest = 1), used to find its strongest beat for
+   * "land the finished look on the strongest beat". Absent for tracks analysed before it was kept.
+   */
+  energy?: number[];
+  energyStepSec?: number;
 }
 
 /** Everything a planner needs to propose one edit. */

@@ -224,6 +224,42 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
 - Only with the owner's real use: whether learned defaults feel right after a few weeks, logo legibility on the real
   logo, and colour, pacing and text estimates on real reference videos.
 
+### Reference style v2 (transitions, beat sync, music from the owner's videos)
+
+- Synthetic fixtures with known ground truth: `packages/media/test/fixtures/make-reference-fixtures.ts` builds them at
+  test time with FFmpeg `lavfi` sources only (540 × 960, 30 fps, 48 kHz, "SYNTHETIC TEST CLIP" on every frame, named
+  `synthetic-*.mp4` with a ground-truth JSON beside each, in a temp folder that is deleted afterwards; nothing is
+  committed or seeded into a database). `packages/media/test/reference-style.test.ts` (needs ffmpeg) runs every row of
+  design §4.3.1.10: R1 hard cuts at 120 BPM (15 ± 1 joins, tempo ± 1.5, ≥ 13 cuts within a frame, beats per cut 2),
+  R2 a white flash every 4th beat (7 ± 1 flashes peaking on beats, palette accent every 4 beats), R3/R3b cross-fades
+  and pixel dissolves (both map to `fade`, 0.5 ± 0.1 s, no beat in pink noise), R4 a push-in (scale ± 0.03 of the
+  zoompan truth) and a 1.25× punch-in jump (± 0.04, not a transition), R5/R5b a drop at 8 s (± 0.15 s, ≥ 10 dB) with
+  and without a cut there, R6 slides and wipes (axis and direction, no cross-fades), R7 a busy single shot (no joins),
+  R8 a 3 s dark end screen skipped (± 0.2 s), R9 talking (beat not measured, never "off the beat"), R10 a cut on every
+  beat at 124 BPM, R11 random cuts (not reportable), a proxy without sound, numbers only (no array longer than 8) and
+  the AbortSignal. The frame maths also has FFmpeg-free unit tests (parser, scale fit on known zooms, cross-fade vs
+  wipe, band direction, shifts).
+- Unit: `packages/core/test/reference-style.test.ts` (binomial kMin table 15 → 10, 30 → 17, 8 → 7; reasons the beat was
+  not measured; drop on a step, single knock rejected, click windows smoothed; every palette family and the worked
+  example; v1 → v2 reads; summary 1 of 1, 1 of 2 differs, 3 of 4 pooled, octave-folded tempos, older profiles only for
+  v1 rows; `alsoChanges`, `valueKey` stability and conflicts; no "exact/precise/detected/trending/viral" wording),
+  `packages/core/test/music-ranking.test.ts` (fit: in-range above out-of-range, half time +1, drop +1, unusable last,
+  no fit = unchanged order), `packages/ai/test/rules-editing-style.test.ts` (defaults: a stored hash of 40 plans equal
+  to the commit before this feature; accepted style: all five plans valid with no errors and still different, beat
+  montage accents on every 4th beat within ±40 ms, 2-beat shots, process story ≥ 70 % of cuts on the beat, the reveal
+  on the strongest beat within ±0.1 s, punch-ins continuing the same shot at 1.2× and never above 1.25, clean promo
+  calm, "remove the flashy transitions" removes every accent, dismissed = defaults, deterministic; AI brief and
+  `extraStyleTransitions`).
+- Database + ffmpeg: `apps/worker/test/preferences-db.test.ts` ingests a SYNTHETIC R2 reference: a version 2 profile
+  with flashes on the beat, no array longer than 8 numbers, no AI call, and only the thumbnail left under the asset's
+  storage prefix. `apps/web/test/preferences-routes.integration.test.ts` covers `GET /api/references/summary` (staff
+  read-only), `POST …/summary/decide` (owner-only, CSRF, stale `valueKey` → 409 with nothing written, accept writes
+  `editingStyle` + `sources` + `summaryDecisions` and the audit rows), Settings refusing `sources`/`summaryDecisions`
+  and recording owner changes, and `…/summary/reset`.
+- Only with the owner's real videos (design §4.3.1.10): 3–5 of their own posted videos, cuts and flashes counted by a
+  person on a 15 s excerpt of each (cut count ± 10 %, flash count ± 1, tempo ± 2 BPM or an octave). Thresholds are
+  starting values from synthetic clips until then.
+
 ## Publishing (Stage B, WP4)
 
 - Unit: `packages/core/test/publishing.test.ts` (eligibility matrix incl. Meta Sound Collection and CC BY, removing

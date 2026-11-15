@@ -201,7 +201,7 @@ describe('effectivePreferences', () => {
     expect([...eff.styleOrder].sort()).toEqual([...STYLE_IDS].sort());
     // An invalid learned value is ignored.
     expect(eff.pacing).toBe('balanced');
-    const pinned = effectivePreferences(prefs({ learned, learning: { enabled: true, resetAt: null, pinned: { defaultDurationSec: { by: 'owner', at: NOW.toISOString(), referenceAssetId: null, referenceName: '' } } } }));
+    const pinned = effectivePreferences(prefs({ learned, learning: { enabled: true, resetAt: null, pinned: { defaultDurationSec: { by: 'owner', at: NOW.toISOString(), referenceAssetId: null, referenceName: '', referenceAssetIds: [] } } } }));
     expect(pinned.defaultDurationSec).toBe(25);
     const off = effectivePreferences(prefs({ learned, learning: { enabled: false, resetAt: null, pinned: {} } }));
     expect(off.defaultDurationSec).toBe(25);
@@ -210,7 +210,7 @@ describe('effectivePreferences', () => {
   });
 
   it('reports where each value comes from', () => {
-    const p = prefs({ learned, pacing: 'fast', learning: { enabled: true, resetAt: null, pinned: { colour: { by: 'reference', at: NOW.toISOString(), referenceAssetId: 'r1', referenceName: 'ref.mp4' } } } });
+    const p = prefs({ learned, pacing: 'fast', learning: { enabled: true, resetAt: null, pinned: { colour: { by: 'reference', at: NOW.toISOString(), referenceAssetId: 'r1', referenceName: 'ref.mp4', referenceAssetIds: [] } } } });
     const defaults = DEFAULT_SETTINGS.preferences;
     expect(preferenceSource(p, 'defaultDurationSec', defaults)).toBe('learned');
     expect(preferenceSource(p, 'colour', defaults)).toBe('reference');
@@ -224,7 +224,7 @@ describe('parseStoredSettings', () => {
     const stored = { preferences: { defaultDurationSec: 30, pacing: 'fast', textDensity: 'light' } };
     const parsed = parseStoredSettings(stored, NOW)!;
     expect(Object.keys(parsed.preferences.learning.pinned).sort()).toEqual(['defaultDurationSec', 'pacing']);
-    expect(parsed.preferences.learning.pinned.pacing).toEqual({ by: 'owner', at: NOW.toISOString(), referenceAssetId: null, referenceName: '' });
+    expect(parsed.preferences.learning.pinned.pacing).toEqual({ by: 'owner', at: NOW.toISOString(), referenceAssetId: null, referenceName: '', referenceAssetIds: [] });
     // Once learning exists it is left alone.
     const current = parseStoredSettings({ preferences: { ...stored.preferences, learning: { enabled: true, resetAt: null, pinned: {} } } }, NOW)!;
     expect(current.preferences.learning.pinned).toEqual({});

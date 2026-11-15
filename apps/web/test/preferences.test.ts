@@ -35,7 +35,7 @@ describe('PUT /api/settings patch rules', () => {
     const current: AppSettings = { ...DEFAULT_SETTINGS, preferences: { ...DEFAULT_SETTINGS.preferences, learned, styleAffinity: { clean_promo: 4 } } };
     const next = mergeSettings(current, { preferences: { pacing: 'fast', standingInstructions: 'Finish on the final look', learned: { eventsConsidered: 99 } } as never }, NOW);
     expect(next.preferences.pacing).toBe('fast');
-    expect(next.preferences.learning.pinned).toEqual({ pacing: { by: 'owner', at: NOW.toISOString(), referenceAssetId: null, referenceName: '' } });
+    expect(next.preferences.learning.pinned).toEqual({ pacing: { by: 'owner', at: NOW.toISOString(), referenceAssetId: null, referenceName: '', referenceAssetIds: [] } });
     expect(next.preferences.learned).toEqual(learned);
     expect(next.preferences.styleAffinity).toEqual({ clean_promo: 4 });
     expect(changedLearnableFields(current, next)).toEqual(['pacing']);
@@ -68,7 +68,7 @@ describe('preferenceFields', () => {
   });
 
   it('keeps a pinned value and offers the learned one as a suggestion', () => {
-    const pinned = { defaultDurationSec: { by: 'owner' as const, at: NOW.toISOString(), referenceAssetId: null, referenceName: '' } };
+    const pinned = { defaultDurationSec: { by: 'owner' as const, at: NOW.toISOString(), referenceAssetId: null, referenceName: '', referenceAssetIds: [] } };
     const fields = preferenceFields({ ...DEFAULT_SETTINGS.preferences, learned, learning: { enabled: true, resetAt: null, pinned } });
     expect(fields.find((f) => f.field === 'defaultDurationSec')).toMatchObject({ value: 25, source: 'owner', suggestion: { value: 20 } });
   });

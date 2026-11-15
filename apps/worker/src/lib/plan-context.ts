@@ -49,6 +49,9 @@ export interface LoadedMusic {
   durationSec: number;
   bpm: number | null;
   beatTimesSec: number[];
+  /** Stored loudness curve (finds the track's strongest beat for "land the finished look on the strongest beat"). */
+  energy: number[];
+  energyStepSec: number;
 }
 
 /** Loads a music track that has finished analysing (null when none was chosen or it is not ready). */
@@ -56,7 +59,7 @@ export async function loadMusic(ctx: WorkerContext, trackId: string | null): Pro
   if (!trackId) return null;
   const track = await ctx.db.query.musicTracks.findFirst({ where: and(eq(schema.musicTracks.id, trackId), isNull(schema.musicTracks.deletedAt)) });
   if (!track || track.status !== 'ready' || !track.durationSec) return null;
-  return { track, durationSec: track.durationSec, bpm: track.bpm ?? null, beatTimesSec: track.beats?.beatTimesSec ?? [] };
+  return { track, durationSec: track.durationSec, bpm: track.bpm ?? null, beatTimesSec: track.beats?.beatTimesSec ?? [], energy: track.beats?.energy ?? [], energyStepSec: track.beats?.energyStepSec ?? 0.25 };
 }
 
 /** The owner's saved settings, or the defaults when none are stored or the stored copy no longer parses. */

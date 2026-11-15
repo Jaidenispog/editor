@@ -5,7 +5,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { profileReference, type EditPlan } from '@studio/core';
+import { assembleReferenceSignals, profileReference, type EditPlan, type RawJoin } from '@studio/core';
 import { runMigrations } from '@studio/db';
 import { dropTestDatabase } from './helpers/test-database';
 
@@ -285,5 +285,98 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     expect(prefs.defaultDurationSec).toBe(35);
     expect(prefs.learning.pinned.pacing).toMatchObject({ by: 'reference', referenceAssetId: asset.id, referenceName: 'liked.mp4' });
     expect(prefs.colour).toBe('natural');
+  });
+
+  it('offers "Your style from your videos" and applies decisions through the settings lock', async () => {
+    // Two measured SYNTHETIC references with the same style (as the worker stores them): straight cuts with a white
+    // flash every 4th beat, cuts on every second beat at 120 BPM.
+    const beats = Array.from({ length: 33 }, (_, i) => i * 0.5);
+    const joins: RawJoin[] = Array.from({ length: 15 }, (_, i) => (i % 2 === 1 ? { kind: 'fade_white', timeSec: i + 1, durationSec: 0.2 } : { kind: 'hard', timeSec: i + 1, durationSec: 0 }));
+    const style = assembleReferenceSignals({
+      fps: 30,
+      measuredSec: 16,
+      endScreenTrimmedSec: 0,
+      joins,
+      zoomShots: { checked: 16, pushScales: [], pullScales: [] },
+      audio: { bpm: 120, confidence: 0.9, beatTimesSec: beats, energy: Array.from({ length: 64 }, (_, i) => (i % 2 ? 0.2 : 1)), energyStepSec: 0.25, speechLikely: false },
+    });
+    const refIds = [randomUUID(), randomUUID()];
+    for (const [i, id] of refIds.entries()) {
+      const profile = profileReference(
+        { assetId: id, sourceFilename: `synthetic-r2-${i}.mp4`, durationSec: 16, shotDurationsSec: [], look: { meanLuma: 0.5, meanSaturation: 0.4, contrast: 0.3 }, text: null, measuredAt: new Date(Date.now() + i * 1000), style },
+        { defaultDurationSec: 30, pacing: 'balanced', colour: 'natural', textDensity: 'light' },
+      );
+      await db.insert(schema.mediaAssets).values({ id, projectId: ids.project, kind: 'reference_video', originalFilename: `synthetic-r2-${i}.mp4`, mimeType: 'video/mp4', byteSize: 1, originalKey: `projects/${ids.project}/assets/${id}/original.mp4`, status: 'ready', referenceProfile: { ...profile, originalsDeletedAt: new Date().toISOString() } });
+    }
+    const summaryRoute = await import('../src/app/api/references/summary/route');
+    const decideRoute = await import('../src/app/api/references/summary/decide/route');
+    const resetRoute = await import('../src/app/api/references/summary/reset/route');
+
+    as(staff);
+    const read = await call(summaryRoute.GET, 'GET', '/api/references/summary', {});
+    expect(read.status).toBe(200);
+    // Staff see the rows read-only but not the owner's files.
+    expect(read.json.list).toEqual([]);
+    expect(read.json.summary.referenceAssetIds).toEqual([]);
+    expect(read.json.suggestions.length).toBe(9);
+    expect((await call(decideRoute.POST, 'POST', '/api/references/summary/decide', {}, { accept: ['beatSync'] })).status).toBe(403);
+    expect((await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, {})).status).toBe(403);
+
+    as(owner);
+    const got = await call(summaryRoute.GET, 'GET', '/api/references/summary', {});
+    expect(got.json.videos).toMatchObject({ total: 3, measured: 2, olderMeasurement: 1, measuring: 0, failed: 0 });
+    expect(got.json.list.find((v: { olderMeasurement: boolean }) => v.olderMeasurement)).toBeDefined();
+    const rows = new Map<string, any>(got.json.suggestions.map((r: { field: string }) => [r.field, r]));
+    const palette = rows.get('transitionPalette');
+    expect(palette.state).toBe('open');
+    expect(palette.evidence).toMatchObject({ measured: 2, agreeing: 2, total: 3 });
+    expect(palette.value).toMatchObject({ hardCutShare: 1, accent: { type: 'fadewhite', everyBeats: 4 } });
+    const beat = rows.get('beatSync');
+    expect(beat.state).toBe('open');
+    expect(beat.alsoChanges).toEqual([{ field: 'beatsPerCut', value: 2 }]);
+
+    // CSRF guard, a stale valueKey (409, nothing written) and a row without a suggestion (400).
+    expect((await call(decideRoute.POST, 'POST', '/api/references/summary/decide', {}, { accept: ['beatSync'], valueKeys: { beatSync: beat.valueKey } }, {})).status).toBe(403);
+    const stale = await call(decideRoute.POST, 'POST', '/api/references/summary/decide', {}, { accept: ['beatSync'], valueKeys: { beatSync: 'old' } });
+    expect(stale.status).toBe(409);
+    expect(stale.json.error.message).toBe('Your style summary changed — check the new suggestion.');
+    expect((await settingsRow()).preferences.editingStyle.beatSync).toBe('auto');
+    expect((await call(decideRoute.POST, 'POST', '/api/references/summary/decide', {}, { accept: ['zoom'], valueKeys: { zoom: 'x' } })).status).toBe(rows.get('zoom').value === null ? 400 : 409);
+
+    const ok = await call(decideRoute.POST, 'POST', '/api/references/summary/decide', {}, { accept: ['transitionPalette', 'beatSync'], dismiss: ['musicFit'], valueKeys: { transitionPalette: palette.valueKey, beatSync: beat.valueKey, musicFit: rows.get('musicFit').valueKey } });
+    expect(ok.status).toBe(200);
+    const saved = (await settingsRow()).preferences.editingStyle;
+    expect(saved.transitionPalette).toEqual(palette.value);
+    expect(saved.beatSync).toBe('on');
+    expect(saved.beatsPerCut).toBe(2);
+    expect(saved.sources.transitionPalette).toMatchObject({ by: 'reference', referenceName: 'Your videos (3)' });
+    expect(saved.sources.transitionPalette?.referenceAssetIds).toEqual(expect.arrayContaining(refIds));
+    expect(saved.summaryDecisions).toMatchObject({ transitionPalette: { decision: 'accepted', valueKey: palette.valueKey }, musicFit: { decision: 'dismissed' } });
+    expect(ok.json.summary.suggestions.find((r: { field: string }) => r.field === 'transitionPalette')).toMatchObject({ state: 'accepted', inUse: true });
+    const audits = (await db.query.auditLog.findMany()).map((a) => a.action);
+    expect(audits).toEqual(expect.arrayContaining(['reference.summary_decided', 'preferences.editing_style_changed']));
+
+    // Settings can change the values (the source becomes the owner) but never the bookkeeping.
+    const settingsRoute = await import('../src/app/api/settings/route');
+    expect((await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { sources: {} } } })).status).toBe(400);
+    expect((await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { summaryDecisions: {} } } })).status).toBe(400);
+    expect((await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { beatSync: 'sometimes' } } })).status).toBe(400);
+    const changed = await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { beatSync: 'off' } } });
+    expect(changed.status).toBe(200);
+    const after = (await settingsRow()).preferences.editingStyle;
+    expect(after.beatSync).toBe('off');
+    expect(after.sources.beatSync?.by).toBe('owner');
+    expect(after.transitionPalette).toEqual(palette.value);
+    expect(after.summaryDecisions.transitionPalette?.decision).toBe('accepted');
+
+    // "Go back to each style's own" keeps length, pace, colour and text.
+    const before = (await settingsRow()).preferences;
+    const reset = await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, {});
+    expect(reset.status).toBe(200);
+    const back = (await settingsRow()).preferences;
+    expect(back.editingStyle.transitionPalette).toBeNull();
+    expect(back.editingStyle.beatSync).toBe('auto');
+    expect(back.pacing).toBe(before.pacing);
+    expect(back.defaultDurationSec).toBe(before.defaultDurationSec);
   });
 });

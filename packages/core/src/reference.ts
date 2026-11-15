@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ReferenceStyleSignalsSchema, type ReferenceStyleSignals } from './reference-signals.js';
 import type { EditingPreferences } from './settings.js';
 
 /**
@@ -30,7 +31,7 @@ export type ReferenceSuggestion = z.infer<typeof ReferenceSuggestionSchema>;
 export const ColourLookSchema = z.enum(['natural', 'clean', 'cinematic', 'punchy']);
 export type ColourLook = z.infer<typeof ColourLookSchema>;
 
-export const ReferenceStyleProfileSchema = z.object({
+export const ReferenceStyleProfileV1Schema = z.object({
   version: z.literal(1),
   assetId: z.string(),
   measuredAt: z.string(),
@@ -51,7 +52,34 @@ export const ReferenceStyleProfileSchema = z.object({
   decisions: z.partialRecord(ReferenceSuggestionFieldSchema, z.enum(['accepted', 'dismissed'])).default({}),
   originalsDeletedAt: z.string().nullable(),
 });
+export type ReferenceStyleProfileV1 = z.infer<typeof ReferenceStyleProfileV1Schema>;
+
+/** v2 (design §4.3.1.5): the v1 fields plus the transition, beat, drop, zoom and music signals. */
+export const ReferenceStyleProfileV2Schema = ReferenceStyleProfileV1Schema.extend({
+  version: z.literal(2),
+  /** null only for a v1 profile read through {@link readReferenceProfile}. */
+  style: ReferenceStyleSignalsSchema.nullable(),
+});
+export type ReferenceStyleProfileV2 = z.infer<typeof ReferenceStyleProfileV2Schema>;
+
+/** A stored profile: v1 (measured before transitions and beat were added) or v2. */
+export const ReferenceStyleProfileSchema = z.discriminatedUnion('version', [ReferenceStyleProfileV1Schema, ReferenceStyleProfileV2Schema]);
 export type ReferenceStyleProfile = z.infer<typeof ReferenceStyleProfileSchema>;
+
+/**
+ * Backwards-compatible read: a v1 profile comes back in the v2 shape with `style: null` (the stored copy is never
+ * rewritten, so it stays recognisable as an older measurement). Returns null when the stored value does not parse.
+ */
+export function readReferenceProfile(raw: unknown): ReferenceStyleProfileV2 | null {
+  const parsed = ReferenceStyleProfileSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return parsed.data.version === 1 ? { ...parsed.data, version: 2, style: null } : parsed.data;
+}
+
+/** True for a profile measured before transitions and beat were added (its originals are gone, so it cannot be re-measured). */
+export function isOlderReferenceMeasurement(profile: Pick<ReferenceStyleProfileV2, 'style'>): boolean {
+  return profile.style === null;
+}
 
 /** Average picture measurements (0–1) from `measureLook` in @studio/media. */
 export interface LookMeasurement {
@@ -76,6 +104,11 @@ export interface ReferenceMeasurements {
   look: LookMeasurement;
   text: TextMeasurement | null;
   measuredAt: Date;
+  /**
+   * Reference style v2 signals. When given, the shot numbers come from its raw v2 boundaries (no merging or
+   * splitting), which corrects v1's bias towards 0.8–5 s shots.
+   */
+  style?: ReferenceStyleSignals | null;
 }
 
 function quantile(sorted: number[], q: number): number {
@@ -128,27 +161,33 @@ const FIELD_LABEL: Record<ReferenceSuggestionField, string> = {
  * Measurements → profile with suggestions (design §6.2). A suggestion equal to the value in use is kept with the
  * reason "matches your settings" (shown without a button). Pure.
  */
-export function profileReference(m: ReferenceMeasurements, current: Pick<EditingPreferences, ReferenceSuggestionField>): ReferenceStyleProfile {
+export function profileReference(m: ReferenceMeasurements, current: Pick<EditingPreferences, ReferenceSuggestionField>): ReferenceStyleProfileV2 {
+  const style = m.style ?? null;
   const shots = m.shotDurationsSec.filter((d) => d >= 0.2).sort((a, b) => a - b);
-  const median = quantile(shots, 0.5);
+  const shotCount = style ? style.shots.count : shots.length;
+  const median = style ? style.shots.medianSec : quantile(shots, 0.5);
+  const p25 = style ? style.shots.p25Sec : quantile(shots, 0.25);
+  const p75 = style ? style.shots.p75Sec : quantile(shots, 0.75);
+  const spanSec = style && style.measuredSec > 0 ? style.measuredSec : m.durationSec;
   const colourLook = classifyColourLook(m.look);
   const density = classifyTextDensity(m.text);
   const candidates: Array<{ field: ReferenceSuggestionField; value: number | string; reason: string }> = [];
   const duration = suggestedDuration(m.durationSec);
   if (duration !== null) candidates.push({ field: 'defaultDurationSec', value: duration, reason: `The reference runs for ${Math.round(m.durationSec)} seconds.` });
-  if (shots.length > 0) candidates.push({ field: 'pacing', value: classifyPacing(median), reason: `Its shots last about ${median.toFixed(1)} seconds (median).` });
+  if (style ? shotCount >= 3 : shotCount > 0) candidates.push({ field: 'pacing', value: classifyPacing(median), reason: `Its shots last about ${median.toFixed(1)} seconds (median).` });
   candidates.push({ field: 'colour', value: colourLook, reason: 'Estimated from its brightness, saturation and contrast.' });
   if (density !== null && m.text) candidates.push({ field: 'textDensity', value: density, reason: `On-screen text in ${m.text.framesWithText} of ${m.text.framesChecked} checked frames.` });
 
   return {
-    version: 1,
+    version: 2,
+    style,
     assetId: m.assetId,
     measuredAt: m.measuredAt.toISOString(),
     sourceFilename: m.sourceFilename.slice(0, 300),
     durationSec: r3(m.durationSec),
-    shotCount: shots.length,
-    shotSec: { median: r3(median), p25: r3(quantile(shots, 0.25)), p75: r3(quantile(shots, 0.75)) },
-    cutsPer10Sec: r3(m.durationSec > 0 ? (Math.max(0, shots.length - 1) / m.durationSec) * 10 : 0),
+    shotCount,
+    shotSec: { median: r3(median), p25: r3(p25), p75: r3(p75) },
+    cutsPer10Sec: r3(spanSec > 0 ? (Math.max(0, shotCount - 1) / spanSec) * 10 : 0),
     look: { meanLuma: r3(clamp01(m.look.meanLuma)), meanSaturation: r3(clamp01(m.look.meanSaturation)), contrast: r3(clamp01(m.look.contrast)) },
     colourLook,
     text: m.text
@@ -165,7 +204,7 @@ function clamp01(n: number): number {
 }
 
 /** Suggestions that still need a decision (not matching the settings, not yet accepted or dismissed). */
-export function openSuggestions(profile: ReferenceStyleProfile): ReferenceSuggestion[] {
+export function openSuggestions(profile: Pick<ReferenceStyleProfile, 'suggestions' | 'decisions'>): ReferenceSuggestion[] {
   return profile.suggestions.filter((s) => s.reason !== MATCHES_SETTINGS_REASON && !profile.decisions[s.field]);
 }
 
@@ -179,7 +218,7 @@ export function describeSuggestion(s: ReferenceSuggestion): string {
 }
 
 /** Plain summary of a profile: "34 s long · 21 shots · shots mostly 1.2–1.8 s (median 1.4 s) · clean colour · …". */
-export function describeReferenceProfile(p: ReferenceStyleProfile): string {
+export function describeReferenceProfile(p: Pick<ReferenceStyleProfile, 'durationSec' | 'shotCount' | 'shotSec' | 'colourLook' | 'text'>): string {
   const parts = [`${Math.round(p.durationSec)} s long`, `${p.shotCount} shot${p.shotCount === 1 ? '' : 's'}`];
   if (p.shotCount > 0) parts.push(`shots mostly ${p.shotSec.p25.toFixed(1)}–${p.shotSec.p75.toFixed(1)} s (median ${p.shotSec.median.toFixed(1)} s)`);
   parts.push(`${p.colourLook} colour (estimate)`);

@@ -1,4 +1,16 @@
-import { AppSettingsSchema, LEARNABLE_FIELDS, SERVER_ONLY_WEBSITE_FIELDS, declaredValue, isHttpsUrl, parseStoredSettings, type AppSettings, type LearnableField } from '@studio/core';
+import {
+  AppSettingsSchema,
+  EDITING_STYLE_FIELDS,
+  LEARNABLE_FIELDS,
+  SERVER_ONLY_WEBSITE_FIELDS,
+  declaredValue,
+  isHttpsUrl,
+  parseStoredSettings,
+  stableJson,
+  type AppSettings,
+  type EditingStyleField,
+  type LearnableField,
+} from '@studio/core';
 import { z } from 'zod';
 
 /** Preference fields only the server writes: learning state through the preferences routes, learned values by the recompute job. */
@@ -41,6 +53,15 @@ export const SettingsPatchSchema = z
         ctx.addIssue({ code: 'custom', path: ['preferences', field], message: 'Use the preferences controls in Settings → Editing preferences to change what the editor learns.' });
       }
     }
+    // The editing style's value fields are editable here; where each came from and the summary decisions are not.
+    const style = patch.preferences?.['editingStyle'];
+    if (style !== undefined && (style === null || typeof style !== 'object' || Array.isArray(style))) {
+      ctx.addIssue({ code: 'custom', path: ['preferences', 'editingStyle'], message: 'The editing style must be an object.' });
+    } else if (style && typeof style === 'object') {
+      for (const field of ['sources', 'summaryDecisions']) {
+        if (field in style) ctx.addIssue({ code: 'custom', path: ['preferences', 'editingStyle', field], message: 'Use "Your style from your videos" in Settings → Editing preferences to accept or dismiss suggestions.' });
+      }
+    }
   });
 export type SettingsPatch = z.infer<typeof SettingsPatchSchema>;
 
@@ -61,6 +82,11 @@ export function mergeSettings(current: AppSettings, patch: SettingsPatch, now: D
   for (const field of SERVER_ONLY_WEBSITE_FIELDS) delete websitePatch[field];
   const prefsPatch = { ...(patch.preferences ?? {}) };
   for (const field of SERVER_OWNED_PREFERENCE_FIELDS) delete prefsPatch[field];
+  if (prefsPatch['editingStyle'] && typeof prefsPatch['editingStyle'] === 'object') {
+    // Value fields only; the bookkeeping stays server-managed.
+    const { sources: _sources, summaryDecisions: _decisions, ...values } = prefsPatch['editingStyle'] as Record<string, unknown>;
+    prefsPatch['editingStyle'] = { ...current.preferences.editingStyle, ...values };
+  }
   const merged = AppSettingsSchema.parse({
     // Sections this route does not edit (module sections added in packages/core/src/settings/<module>.ts) are kept.
     ...current,
@@ -70,7 +96,21 @@ export function mergeSettings(current: AppSettings, patch: SettingsPatch, now: D
     legal: { ...current.legal, ...(patch.legal ?? {}) },
     website: { ...current.website, ...websitePatch },
   });
-  return pinChangedFields(current, merged, now);
+  return recordEditingStyleSources(current, pinChangedFields(current, merged, now), now);
+}
+
+/** The editing-style value fields whose value differs between two settings objects. */
+export function changedEditingStyleFields(before: AppSettings, after: AppSettings): EditingStyleField[] {
+  return EDITING_STYLE_FIELDS.filter((f) => stableJson(before.preferences.editingStyle[f]) !== stableJson(after.preferences.editingStyle[f]));
+}
+
+/** Records `sources[field] = { by: 'owner' }` for every editing-style value the owner changed by hand. */
+function recordEditingStyleSources(before: AppSettings, after: AppSettings, now: Date): AppSettings {
+  const changed = changedEditingStyleFields(before, after);
+  if (changed.length === 0) return after;
+  const sources = { ...after.preferences.editingStyle.sources };
+  for (const f of changed) sources[f] = { by: 'owner', at: now.toISOString(), referenceAssetIds: [], referenceName: '' };
+  return { ...after, preferences: { ...after.preferences, editingStyle: { ...after.preferences.editingStyle, sources } } };
 }
 
 /** The learnable fields whose declared value differs between two settings objects. */
@@ -83,7 +123,7 @@ export function pinChangedFields(before: AppSettings, after: AppSettings, now: D
   const changed = changedLearnableFields(before, after);
   if (changed.length === 0) return after;
   const pinned = { ...after.preferences.learning.pinned };
-  for (const field of changed) pinned[field] = { by: 'owner', at: now.toISOString(), referenceAssetId: null, referenceName: '' };
+  for (const field of changed) pinned[field] = { by: 'owner', at: now.toISOString(), referenceAssetId: null, referenceName: '', referenceAssetIds: [] };
   return { ...after, preferences: { ...after.preferences, learning: { ...after.preferences.learning, pinned } } };
 }
 

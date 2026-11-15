@@ -1,6 +1,6 @@
 import { EditPlanSchema, type EditPlan } from './edit-plan.js';
 import { computeTimeline, type Timeline } from './timeline.js';
-import { RESTRAINED_TRANSITIONS, getStyle } from './styles.js';
+import { RESTRAINED_TRANSITIONS, getStyle, type TransitionType } from './styles.js';
 import type { TranscriptSegment } from './analysis.js';
 
 export interface PlanAssetInfo {
@@ -23,6 +23,11 @@ export interface PlanValidationContext {
   durationBounds: { min: number; max: number };
   /** When true, flashy transitions are reported as errors (e.g. after "remove the flashy transitions"). */
   restrainedTransitionsOnly?: boolean;
+  /**
+   * Transitions the owner accepted from their own videos (the editing-style palette and accent). They do not raise
+   * the OFF_STYLE_TRANSITION warning; every error rule is unchanged.
+   */
+  extraStyleTransitions?: readonly TransitionType[];
 }
 
 export interface PlanIssue {
@@ -117,7 +122,7 @@ export function validateEditPlan(input: unknown, ctx: PlanValidationContext): Pl
     if (seg.transitionIn && ctx.restrainedTransitionsOnly && !RESTRAINED_TRANSITIONS.includes(seg.transitionIn.type)) {
       errors.push({ code: 'FLASHY_TRANSITION', message: `Transition "${seg.transitionIn.type}" is not allowed for this edit`, path: p });
     }
-    if (seg.transitionIn && !style.transitions.includes(seg.transitionIn.type)) {
+    if (seg.transitionIn && !style.transitions.includes(seg.transitionIn.type) && !ctx.extraStyleTransitions?.includes(seg.transitionIn.type)) {
       warnings.push({ code: 'OFF_STYLE_TRANSITION', message: `Transition "${seg.transitionIn.type}" is unusual for the ${style.name} style`, path: p });
     }
     for (const r of usedRanges) {

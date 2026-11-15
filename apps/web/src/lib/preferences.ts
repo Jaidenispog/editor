@@ -32,7 +32,7 @@ import { writeAudit } from './audit.js';
 import { getDb } from './db.js';
 import { recordFeedback, scheduleRecompute } from './feedback.js';
 import { getSettings, updateSettingsLocked } from './settings.js';
-import { mergeSettings, normaliseStoredSettings, type SettingsPatch } from './settings-merge.js';
+import { changedEditingStyleFields, mergeSettings, normaliseStoredSettings, type SettingsPatch } from './settings-merge.js';
 import { getAccessibleEdit } from './studio-access.js';
 
 const SETTINGS_ID = 'default';
@@ -52,12 +52,15 @@ export const DismissSchema = z.object({ value: z.boolean() }).strict();
  */
 export async function updateSettingsFromPatch(patch: SettingsPatch, userId: string | null): Promise<AppSettings> {
   let pinnedNow: LearnableField[] = [];
+  let styleChanged: string[] = [];
   const next = await updateSettingsLocked((current) => {
     const merged = mergeSettings(current, patch);
     pinnedNow = LEARNABLE_FIELDS.filter((f) => merged.preferences.learning.pinned[f] && !current.preferences.learning.pinned[f]);
+    styleChanged = changedEditingStyleFields(current, merged);
     return merged;
   });
   await writeAudit({ userId, action: 'settings.updated', entityType: 'settings', entityId: SETTINGS_ID, data: { sections: Object.keys(patch), ...(pinnedNow.length ? { pinned: pinnedNow } : {}) } });
+  if (styleChanged.length) await writeAudit({ userId, action: 'preferences.editing_style_changed', entityType: 'settings', entityId: SETTINGS_ID, data: { fields: styleChanged, by: 'owner' } });
   if (patch.brand && 'logoPlacement' in patch.brand) {
     await writeAudit({ userId, action: 'settings.logo_placement_changed', entityType: 'settings', entityId: SETTINGS_ID, data: { placement: next.brand.logoPlacement } });
   }
@@ -185,7 +188,7 @@ export async function pinPreference(user: SessionUser, input: { field: Learnable
     if (input.pinned) {
       const value = input.value !== undefined ? parseFieldValue(input.field, input.value) : (effectivePreferences(prefs) as Record<string, unknown>)[input.field];
       declared = { [input.field]: value } as Partial<EditingPreferences>;
-      pinned[input.field] = { by: 'owner', at: new Date().toISOString(), referenceAssetId: null, referenceName: '' };
+      pinned[input.field] = { by: 'owner', at: new Date().toISOString(), referenceAssetId: null, referenceName: '', referenceAssetIds: [] };
     } else {
       delete pinned[input.field];
     }

@@ -1,5 +1,6 @@
-import { STYLES, STYLE_IDS, computeTimeline, type StyleId } from '@studio/core';
+import { STYLES, STYLE_IDS, computeTimeline, paletteTransitionTypes, type StyleId, type TransitionType } from '@studio/core';
 import type { LabelShotsContext, PlannerInput } from '../types.js';
+import { planReveal } from '../rules/editing-style.js';
 import { beatGrid } from '../rules/music.js';
 import { CALM_TRANSITIONS, effectiveSettings, revisionHintsFor } from '../rules/settings.js';
 
@@ -30,7 +31,7 @@ Authenticity comes first
 - Never invent a before shot, a client reaction, a testimonial or dialogue. Use the roles "before" and "reaction" only for shots labelled that way. If the style needs footage that does not exist, build the closest honest version and say so in the rationale.
 - Captions only when transcript segments are provided: copy the words exactly, and time each caption to when that speech plays in the edit. Otherwise captions must be an empty list.
 - On-screen text is short (60 characters at most, ideally under 30), plain and honest: the business name, "Before", "After", "Fresh cut", the social handle. No claims that cannot be checked (no "best in Melbourne", prices or promises). Australian English spelling.
-- Keep the haircut, face and hairline authentic: no effects that change how the hair looks. Speed changes and subtle zooms (1.0–1.1) are fine.
+- Keep the haircut, face and hairline authentic: no effects that change how the hair looks. Speed changes and subtle zooms (1.0–1.1, or up to the accepted punch-in scale in job.editingStyle.zoom) are fine.
 
 Timing rules
 - Output length = sum of each segment's play length ((outSec − inSec) / speed) minus the duration of every transition.
@@ -50,6 +51,14 @@ Editorial quality
 - Each style must feel different: vary the opening shot, the order, the timing, the transitions and the text. A new take of the same style must differ visibly from the previous take.
 - The renderer keeps text inside the platform safe zone; choose top, centre or lower so the text does not cover the haircut.
 - Use the given framing focus for shots filmed in landscape so the haircut stays in the 9:16 crop.
+
+The owner's own editing style (job.editingStyle)
+- When job.editingStyle is present it describes the owner's own editing, estimated from their own posted videos and accepted by the owner. It overrides the style's usual transitions and zooms, but not the owner's instructions, a revision request or the rules above.
+- Keep about transitionPalette.hardCutShare of the joins as straight cuts; use only the palette types (listed in allowedTransitions) for the other joins, about transitionPalette.durationSec long.
+- Place accent transitions (transitionPalette.accent) so their brightest or darkest moment, about 20 % into the transition, lands on every everyBeats-th beat counted from where the music starts (or only at the reveal when everyBeats is null).
+- With beatSync "on", cut on the beat; with beatsPerCut, make shots last whole multiples of that many beats where the style's shot lengths allow.
+- With reveal.targetOutputSec, start the first shot of the finished result there (that is the track's biggest lift); with reveal.musicStartOffsetSec, start the music there.
+- zoom.mode "punch_in" means continuing the same shot (same asset, the next source seconds) with a static zoom of zoom.scale instead of cutting away, on about zoom.shareOfCuts of the beat-synced cuts; "push_in" means slow push-ins to zoom.scale; "none" means no zooms.
 
 The five styles
 ${styleLines()}
@@ -88,11 +97,43 @@ export function allowedTransitionsFor(input: PlannerInput): string[] {
   const s = effectiveSettings(input);
   if (s.transitions === 'none') return [];
   const style = STYLES[input.styleId].transitions;
+  let allowed: TransitionType[];
   if (s.transitions === 'calm') {
     const calm = style.filter((t) => CALM_TRANSITIONS.includes(t));
-    return calm.length > 0 ? calm : [...CALM_TRANSITIONS];
+    allowed = calm.length > 0 ? calm : [...CALM_TRANSITIONS];
+  } else allowed = [...style];
+  // The palette accepted from the owner's own videos (after the calm/none filter above).
+  const palette = s.styleFromVideos?.palette;
+  if (palette) {
+    const extra = paletteTransitionTypes({ ...palette, accent: s.styleFromVideos?.accent ?? null }).filter((t) => s.transitions !== 'calm' || CALM_TRANSITIONS.includes(t) || t === 'fadewhite');
+    for (const t of extra) if (!allowed.includes(t)) allowed.push(t);
   }
-  return [...style];
+  return allowed;
+}
+
+/**
+ * The owner's accepted editing style for the brief (design §4.3.1.6), or null with the defaults. The reveal's output
+ * time is computed here with the same function as the rules planner, so the model never has to find the drop.
+ */
+export function editingStyleBriefFor(input: PlannerInput): Record<string, unknown> | null {
+  const s = effectiveSettings(input);
+  const es = s.styleFromVideos;
+  if (!es) return null;
+  const fixed = fixedMusicStartFor(input);
+  const probe = s.target * (input.styleId === 'beat_montage' ? 0.9 : 0.65);
+  const reveal = es.reveal === 'strongest_beat' ? planReveal(input, s, probe, fixed, input.music ? beatGrid(input.music, s.target, 0, undefined, fixed).startOffsetSec : undefined) : null;
+  return {
+    transitionPalette: es.palette ? { ...es.palette, accent: es.accent } : null,
+    beatSync: es.beatSync,
+    beatsPerCut: es.beatsPerCut,
+    reveal: {
+      mode: es.reveal,
+      targetOutputSec: reveal?.targetOutputSec ?? null,
+      ...(reveal?.musicStartSec !== null && reveal?.musicStartSec !== undefined ? { musicStartOffsetSec: reveal.musicStartSec } : {}),
+    },
+    zoom: es.zoom,
+    note: 'Estimated from the owner\'s own posted videos and accepted by the owner in Settings.',
+  };
 }
 
 function selectShots(input: PlannerInput) {
@@ -145,6 +186,7 @@ export function buildPlannerUserContent(input: PlannerInput): Array<{ type: 'tex
   const captionsAllowed = input.captions !== 'never' && input.preferences.captions !== 'never' && transcripts.length > 0;
   const revising = Boolean(input.previousPlan && (input.revisionInstruction || input.revisionHints));
   const fixedStart = fixedMusicStartFor(input);
+  const editingStyle = editingStyleBriefFor(input);
 
   const job = {
     task: revising
@@ -171,7 +213,7 @@ export function buildPlannerUserContent(input: PlannerInput): Array<{ type: 'tex
           beatTimesSec: input.music.beatTimesSec.slice(0, MAX_PLANNER_BEATS).map(r2),
           volume: r2(s.musicVolume),
           ...(fixedStart !== null ? { fixedStartOffsetSec: fixedStart } : {}),
-          beatSync: input.beatSync ?? 'auto',
+          beatSync: input.beatSync && input.beatSync !== 'auto' ? input.beatSync : (s.styleFromVideos?.beatSync ?? input.beatSync ?? 'auto'),
           revealOnBeat: input.revealOnBeat ?? false,
         }
       : null,
@@ -205,6 +247,7 @@ export function buildPlannerUserContent(input: PlannerInput): Array<{ type: 'tex
         }
       : null,
     fixThese: input.previousErrors?.length ? input.previousErrors : undefined,
+    ...(editingStyle ? { editingStyle } : {}),
   };
 
   const closing = input.previousErrors?.length

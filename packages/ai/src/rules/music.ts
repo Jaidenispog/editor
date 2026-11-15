@@ -1,3 +1,4 @@
+import { findDrop } from '@studio/core';
 import type { PlannerMusic } from '../types.js';
 import { grow, hardMinPlay, shrink, startTimes, type Draft } from './draft.js';
 import { round } from './random.js';
@@ -126,7 +127,7 @@ export function beatTargetNear(grid: BeatGrid, t: number, downbeatWindowSec = 0.
 }
 
 /** Output time at which draft `i` is fully on screen (its start plus its incoming transition). */
-function cutTime(drafts: readonly Draft[], i: number): number {
+export function cutTime(drafts: readonly Draft[], i: number): number {
   return (startTimes(drafts)[i] ?? 0) + (drafts[i]?.transitionIn?.durationSec ?? 0);
 }
 
@@ -135,7 +136,7 @@ function cutTime(drafts: readonly Draft[], i: number): number {
  * at the end so the total length stays the same. Returns the shift that was made (it may be less than asked
  * when the footage or the minimum shot length does not allow it).
  */
-function shiftCut(drafts: Draft[], i: number, delta: number): number {
+export function shiftCut(drafts: Draft[], i: number, delta: number): number {
   const prev = drafts[i - 1];
   const last = drafts[drafts.length - 1];
   if (!prev || !last || last === prev || i < 1) return 0;
@@ -185,4 +186,25 @@ export function landRevealOnBeat(drafts: Draft[], grid: BeatGrid): boolean {
   if (Math.abs(beat - t) > Math.max(0.6, grid.interval)) return false;
   shiftCut(drafts, r, beat - t);
   return Math.abs(cutTime(drafts, r) - beat) <= 0.25;
+}
+
+/** The strongest beat of a track: its biggest lift, refined to a beat (design §4.3.1.3c on the stored energy curve). */
+export interface StrongestBeat {
+  /** Seconds into the track. */
+  atSec: number;
+  riseDb: number;
+  /** True for a clear drop (at least 6 dB into a loud part). */
+  found: boolean;
+}
+
+/** Runs the reference drop finder on a track's stored energy curve and beat grid; null when the track has no curve. */
+export function strongestBeat(music: Pick<PlannerMusic, 'energy' | 'energyStepSec' | 'beatTimesSec' | 'durationSec'>): StrongestBeat | null {
+  if (!music.energy?.length || !music.energyStepSec) return null;
+  const d = findDrop(music.energy, music.energyStepSec, { spanSec: music.durationSec, beatTimesSec: music.beatTimesSec });
+  return d ? { atSec: d.atSec, riseDb: d.riseDb, found: d.found } : null;
+}
+
+/** Beats (seconds into the track) at which an edit of `lengthSec` can start and still fit inside the track. */
+export function startBeatsThatFit(music: PlannerMusic, lengthSec: number): number[] {
+  return cleanBeats(music).filter((t) => t + lengthSec <= music.durationSec - 0.1);
 }

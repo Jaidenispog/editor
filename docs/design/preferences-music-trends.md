@@ -189,8 +189,14 @@ Failure states: "This file has no video" / "The video is shorter than 3 seconds,
 
 ### 4.3.1 Reference style v2: transitions, beat sync and music
 
-Status: design only, written 2026-11-15. §4.3 (v1: length, pacing, colour, on-screen text) is built; this section
-extends it. Nothing below is built yet.
+Status: written 2026-11-15 and built the same day on branch `worktree-wf_d3892033-bcb-1` (code paths in §15; tests
+in `docs/testing.md`). §4.3 (v1: length, pacing, colour, on-screen text) is built; this section extends it.
+Implementation notes where the build refined a number here: the automatic reveal accepts 45–90 % of the edit (the
+styles hold the finished look for the last 15–30 %, so 80 % excluded most edits; the beat montage keeps 95 %), and the
+music start moves by whole bars so beat-counted accents keep their beats; the drop time starts from the middle of the
+first louder 0.25 s energy window (the window start biased it a beat early on the synthetic R5 track) and a single
+knock is rejected by also requiring the median power of the next second to rise ≥ 3 dB; the "Go back to each style's
+own" button calls `POST /api/references/summary/reset`; per-video agreement for length uses ±max(5 s, 20 %).
 
 **Why.** On 15 Nov 2026 the owner asked for the edits to be based on their TikTok account: "the animations,
 transitions, and music". The app cannot do that by reading TikTok: there is no permitted TikTok API for this, its

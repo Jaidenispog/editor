@@ -1,4 +1,4 @@
-import type { GenerationSettings, LicenceState, MusicClearance, MusicLicence, ReferenceStyleProfile, SpotifyItemType, StyleId } from '@studio/core';
+import type { GenerationSettings, LicenceState, MusicClearance, MusicLicence, ReferenceStyleProfileV2, SpotifyItemType, StyleId } from '@studio/core';
 import type { JobDto } from './dto.js';
 import type { EnergyCurve } from './music-curve.js';
 import type { WorkerStatusDto } from './worker-notice.js';
@@ -107,8 +107,11 @@ export interface ReferenceDto {
   status: 'uploaded' | 'processing' | 'ready' | 'failed';
   statusMessage: string;
   thumbnailUrl: string | null;
-  /** Measurements and suggestions once measured; null while processing or after a failure. */
-  profile: ReferenceStyleProfile | null;
+  /**
+   * Measurements and suggestions once measured (always in the v2 shape; `profile.style` is null for a video measured
+   * before transitions and beat were added); null while processing or after a failure.
+   */
+  profile: ReferenceStyleProfileV2 | null;
   createdAt: string;
 }
 

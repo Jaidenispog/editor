@@ -203,8 +203,14 @@ function buildBeatMontage(ctx: BuildContext): BuildResult {
 
   // Beats per shot: 0.4–1.25 s (scaled by pacing), widened for long edits so the plan stays under 40 segments.
   const hi = Math.max(clamp(1.25 * s.pacing, 0.6, 2.2), s.target / 34);
-  const options = [1, 2, 3, 4, 6, 8].filter((n) => n * iv >= 0.4 - 1e-6 && n * iv <= hi + 1e-6);
+  let options = [1, 2, 3, 4, 6, 8].filter((n) => n * iv >= 0.4 - 1e-6 && n * iv <= hi + 1e-6);
   if (options.length === 0) options.push(Math.max(1, Math.ceil(0.4 / iv)));
+  // "Cut every N beats" from the owner's videos: shots of N or 2N beats (2N and 4N when N beats are under 0.4 s).
+  const everyN = s.styleFromVideos?.beatsPerCut ?? null;
+  if (everyN) {
+    const n = everyN * iv < 0.4 - 1e-6 ? 2 * everyN : everyN;
+    options = [n, 2 * n];
+  }
   const a = options[0]!;
   const b = options[1] ?? a;
   const patterns = [

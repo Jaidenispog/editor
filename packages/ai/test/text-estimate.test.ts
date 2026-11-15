@@ -134,7 +134,7 @@ describe('rules planner text density', () => {
     const learned = { computedAt: '2026-11-14T00:00:00.000Z', eventsConsidered: 9, since: null, error: null, fields: { textDensity: { value: 'none', weight: 9, counts: { favourites: 3, downloads: 0, publishes: 0, revisions: 0, regenerations: 0, dismissals: 0 }, explanation: '' } } };
     const base = { ...DEFAULT_SETTINGS.preferences, learned };
     expect(effectiveSettings(plannerInput(labelledProject(), { preferences: base })).text).toBe('none');
-    const pinned = { ...base, learning: { ...base.learning, pinned: { textDensity: { by: 'owner' as const, at: '2026-11-14T00:00:00.000Z', referenceAssetId: null, referenceName: '' } } } };
+    const pinned = { ...base, learning: { ...base.learning, pinned: { textDensity: { by: 'owner' as const, at: '2026-11-14T00:00:00.000Z', referenceAssetId: null, referenceName: '', referenceAssetIds: [] } } } };
     expect(effectiveSettings(plannerInput(labelledProject(), { preferences: pinned })).text).toBe('normal');
   });
 });

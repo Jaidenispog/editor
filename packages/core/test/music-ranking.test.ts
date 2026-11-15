@@ -77,3 +77,36 @@ describe('rankTracksForPreferences', () => {
     expect(musicTasteFrom({ musicMoods: ['calm'] })).toEqual({ genres: [], moods: ['calm'], artists: [] });
   });
 });
+
+describe('rankTracksForPreferences with the music fit from your videos', () => {
+  const fit = { bpmLow: 118, bpmHigh: 126, prefersClearDrop: true, dynamicRangeDb: 9 };
+  const none = { genres: [], moods: [], artists: [] };
+
+  it('puts in-range tempos above out-of-range ones, half-time gets +1, a clear drop +1', () => {
+    const list = rankTracksForPreferences(
+      [track('slow', { bpm: 90 }), track('half', { bpm: 61 }), track('inRange', { bpm: 122 }), track('dropOnly', { bpm: 90, drop: { riseDb: 9 } }), track('unknown')],
+      none,
+      { durationSec: 25, now: NOW, fit },
+    );
+    expect(list.map((t) => [t.id, t.score])).toEqual([
+      ['inRange', 2],
+      ['dropOnly', 1],
+      ['half', 1],
+      ['slow', 0],
+      ['unknown', 0],
+    ]);
+    expect(list[0]?.reasons).toEqual(['Tempo close to your videos (118–126 BPM)']);
+    expect(list.find((t) => t.id === 'half')?.reasons).toEqual(['Half-time feel close to your videos']);
+    expect(list.find((t) => t.id === 'dropOnly')?.reasons).toEqual(['Builds to a clear drop, like your videos']);
+    expect(list.find((t) => t.id === 'unknown')?.reasons).toEqual(['tempo unknown']);
+  });
+
+  it('keeps unusable tracks last and changes nothing without a fit', () => {
+    const tracks = [track('short', { bpm: 122, durationSec: 10 }), track('inRange', { bpm: 122 }), track('genre', { genres: ['hip hop'] })];
+    const withFit = rankTracksForPreferences(tracks, taste, { durationSec: 25, now: NOW, fit });
+    expect(withFit[withFit.length - 1]).toMatchObject({ id: 'short', usable: false, rank: null });
+    const without = rankTracksForPreferences(tracks, taste, { durationSec: 25, now: NOW });
+    expect(rankTracksForPreferences(tracks, taste, { durationSec: 25, now: NOW, fit: null })).toEqual(without);
+    expect(without.map((t) => t.id)).toEqual(['genre', 'inRange', 'short']);
+  });
+});

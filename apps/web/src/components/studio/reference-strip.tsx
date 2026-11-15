@@ -1,8 +1,19 @@
 'use client';
 
 import { Film, RotateCcw, Sparkles, Trash2 } from 'lucide-react';
+import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
-import { describeReferenceProfile, describeSuggestion, openSuggestions, MATCHES_SETTINGS_REASON, type ReferenceStyleProfile, type ReferenceSuggestionField } from '@studio/core';
+import {
+  OLDER_MEASUREMENT_NOTE,
+  describeEndScreen,
+  describeReferenceProfile,
+  describeStyleSignals,
+  describeSuggestion,
+  openSuggestions,
+  MATCHES_SETTINGS_REASON,
+  type ReferenceStyleProfileV2,
+  type ReferenceSuggestionField,
+} from '@studio/core';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { StatusPill } from '@/components/ui/status-pill';
@@ -38,7 +49,7 @@ function AddReferenceDialog({ open, onClose, onFile }: { open: boolean; onClose:
       open={open}
       onClose={onClose}
       title="Add a reference video (style only)"
-      description="Upload a video whose pace and look you like. Studio Assistant measures only its shot lengths, length, colour and how much text is on screen. Nothing from it is used in your edits, and the file is deleted once it has been measured. Only upload videos you are allowed to view and keep."
+      description="Studio Assistant can't open TikTok pages. Save a few of your own posted videos to your phone and upload them here, one at a time. It estimates the pace, colour, transitions, zooms, how your cuts line up with the beat, and the tempo and energy of the music. Nothing from these videos is used in your edits — not the footage and not the sound — and each file is deleted once it has been measured. Only upload videos you made or are allowed to use."
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
@@ -48,6 +59,9 @@ function AddReferenceDialog({ open, onClose, onFile }: { open: boolean; onClose:
         </>
       }
     >
+      <p className="text-sm text-charcoal-600">
+        Best: the video as you exported it before posting. A video saved from the TikTok app may carry a watermark and an end screen; a dark end screen in the last few seconds is skipped.
+      </p>
       {aiAvailable ? (
         <label className="flex min-h-11 cursor-pointer items-start gap-3 text-sm text-charcoal-800">
           <input type="checkbox" checked={useVision} onChange={(e) => setUseVision(e.target.checked)} className="mt-0.5 size-4 accent-[var(--accent)]" />
@@ -77,7 +91,7 @@ function AddReferenceDialog({ open, onClose, onFile }: { open: boolean; onClose:
 }
 
 /** Suggestion rows with "Use this" / "No thanks" and "Use all suggestions". */
-function Suggestions({ reference, profile, onChanged }: { reference: ReferenceDto; profile: ReferenceStyleProfile; onChanged: () => void }) {
+function Suggestions({ reference, profile, onChanged }: { reference: ReferenceDto; profile: ReferenceStyleProfileV2; onChanged: () => void }) {
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
   const open = openSuggestions(profile);
@@ -147,7 +161,7 @@ function ReferenceCard({ reference, onChanged }: { reference: ReferenceDto; onCh
       setBusy(null);
     }
   };
-  const label = reference.status === 'ready' ? 'Ready' : reference.status === 'failed' ? 'Failed' : reference.statusMessage === 'Measuring style' ? 'Measuring style' : 'Processing';
+  const label = reference.status === 'ready' ? 'Ready' : reference.status === 'failed' ? 'Failed' : ['Measuring style', 'Measuring transitions', 'Measuring the beat'].includes(reference.statusMessage) ? 'Measuring style' : 'Processing';
   return (
     <li className="rounded-[var(--radius-card)] border border-charcoal-200/70 bg-white p-4">
       <div className="flex gap-3">
@@ -163,8 +177,11 @@ function ReferenceCard({ reference, onChanged }: { reference: ReferenceDto; onCh
           {profile ? (
             <p className="mt-1 text-sm text-charcoal-600">{describeReferenceProfile(profile)}</p>
           ) : (
-            <p className="mt-1 text-sm text-charcoal-600">{reference.status === 'failed' ? reference.statusMessage || 'Measuring failed. Try again.' : 'Measuring how it is paced and coloured…'}</p>
+            <p className="mt-1 text-sm text-charcoal-600">{reference.status === 'failed' ? reference.statusMessage || 'Measuring failed. Try again.' : reference.statusMessage === 'Measuring transitions' || reference.statusMessage === 'Measuring the beat' ? `${reference.statusMessage}…` : 'Measuring how it is paced and coloured…'}</p>
           )}
+          {profile?.style ? <p className="mt-1 text-sm text-charcoal-700 [overflow-wrap:anywhere]" data-testid="reference-style-line">{describeStyleSignals(profile.style, profile.colourLook)}</p> : null}
+          {profile && !profile.style ? <p className="mt-1 text-xs text-charcoal-500">{OLDER_MEASUREMENT_NOTE}</p> : null}
+          {profile?.style && describeEndScreen(profile.style) ? <p className="mt-1 text-xs text-charcoal-500">{describeEndScreen(profile.style)}</p> : null}
           {profile?.originalsDeletedAt ? <p className="mt-1 text-xs text-charcoal-500">The video itself has been deleted; only these measurements and the thumbnail are kept.</p> : null}
           {profile && profile.text.source === 'not_measured' ? <p className="mt-1 text-xs text-charcoal-500">On-screen text was not measured.</p> : null}
         </div>
@@ -219,6 +236,11 @@ export function ReferenceStrip({
         </button>
       </div>
       <UploadList items={uploads} onPause={onPause} onResume={onResume} onCancel={onCancel} onDismiss={onDismiss} />
+      {references.some((r) => r.profile) ? (
+        <Link href="/settings?tab=preferences" className="inline-flex min-h-11 items-center text-sm font-medium text-charcoal-800 underline underline-offset-4 hover:text-charcoal-950">
+          See your style from all your videos
+        </Link>
+      ) : null}
       {references.length ? (
         <ul className="grid gap-3 md:grid-cols-2">
           {references.map((r) => (

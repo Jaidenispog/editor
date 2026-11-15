@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { BrandConfigSchema } from './brand.js';
+import { DEFAULT_EDITING_STYLE, EditingStyleSchema } from './editing-style.js';
 import { DEFAULT_LEARNING_STATE, EMPTY_LEARNED, LearnedPreferencesSchema, LearningStateSchema, pinOwnerSetFields } from './preference-learning.js';
 import { StyleIdSchema } from './styles.js';
 import { BUSINESS_PROFILE_SETTINGS_SECTIONS } from './settings/business_profile.js';
@@ -65,6 +66,11 @@ export const EditingPreferencesSchema = z.object({
   learning: LearningStateSchema.default(DEFAULT_LEARNING_STATE),
   /** What the editor learned from feedback. Written only by the `preferences.recompute` job. */
   learned: LearnedPreferencesSchema.default(EMPTY_LEARNED),
+  /**
+   * The owner's editing style accepted from "Your style from your videos" (design §4.3.1.5): transitions, beat sync,
+   * reveal, zoom and music fit in the renderer's existing vocabulary. The defaults change nothing.
+   */
+  editingStyle: EditingStyleSchema.default(DEFAULT_EDITING_STYLE),
 });
 export type EditingPreferences = z.infer<typeof EditingPreferencesSchema>;
 

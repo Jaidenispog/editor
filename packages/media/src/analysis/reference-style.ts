@@ -1,0 +1,727 @@
+import { execa } from 'execa';
+import { assembleReferenceSignals, type AssetProbe, type RawJoin, type RawReferenceStyle, type ReferenceStyleSignals } from '@studio/core';
+import { runFfmpegCapture, runFfmpegToBuffer } from '../ffmpeg.js';
+import { decodePcm } from './audio.js';
+import { detectBeats, MUSIC_ANALYSIS_SAMPLE_RATE } from './beats.js';
+import { throwIfAborted, type AnalysisToolOptions } from './common.js';
+
+/**
+ * Reference style v2 measuring (preferences design §4.3.1.2–3): on the reference's proxy, before its originals are
+ * deleted, three passes measure what makes the owner's editing recognisable:
+ *
+ * - Pass A, one FFmpeg run at the proxy's frame rate: per-frame scene score, YAVG/YMIN/YMAX/YDIF and blur.
+ * - Pass B, one FFmpeg run: tiny grey frames (72 × 128, 30 fps) for the shape tests FFmpeg filters cannot report as
+ *   numbers (cross-correlation, the cross-fade fit, moving bands and shifts, the zoom scale fit).
+ * - Pass C, only with sound: the existing beat tracker on mono PCM (tempo, beat grid, 0.25 s energy).
+ *
+ * Every number is an estimate. Frames and PCM live only in memory for the duration of the call; the caller keeps
+ * only the reduced signals (`assembleReferenceSignals`), never the frames, beats, cut times or the energy curve. The
+ * reference's sound is never used for anything but these numbers and is never sent anywhere.
+ */
+
+/** Tunables (starting values from the synthetic prototype, design §4.3.1.3; to be tuned on the owner's real videos). */
+export const REFERENCE_STYLE_MEASURE = {
+  maxSpanSec: 120,
+  gridFps: 30,
+  /** Pass B frame size for portrait video (swapped for landscape). */
+  gridWidth: 72,
+  gridHeight: 128,
+  cutMinScore: 0.18,
+  cutMedianFactor: 8,
+  /** NCC(frame t − 2, frame t + 2) at or above this rules out a cut (fast motion, a camera flash). */
+  cutMaxNcc: 0.5,
+  flashWhiteMin: 200,
+  flashWhiteLift: 60,
+  flashBlackMax: 30,
+  /** A run at the extreme for longer than this is a title or end screen, not a transition. */
+  screenMinSec: 0.6,
+  flashSettle: 15,
+  gradualYdifFactor: 1.6,
+  gradualMinFrames: 4,
+  gradualMaxFrames: 45,
+  crossFadeResidual: 0.35,
+  punchMin: 1.08,
+  punchMax: 1.6,
+  punchResidualRatio: 0.4,
+  zoomMinShotSec: 0.6,
+  zoomMinChange: 0.04,
+  zoomResidualRatio: 0.5,
+  zoomMinTexture: 4,
+  endScreenMinSec: 1.5,
+  endScreenMaxSec: 5,
+  endScreenMaxLuma: 40,
+} as const;
+const M = REFERENCE_STYLE_MEASURE;
+
+/** One frame of Pass A. */
+export interface FrameScore {
+  t: number;
+  scene: number;
+  yavg: number;
+  ymin: number;
+  ymax: number;
+  ydif: number;
+  blur: number | null;
+}
+
+/** Parses `select=gte(scene,0),signalstats,blurdetect,metadata=mode=print:file=-` output into per-frame scores. */
+export function parseFrameScores(output: string): FrameScore[] {
+  const frames: FrameScore[] = [];
+  let cur: Partial<FrameScore> | null = null;
+  const flush = () => {
+    if (cur && cur.t !== undefined && cur.yavg !== undefined) {
+      frames.push({ t: cur.t, scene: cur.scene ?? 0, yavg: cur.yavg, ymin: cur.ymin ?? cur.yavg, ymax: cur.ymax ?? cur.yavg, ydif: cur.ydif ?? 0, blur: cur.blur ?? null });
+    }
+  };
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.startsWith('frame:')) {
+      flush();
+      const m = /pts_time:(-?[\d.]+)/.exec(line);
+      cur = m ? { t: Number(m[1]) } : null;
+      continue;
+    }
+    if (!cur) continue;
+    const m = /^lavfi\.(scene_score|signalstats\.YAVG|signalstats\.YMIN|signalstats\.YMAX|signalstats\.YDIF|blur)=(.+)$/.exec(line);
+    if (!m) continue;
+    const v = Number(m[2]);
+    const value = Number.isFinite(v) ? v : null;
+    switch (m[1]) {
+      case 'scene_score':
+        cur.scene = value ?? 0;
+        break;
+      case 'signalstats.YAVG':
+        if (value !== null) cur.yavg = value;
+        break;
+      case 'signalstats.YMIN':
+        if (value !== null) cur.ymin = value;
+        break;
+      case 'signalstats.YMAX':
+        if (value !== null) cur.ymax = value;
+        break;
+      case 'signalstats.YDIF':
+        cur.ydif = value ?? 0;
+        break;
+      case 'blur':
+        cur.blur = value;
+        break;
+    }
+  }
+  flush();
+  return frames;
+}
+
+// ---------------------------------------------------------------- tiny grey frames
+
+/** Pass B frames: `count` frames of `width × height` bytes at `fps`, starting at time `t0`. */
+export interface GreyFrames {
+  width: number;
+  height: number;
+  fps: number;
+  t0: number;
+  count: number;
+  data: Uint8Array;
+}
+
+export function frameAt(g: GreyFrames, index: number): Uint8Array {
+  const i = Math.min(g.count - 1, Math.max(0, index));
+  const size = g.width * g.height;
+  return g.data.subarray(i * size, (i + 1) * size);
+}
+
+/** The grey frame closest to time `t`. */
+export function frameAtTime(g: GreyFrames, t: number): Uint8Array {
+  return frameAt(g, Math.round((t - g.t0) * g.fps));
+}
+
+/** Normalised cross-correlation of two frames (−1…1; 0 when either is flat). */
+export function ncc(a: Uint8Array, b: Uint8Array): number {
+  const n = Math.min(a.length, b.length);
+  let sa = 0;
+  let sb = 0;
+  for (let i = 0; i < n; i++) {
+    sa += a[i]!;
+    sb += b[i]!;
+  }
+  const ma = sa / n;
+  const mb = sb / n;
+  let num = 0;
+  let da = 0;
+  let db = 0;
+  for (let i = 0; i < n; i++) {
+    const x = a[i]! - ma;
+    const y = b[i]! - mb;
+    num += x * y;
+    da += x * x;
+    db += y * y;
+  }
+  return da > 0 && db > 0 ? num / Math.sqrt(da * db) : 0;
+}
+
+/** Mean absolute difference of two frames. */
+export function meanAbsDiff(a: Uint8Array, b: Uint8Array): number {
+  const n = Math.min(a.length, b.length);
+  let s = 0;
+  for (let i = 0; i < n; i++) s += Math.abs(a[i]! - b[i]!);
+  return n ? s / n : 0;
+}
+
+export interface ScaleFit {
+  /** Best scale of `later` relative to `earlier` (above 1 = pushed in). */
+  scale: number;
+  /** Mean absolute error at the best scale, inner 80 % of the frame. */
+  error: number;
+  /** Mean absolute error with no scaling. */
+  errorAtOne: number;
+}
+
+const ANCHORS = [0.3, 0.5, 0.7];
+
+function scaledError(earlier: Uint8Array, later: Uint8Array, w: number, h: number, s: number, ax: number, ay: number): number {
+  const x0 = Math.floor(w * 0.1);
+  const x1 = Math.ceil(w * 0.9);
+  const y0 = Math.floor(h * 0.1);
+  const y1 = Math.ceil(h * 0.9);
+  const cx = ax * (w - 1);
+  const cy = ay * (h - 1);
+  const inv = 1 / s;
+  let sum = 0;
+  let n = 0;
+  for (let y = y0; y < y1; y++) {
+    const sy = cy + (y - cy) * inv;
+    const iy = Math.floor(sy);
+    if (iy < 0 || iy >= h - 1) continue;
+    const fy = sy - iy;
+    for (let x = x0; x < x1; x++) {
+      const sx = cx + (x - cx) * inv;
+      const ix = Math.floor(sx);
+      if (ix < 0 || ix >= w - 1) continue;
+      const fx = sx - ix;
+      const p = iy * w + ix;
+      const top = earlier[p]! + (earlier[p + 1]! - earlier[p]!) * fx;
+      const bottom = earlier[p + w]! + (earlier[p + w + 1]! - earlier[p + w]!) * fx;
+      const v = top + (bottom - top) * fy;
+      sum += Math.abs(v - later[y * w + x]!);
+      n++;
+    }
+  }
+  return n ? sum / n : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Scale fit (design §4.3.1.3d step 2): predicts `later` by cropping `earlier` around an anchor on a 3 × 3 grid by
+ * 1/s and scaling back (bilinear), comparing the inner 80 % of the frame; coarse-to-fine over [min, max].
+ */
+export function scaleFit(earlier: Uint8Array, later: Uint8Array, w: number, h: number, range: { min: number; max: number } = { min: 0.8, max: 1.4 }): ScaleFit {
+  const errorAtOne = scaledError(earlier, later, w, h, 1, 0.5, 0.5);
+  let best = { scale: 1, error: errorAtOne, ax: 0.5, ay: 0.5 };
+  const tryScale = (s: number, anchors: Array<[number, number]>) => {
+    for (const [ax, ay] of anchors) {
+      const e = scaledError(earlier, later, w, h, s, ax, ay);
+      if (e < best.error - 1e-9) best = { scale: s, error: e, ax, ay };
+    }
+  };
+  const grid: Array<[number, number]> = ANCHORS.flatMap((ax) => ANCHORS.map((ay): [number, number] => [ax, ay]));
+  for (let s = range.min; s <= range.max + 1e-9; s += 0.03) tryScale(Math.round(s * 1000) / 1000, grid);
+  const coarse = best.scale;
+  const anchor: Array<[number, number]> = [[best.ax, best.ay]];
+  for (let s = coarse - 0.03; s <= coarse + 0.03 + 1e-9; s += 0.005) if (s >= range.min - 1e-9 && s <= range.max + 1e-9) tryScale(Math.round(s * 1000) / 1000, anchor);
+  return { scale: Math.round(best.scale * 1000) / 1000, error: best.error, errorAtOne };
+}
+
+/** Best integer shift along one axis: `b(p) ≈ a(p + shift)`; a positive shift on y means the content moved up. */
+export function shiftFit(a: Uint8Array, b: Uint8Array, w: number, h: number, axis: 'x' | 'y', maxShift: number): { shift: number; error: number; errorAtZero: number } {
+  const errorFor = (d: number) => {
+    let sum = 0;
+    let n = 0;
+    for (let y = 0; y < h; y++) {
+      const sy = axis === 'y' ? y + d : y;
+      if (sy < 0 || sy >= h) continue;
+      for (let x = 0; x < w; x++) {
+        const sx = axis === 'x' ? x + d : x;
+        if (sx < 0 || sx >= w) continue;
+        sum += Math.abs(b[y * w + x]! - a[sy * w + sx]!);
+        n++;
+      }
+    }
+    return n > (w * h) / 3 ? sum / n : Number.POSITIVE_INFINITY;
+  };
+  const errorAtZero = errorFor(0);
+  let best = { shift: 0, error: errorAtZero };
+  for (let d = -maxShift; d <= maxShift; d++) {
+    if (d === 0) continue;
+    const e = errorFor(d);
+    if (e < best.error) best = { shift: d, error: e };
+  }
+  return { ...best, errorAtZero };
+}
+
+function spearman(values: number[]): number {
+  const n = values.length;
+  if (n < 3) return 0;
+  const ranks = values.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v).map((x, r) => ({ ...x, r }));
+  const rank = new Array<number>(n);
+  for (const x of ranks) rank[x.i] = x.r;
+  let d2 = 0;
+  for (let i = 0; i < n; i++) d2 += (rank[i]! - i) ** 2;
+  return 1 - (6 * d2) / (n * (n * n - 1));
+}
+
+/** Cross-fade test: every inner frame is a blend of the frames either side, and the blend moves one way. */
+export function crossFadeFit(start: Uint8Array, end: Uint8Array, inner: Uint8Array[]): { ok: boolean; residualRatio: number; monotonic: number } {
+  const n = start.length;
+  let span = 0;
+  let norm = 0;
+  for (let i = 0; i < n; i++) {
+    const d = end[i]! - start[i]!;
+    span += Math.abs(d);
+    norm += d * d;
+  }
+  span /= n;
+  if (norm <= 0 || span < 3) return { ok: false, residualRatio: 1, monotonic: 0 };
+  const alphas: number[] = [];
+  let residual = 0;
+  let worst = 0;
+  for (const f of inner) {
+    let dot = 0;
+    for (let i = 0; i < n; i++) dot += (f[i]! - start[i]!) * (end[i]! - start[i]!);
+    const a = dot / norm;
+    alphas.push(a);
+    let r = 0;
+    for (let i = 0; i < n; i++) r += Math.abs(f[i]! - (start[i]! + a * (end[i]! - start[i]!)));
+    residual += r / n;
+    worst = Math.max(worst, r / n);
+  }
+  const residualRatio = inner.length ? residual / inner.length / span : 1;
+  const monotonic = spearman(alphas);
+  // Every inner frame must fit (a wipe fits on average but not in the middle, where half the frame is each shot).
+  return { ok: worst / span <= M.crossFadeResidual && monotonic >= 0.8, residualRatio, monotonic };
+}
+
+/** Band test: is frame-to-frame change concentrated in a band of rows or columns whose centre moves one way? */
+export function movingBand(frames: Uint8Array[], w: number, h: number): { axis: 'rows' | 'cols'; direction: 'up' | 'down' | 'left' | 'right' } | null {
+  const results: Array<{ axis: 'rows' | 'cols'; centroid: number }> = [];
+  for (let k = 1; k < frames.length; k++) {
+    const a = frames[k - 1]!;
+    const b = frames[k]!;
+    const rows = new Float64Array(h);
+    const cols = new Float64Array(w);
+    let total = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const d = Math.abs(b[y * w + x]! - a[y * w + x]!);
+        rows[y] = rows[y]! + d;
+        cols[x] = cols[x]! + d;
+        total += d;
+      }
+    }
+    if (total <= 0) continue;
+    const concentrated = (arr: Float64Array) => {
+      const sorted = [...arr].sort((p, q) => q - p);
+      const top = sorted.slice(0, Math.ceil(arr.length * 0.3)).reduce((s, v) => s + v, 0);
+      let c = 0;
+      arr.forEach((v, i) => (c += v * i));
+      return { share: top / total, centroid: c / total };
+    };
+    const r = concentrated(rows);
+    const c = concentrated(cols);
+    if (c.share >= 0.55 && c.share >= r.share) results.push({ axis: 'cols', centroid: c.centroid });
+    else if (r.share >= 0.55) results.push({ axis: 'rows', centroid: r.centroid });
+  }
+  for (const axis of ['cols', 'rows'] as const) {
+    const cs = results.filter((x) => x.axis === axis).map((x) => x.centroid);
+    if (cs.length < 3) continue;
+    let up = 0;
+    let down = 0;
+    for (let i = 1; i < cs.length; i++) {
+      if (cs[i]! > cs[i - 1]! + 0.3) up++;
+      else if (cs[i]! < cs[i - 1]! - 0.3) down++;
+    }
+    if (Math.max(up, down) >= 2 && Math.max(up, down) >= 0.7 * (cs.length - 1)) {
+      if (axis === 'cols') return { axis, direction: down > up ? 'left' : 'right' };
+      return { axis, direction: down > up ? 'up' : 'down' };
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- detection on the passes
+
+function localMedian(values: readonly number[], i: number, half: number): number {
+  const lo = Math.max(0, i - half);
+  const hi = Math.min(values.length - 1, i + half);
+  const w: number[] = [];
+  for (let k = lo; k <= hi; k++) w.push(values[k]!);
+  w.sort((a, b) => a - b);
+  const m = Math.floor(w.length / 2);
+  return w.length % 2 ? w[m]! : (w[m - 1]! + w[m]!) / 2;
+}
+
+function medianOf(values: number[]): number {
+  if (!values.length) return 0;
+  const s = [...values].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+}
+
+/** A detected event on the frame timeline (in memory only). */
+export interface DetectedEvent extends RawJoin {
+  /** First and last Pass A frame index the event covers. */
+  from: number;
+  to: number;
+  inShot?: boolean;
+}
+
+export interface DetectionResult {
+  events: DetectedEvent[];
+  /** Long black/white runs (title or end screens), as [startSec, endSec]. */
+  screens: Array<[number, number]>;
+}
+
+/**
+ * Finds flashes, cuts, punch-in jumps and gradual joins on the Pass A scores and Pass B frames (design §4.3.1.3a),
+ * in that order; each frame belongs to at most one event.
+ */
+export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps: number, signal?: AbortSignal): DetectionResult {
+  const n = frames.length;
+  const used = new Uint8Array(n);
+  const events: DetectedEvent[] = [];
+  const screens: Array<[number, number]> = [];
+  const y = frames.map((f) => f.yavg);
+  const sec = (s: number) => Math.max(1, Math.round(s * fps));
+  const g = (t: number) => frameAtTime(grey, t);
+  const dt = 1 / fps;
+
+  // 1. Flashes and dips.
+  for (let i = 1; i < n; i++) {
+    if (used[i]) continue;
+    if (i % 256 === 0) throwIfAborted(signal, 'Reference style');
+    const base = y.slice(Math.max(0, i - sec(0.5)), i);
+    if (base.length === 0) continue;
+    const yb = medianOf(base);
+    const isWhite = (v: number) => v >= Math.max(M.flashWhiteMin, yb + M.flashWhiteLift);
+    const isBlack = (v: number) => v <= M.flashBlackMax && yb - v >= 0.5 * yb;
+    const kind = isWhite(y[i]!) ? 'white' : isBlack(y[i]!) ? 'black' : null;
+    if (!kind) continue;
+    const test = kind === 'white' ? isWhite : isBlack;
+    let runEnd = i;
+    while (runEnd + 1 < n && test(y[runEnd + 1]!)) runEnd++;
+    if ((runEnd - i + 1) / fps > M.screenMinSec) {
+      let s = i;
+      while (s - 1 >= 0 && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(0.5)) s--;
+      screens.push([frames[s]!.t, frames[runEnd]!.t + dt]);
+      for (let k = s; k <= runEnd; k++) used[k] = 1;
+      i = runEnd;
+      continue;
+    }
+    let s = i;
+    while (s - 1 >= 0 && !used[s - 1] && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(1.5)) s--;
+    const nextLevel = medianOf(y.slice(Math.min(n, runEnd + 1 + sec(0.2)), Math.min(n, runEnd + 1 + sec(0.5))));
+    let e = runEnd;
+    while (e + 1 < n && Math.abs(y[e + 1]! - nextLevel) >= M.flashSettle && e - s < sec(1.5)) e++;
+    let peak = i;
+    for (let k = i; k <= runEnd; k++) if (kind === 'white' ? y[k]! > y[peak]! : y[k]! < y[peak]!) peak = k;
+    const before = g(frames[Math.max(0, s - 1)]!.t);
+    const after = g(frames[Math.min(n - 1, e + 1)]!.t);
+    events.push({
+      kind: kind === 'white' ? 'fade_white' : 'fade_black',
+      timeSec: frames[peak]!.t,
+      durationSec: (e - s + 1) / fps,
+      from: s,
+      to: e,
+      inShot: ncc(before, after) >= 0.6,
+    });
+    for (let k = Math.max(0, s - 1); k <= Math.min(n - 1, e + 1); k++) used[k] = 1;
+    i = e;
+  }
+
+  // 2. Hard cuts and 3. punch-in jumps.
+  const scene = frames.map((f) => f.scene);
+  const thresholds = scene.map((_, i) => Math.max(M.cutMinScore, M.cutMedianFactor * localMedian(scene, i, sec(1))));
+  for (let i = 1; i < n; i++) {
+    if (used[i]) continue;
+    if (i % 256 === 0) throwIfAborted(signal, 'Reference style');
+    const s = scene[i]!;
+    if (s < thresholds[i]!) continue;
+    let isMax = true;
+    for (let k = Math.max(0, i - 2); k <= Math.min(n - 1, i + 2); k++) if (k !== i && scene[k]! > s) isMax = false;
+    if (!isMax) continue;
+    if ((scene[i - 1] ?? 0) > 0.5 * s || (scene[i + 1] ?? 0) > 0.5 * s) continue;
+    const t = frames[i]!.t;
+    const a = g(t - 2 * dt);
+    const b = g(t + 2 * dt);
+    const fit = () => scaleFit(g(t - dt), g(t + dt), grey.width, grey.height, { min: 1, max: M.punchMax });
+    // The picture sliding or wiping along an axis is a transition (or camera motion), not a cut.
+    const moving = (['y', 'x'] as const).some((axis) => {
+      const r = shiftFit(g(t - dt), g(t + dt), grey.width, grey.height, axis, Math.round((axis === 'y' ? grey.height : grey.width) / 3));
+      return Math.abs(r.shift) >= 2 && r.error <= 0.5 * r.errorAtZero;
+    });
+    if (moving) continue;
+    const correlated = ncc(a, b) >= M.cutMaxNcc;
+    const f = fit();
+    const punch = f.scale >= M.punchMin && f.scale <= M.punchMax && f.error <= M.punchResidualRatio * f.errorAtOne;
+    if (correlated && !punch) continue;
+    events.push(punch ? { kind: 'punch_in', timeSec: t, durationSec: 0, scale: f.scale, from: i, to: i } : { kind: 'hard', timeSec: t, durationSec: 0, from: i, to: i });
+    used[i] = 1;
+  }
+
+  // 4. Gradual joins: runs where the picture keeps changing more than usual without a cut.
+  const ydif = frames.map((f) => f.ydif);
+  const active = frames.map((f, i) => !used[i] && f.scene < thresholds[i]! && ydif[i]! >= M.gradualYdifFactor * Math.max(0.5, localMedian(ydif, i, sec(1.5))));
+  for (let i = 0; i < n; i++) {
+    if (!active[i]) continue;
+    let j = i;
+    let gaps = 0;
+    while (j + 1 < n && !used[j + 1] && (active[j + 1] || (j + 2 < n && active[j + 2] && gaps < 2))) {
+      if (!active[j + 1]) gaps++;
+      j++;
+    }
+    const len = j - i + 1;
+    const start = i;
+    i = j;
+    if (len < M.gradualMinFrames || len > M.gradualMaxFrames) continue;
+    // A join needs a shot on each side: a window running into a cut or flash is a busy shot, not a transition.
+    let touches = false;
+    for (let k = Math.max(0, start - 3); k < start; k++) if (used[k]) touches = true;
+    for (let k = j + 1; k <= Math.min(n - 1, j + 3); k++) if (used[k]) touches = true;
+    if (touches) continue;
+    const tStart = frames[start]!.t;
+    const tEnd = frames[j]!.t;
+    const before = g(tStart - 2 * dt);
+    const after = g(tEnd + 2 * dt);
+    if (ncc(before, after) >= 0.6) continue;
+    throwIfAborted(signal, 'Reference style');
+    const inner: Uint8Array[] = [];
+    for (let t = tStart; t <= tEnd + 1e-6; t += 1 / grey.fps) inner.push(g(t));
+    const ev: DetectedEvent = { kind: 'unclear', timeSec: (tStart + tEnd) / 2, durationSec: len / fps, from: start, to: j };
+    const w = grey.width;
+    const h = grey.height;
+    const seq = [before, ...inner, after];
+    const shifts = (axis: 'x' | 'y') =>
+      seq.slice(1).map((f, k) => {
+        const r = shiftFit(seq[k]!, f, w, h, axis, Math.round((axis === 'y' ? h : w) / 3));
+        return r.error <= 0.5 * r.errorAtZero ? Math.sign(r.shift) : 0;
+      });
+    const consistent = (signs: number[]) => {
+      const pos = signs.filter((v) => v > 0).length;
+      const neg = signs.filter((v) => v < 0).length;
+      return Math.max(pos, neg) >= 3 && Math.min(pos, neg) <= 1 ? (pos > neg ? 1 : -1) : 0;
+    };
+    if (crossFadeFit(before, after, inner).ok) ev.kind = 'cross_fade';
+    else {
+      const sy = consistent(shifts('y'));
+      const sx = sy === 0 ? consistent(shifts('x')) : 0;
+      const band = sy === 0 && sx === 0 ? movingBand(seq, w, h) : null;
+      if (sy !== 0) {
+        ev.kind = 'slide_vertical';
+        ev.direction = sy > 0 ? 'up' : 'down';
+      } else if (sx !== 0) {
+        ev.kind = 'wipe_horizontal';
+        ev.direction = sx > 0 ? 'left' : 'right';
+      } else if (band) {
+        ev.kind = band.axis === 'cols' ? 'wipe_horizontal' : 'slide_vertical';
+        ev.direction = band.direction;
+        const blurs = frames.slice(start, j + 1).map((f) => f.blur).filter((b): b is number => b !== null);
+        const around = [...frames.slice(Math.max(0, start - sec(0.5)), start), ...frames.slice(j + 1, j + 1 + sec(0.5))].map((f) => f.blur).filter((b): b is number => b !== null);
+        if (band.axis === 'cols' && len / fps <= 0.3 && blurs.length && around.length && medianOf(blurs) >= 1.8 * medianOf(around)) ev.kind = 'whip_like';
+      } else {
+        const scales = seq.slice(1).map((f, k) => scaleFit(seq[k]!, f, w, h, { min: 0.9, max: 1.12 }).scale);
+        const ups = scales.filter((s) => s >= 1.03).length;
+        const downs = scales.filter((s) => s <= 1 / 1.03).length;
+        if (Math.max(ups, downs) >= 3) ev.kind = 'zoom';
+      }
+    }
+    events.push(ev);
+    for (let k = start; k <= j; k++) used[k] = 1;
+  }
+  events.sort((a, b) => a.timeSec - b.timeSec);
+  return { events, screens };
+}
+
+/** Zoom inside shots (design §4.3.1.3d): scale fit between 15 % and 85 % of each shot of at least 0.6 s. */
+export function measureShotZooms(
+  shots: Array<[number, number]>,
+  grey: GreyFrames,
+  signal?: AbortSignal,
+): { checked: number; pushScales: number[]; pullScales: number[]; perShot: Array<{ startSec: number; endSec: number; scale: number | null; zoom: 'push' | 'pull' | null }> } {
+  const out = { checked: 0, pushScales: [] as number[], pullScales: [] as number[], perShot: [] as Array<{ startSec: number; endSec: number; scale: number | null; zoom: 'push' | 'pull' | null }> };
+  const w = grey.width;
+  const h = grey.height;
+  for (const [s, e] of shots) {
+    if (e - s < M.zoomMinShotSec) continue;
+    throwIfAborted(signal, 'Reference style');
+    const a = s + 0.1;
+    const b = e - 0.1;
+    const at = (q: number) => frameAtTime(grey, a + q * (b - a));
+    const f15 = at(0.15);
+    const f50 = at(0.5);
+    const f85 = at(0.85);
+    const main = scaleFit(f15, f85, w, h);
+    out.checked++;
+    let zoom: 'push' | 'pull' | null = null;
+    if (Math.abs(main.scale - 1) >= M.zoomMinChange && main.error <= M.zoomResidualRatio * main.errorAtOne && main.errorAtOne >= M.zoomMinTexture) {
+      const first = scaleFit(f15, f50, w, h).scale;
+      const second = scaleFit(f50, f85, w, h).scale;
+      const dir = Math.sign(main.scale - 1);
+      if (Math.sign(first - 1) === dir && Math.sign(second - 1) === dir) {
+        zoom = dir > 0 ? 'push' : 'pull';
+        (dir > 0 ? out.pushScales : out.pullScales).push(main.scale);
+      }
+    }
+    out.perShot.push({ startSec: s, endSec: e, scale: main.scale, zoom });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- the passes
+
+export interface MeasureReferenceStyleOptions extends AnalysisToolOptions {
+  probe: AssetProbe;
+  /** From the reference's audio analysis at ingest (`analyseAudio`). */
+  speechLikely: boolean;
+  ffprobePath?: string;
+  /** Progress callback with the owner-facing step ("Measuring transitions", "Measuring the beat"). */
+  onProgress?: (fraction: number, message: string) => void;
+}
+
+/** What `measureReferenceStyle` returns: the stored signals plus in-memory details (for tests; never stored). */
+export interface ReferenceStyleMeasurement {
+  signals: ReferenceStyleSignals;
+  details: {
+    events: DetectedEvent[];
+    screens: Array<[number, number]>;
+    shots: Array<{ startSec: number; endSec: number; scale: number | null; zoom: 'push' | 'pull' | null }>;
+    beatTimesSec: number[];
+    bpm: number | null;
+    tempoConfidence: number;
+    audioOffsetSec: number;
+    raw: RawReferenceStyle;
+  };
+}
+
+async function streamStartTimes(input: string, ffprobePath: string, signal?: AbortSignal): Promise<{ video: number; audio: number | null }> {
+  try {
+    const { stdout } = await execa(ffprobePath, ['-v', 'error', '-show_entries', 'stream=codec_type,start_time', '-of', 'json', input], { ...(signal ? { cancelSignal: signal } : {}), timeout: 60_000 });
+    const streams = (JSON.parse(stdout) as { streams?: Array<{ codec_type?: string; start_time?: string }> }).streams ?? [];
+    const start = (type: string) => {
+      const s = streams.find((x) => x.codec_type === type);
+      const v = s?.start_time !== undefined ? Number(s.start_time) : NaN;
+      return Number.isFinite(v) ? v : null;
+    };
+    return { video: start('video') ?? 0, audio: start('audio') };
+  } catch {
+    throwIfAborted(signal, 'Reference style');
+    return { video: 0, audio: null };
+  }
+}
+
+/**
+ * Measures transitions, beat sync, the drop, zooms and the music's tempo and energy shape on a reference proxy
+ * (design §4.3.1.2). Honours the AbortSignal between passes and inside the frame loops. A failed audio pass leaves the
+ * beat, drop and music unmeasured; a failed picture pass throws (the job retries while the originals still exist).
+ */
+export async function measureReferenceStyle(proxyPath: string, opts: MeasureReferenceStyleOptions): Promise<ReferenceStyleMeasurement> {
+  const { probe, signal } = opts;
+  if (!probe.video) throw new Error('Reference style: the file has no video stream');
+  throwIfAborted(signal, 'Reference style');
+  const tool = { ...(opts.ffmpegPath ? { ffmpegPath: opts.ffmpegPath } : {}), ...(signal ? { signal } : {}) };
+  const span = Math.min(probe.durationSec > 0 ? probe.durationSec : M.maxSpanSec, M.maxSpanSec);
+  const portrait = probe.video.displayHeight >= probe.video.displayWidth;
+  opts.onProgress?.(0.05, 'Measuring transitions');
+
+  // Pass A.
+  const small = portrait ? '144:256' : '256:144';
+  const { stdout } = await runFfmpegCapture(
+    ['-i', proxyPath, '-map', '0:v:0', '-an', '-t', span.toFixed(3), '-vf', `scale=${small}:flags=area,format=yuv420p,select='gte(scene\\,0)',signalstats,blurdetect=block_width=16:block_height=16:planes=1,metadata=mode=print:file=-`, '-f', 'null', '-'],
+    { ...tool, loglevel: 'error' },
+  );
+  const frames = parseFrameScores(stdout);
+  if (frames.length < 3) throw new Error('Reference style: no frames could be measured');
+  throwIfAborted(signal, 'Reference style');
+  const starts = await streamStartTimes(proxyPath, opts.ffprobePath ?? 'ffprobe', signal);
+  const t0 = frames[0]!.t;
+  for (const f of frames) f.t = Math.round((f.t - starts.video) * 1e6) / 1e6;
+  const deltas = frames.slice(1).map((f, i) => f.t - frames[i]!.t).filter((d) => d > 0);
+  const fps = deltas.length ? Math.min(120, 1 / medianOf(deltas)) : probe.video.fps;
+  opts.onProgress?.(0.25, 'Measuring transitions');
+
+  // Pass B.
+  const gw = portrait ? M.gridWidth : M.gridHeight;
+  const gh = portrait ? M.gridHeight : M.gridWidth;
+  const buffer = await runFfmpegToBuffer(['-i', proxyPath, '-map', '0:v:0', '-an', '-t', span.toFixed(3), '-vf', `fps=${M.gridFps},scale=${gw}:${gh}:flags=area,format=gray`, '-f', 'rawvideo', 'pipe:1'], tool);
+  const size = gw * gh;
+  const grey: GreyFrames = { width: gw, height: gh, fps: M.gridFps, t0: Math.round((t0 - starts.video) * 1e6) / 1e6, count: Math.floor(buffer.length / size), data: new Uint8Array(buffer.buffer, buffer.byteOffset, Math.floor(buffer.length / size) * size) };
+  if (grey.count < 2) throw new Error('Reference style: no frames could be measured');
+  throwIfAborted(signal, 'Reference style');
+
+  const detected = detectJoins(frames, grey, fps, signal);
+  const lastT = frames[frames.length - 1]!.t + 1 / fps;
+  const fullSpan = Math.min(span, lastT);
+
+  // End screen: a dark part after the last boundary, 1.5–5 s long.
+  const boundaries = [0, ...detected.events.map((e) => e.timeSec), ...detected.screens.map((s) => s[0])].filter((t) => t < fullSpan);
+  const lastBoundary = Math.max(...boundaries);
+  const tail = fullSpan - lastBoundary;
+  let measuredSec = fullSpan;
+  let trimmed = 0;
+  if (tail >= M.endScreenMinSec && tail <= M.endScreenMaxSec) {
+    const ys = frames.filter((f) => f.t >= lastBoundary + 1 / fps).map((f) => f.yavg);
+    if (ys.length && ys.reduce((a, b) => a + b, 0) / ys.length <= M.endScreenMaxLuma) {
+      measuredSec = lastBoundary;
+      trimmed = tail;
+    }
+  }
+  const events = detected.events.filter((e) => e.timeSec > 0 && e.timeSec < measuredSec - 1 / fps / 2);
+
+  // Shots between v2 boundaries (gradual joins split at their edges) for the zoom check.
+  const shotEdges: Array<[number, number]> = [];
+  let cursor = 0;
+  for (const e of events) {
+    const startT = e.durationSec > 0 ? frames[e.from]!.t : e.timeSec;
+    const endT = e.durationSec > 0 ? frames[e.to]!.t + 1 / fps : e.timeSec;
+    if (startT > cursor) shotEdges.push([cursor, startT]);
+    cursor = Math.max(cursor, endT);
+  }
+  if (measuredSec > cursor) shotEdges.push([cursor, measuredSec]);
+  const zooms = measureShotZooms(shotEdges, grey, signal);
+  opts.onProgress?.(0.6, 'Measuring the beat');
+
+  // Pass C: the reference's own sound, measured only (never kept, used or sent anywhere).
+  let audio: RawReferenceStyle['audio'] = null;
+  let beatTimes: number[] = [];
+  let bpm: number | null = null;
+  let confidence = 0;
+  const offset = starts.audio !== null ? starts.audio - starts.video : 0;
+  if (probe.audio) {
+    try {
+      let pcm = await decodePcm(proxyPath, { ...tool, sampleRate: MUSIC_ANALYSIS_SAMPLE_RATE, channels: 1 });
+      const keep = Math.min(pcm.length, Math.round(measuredSec * MUSIC_ANALYSIS_SAMPLE_RATE));
+      pcm = pcm.subarray(0, keep);
+      throwIfAborted(signal, 'Reference style');
+      const beats = detectBeats(pcm, MUSIC_ANALYSIS_SAMPLE_RATE);
+      bpm = beats.bpm;
+      confidence = beats.confidence;
+      beatTimes = beats.beatTimesSec.map((b) => Math.round((b + offset) * 1e4) / 1e4);
+      audio = { bpm: beats.bpm, confidence: beats.confidence, beatTimesSec: beatTimes, energy: beats.energy, energyStepSec: beats.energyStepSec, speechLikely: opts.speechLikely };
+    } catch (err) {
+      throwIfAborted(signal, 'Reference style');
+      if (err instanceof Error && err.name === 'CancelledError') throw err;
+      // The sound could not be read: beat, drop and music stay unmeasured rather than guessed.
+      audio = { bpm: null, confidence: 0, beatTimesSec: [], energy: [], energyStepSec: 0.25, speechLikely: opts.speechLikely };
+    }
+  }
+
+  const raw: RawReferenceStyle = {
+    fps,
+    measuredSec,
+    endScreenTrimmedSec: trimmed,
+    joins: events.map(({ kind, timeSec, durationSec, direction, scale }) => ({ kind, timeSec, durationSec, ...(direction ? { direction } : {}), ...(scale ? { scale } : {}) })),
+    zoomShots: { checked: zooms.checked, pushScales: zooms.pushScales, pullScales: zooms.pullScales },
+    audio,
+  };
+  opts.onProgress?.(0.95, 'Measuring the beat');
+  return {
+    signals: assembleReferenceSignals(raw),
+    details: { events, screens: detected.screens, shots: zooms.perShot, beatTimesSec: beatTimes, bpm, tempoConfidence: confidence, audioOffsetSec: offset, raw },
+  };
+}

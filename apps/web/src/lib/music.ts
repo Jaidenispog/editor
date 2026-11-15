@@ -10,6 +10,7 @@ import {
   newId,
   normaliseLicence,
   rankTracksForPreferences,
+  findDrop,
   type LicenceState,
   type MusicLicence,
   type StyleId,
@@ -243,9 +244,18 @@ export async function musicSuggestions(query: z.infer<typeof SuggestionsQuerySch
     getSettings(),
   ]);
   const taste = musicTasteFrom(settings.preferences);
-  const tracks = rows.map((t) => ({ ...t, genres: t.genres ?? [] }));
+  // The strongest lift of each track comes from its own stored loudness curve (numbers only, nothing is fetched).
+  const tracks = rows.map((t) => {
+    const drop = t.status === 'ready' && t.beats?.energy?.length ? findDrop(t.beats.energy, t.beats.energyStepSec, { spanSec: t.durationSec ?? undefined, beatTimesSec: t.beats.beatTimesSec }) : null;
+    return { ...t, genres: t.genres ?? [], drop: drop?.found ? { riseDb: drop.riseDb } : null };
+  });
   return {
-    tracks: rankTracksForPreferences(tracks, taste, { durationSec: query.durationSec, styleId: (query.styleId as StyleId | undefined) ?? null }),
+    tracks: rankTracksForPreferences(tracks, taste, {
+      durationSec: query.durationSec,
+      styleId: (query.styleId as StyleId | undefined) ?? null,
+      // Tempo and energy measured from the owner's own videos, once accepted in Settings.
+      fit: settings.preferences.editingStyle?.musicFit ?? null,
+    }),
     notes: artistsWithoutMatch(tracks, taste),
   };
 }

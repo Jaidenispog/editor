@@ -1,6 +1,8 @@
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import {
   AppError,
+  paletteTransitionTypes,
+  type TransitionType,
   CancelledError,
   JOB_TYPES,
   effectivePreferences,
@@ -69,7 +71,7 @@ export async function handleGenerateEdits(ctx: WorkerContext, run: TrackedRun, p
         run.checkCancelled();
         if (sup && !sup.supported) throw new AppError('UNSUPPORTED', `${STYLES[styleId].name}: ${sup.reason}`);
         const input = buildPlannerInput({ styleId, settings: generation.settings, footage, music, appSettings: settings, attempt: 0 });
-        const vctx = validationContextFor(footage, music, generation.settings.durationSec);
+        const vctx = validationContextFor(footage, music, generation.settings.durationSec, false, paletteTransitionTypes(settings.preferences.editingStyle?.transitionPalette));
         const outcome = await planWithFallback(ctx.ai.planner, ctx.ai.rulesPlanner, input, vctx, ctx.logger, run.signal);
         for (const u of outcome.usages) await recordAiUsage(ctx, payload.projectId, `planning:${styleId}`, u);
         await ctx.db
@@ -241,7 +243,7 @@ export async function handleReviseEdit(
       ...(payload.mode === 'revise' ? { revisionInstruction: version.instruction, revisionHints: hints } : {}),
       ...(recut ? { beatSync: recut.beatSync === 'keep' ? ('auto' as const) : recut.beatSync, revealOnBeat: recut.revealOnBeat === 'on' } : {}),
     });
-    const vctx = validationContextFor(footage, music, targetDurationSec, hints?.transitions === 'restrained' || hints?.transitions === 'none');
+    const vctx = validationContextFor(footage, music, targetDurationSec, hints?.transitions === 'restrained' || hints?.transitions === 'none', paletteTransitionTypes(settings.preferences.editingStyle?.transitionPalette));
     const outcome = await planWithFallback(ctx.ai.planner, ctx.ai.rulesPlanner, input, vctx, ctx.logger, run.signal);
     for (const u of outcome.usages) await recordAiUsage(ctx, payload.projectId, `${payload.mode}:${styleId}`, u);
     let plan = outcome.plan;
@@ -288,13 +290,21 @@ export async function handleReviseEdit(
 }
 
 /** The facts a plan is validated against: real clip lengths and audio, the music length, transcripts and the length window. */
-export function validationContextFor(footage: LoadedFootage, music: LoadedMusic | null, targetDurationSec: number, restrainedTransitionsOnly = false): PlanValidationContext {
+export function validationContextFor(
+  footage: LoadedFootage,
+  music: LoadedMusic | null,
+  targetDurationSec: number,
+  restrainedTransitionsOnly = false,
+  extraStyleTransitions: readonly TransitionType[] = [],
+): PlanValidationContext {
   return {
     assets: footage.planAssets,
     music: music ? { trackId: music.track.id, durationSec: music.durationSec } : null,
     transcripts: footage.transcripts,
     durationBounds: durationBoundsFor(targetDurationSec),
     restrainedTransitionsOnly,
+    // Transitions accepted from the owner's own videos do not count as "unusual for the style" (warnings only).
+    ...(extraStyleTransitions.length ? { extraStyleTransitions } : {}),
   };
 }
 
@@ -318,7 +328,9 @@ export function buildPlannerInput(args: {
     targetDurationSec: settings.durationSec,
     analyses: footage.analyses,
     assets: footage.planAssets,
-    music: music ? { trackId: music.track.id, durationSec: music.durationSec, bpm: music.bpm, beatTimesSec: music.beatTimesSec, title: music.track.title } : null,
+    music: music
+      ? { trackId: music.track.id, durationSec: music.durationSec, bpm: music.bpm, beatTimesSec: music.beatTimesSec, title: music.track.title, ...(music.energy.length ? { energy: music.energy, energyStepSec: music.energyStepSec } : {}) }
+      : null,
     // Settings saved before the start point existed have no value: treat them as automatic.
     musicStartSec: music ? (settings.musicStartSec ?? null) : null,
     // Learned values apply unless the owner pinned the field.

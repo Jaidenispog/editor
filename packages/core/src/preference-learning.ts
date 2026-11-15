@@ -78,6 +78,8 @@ export const PinSchema = z.object({
   at: z.string(),
   referenceAssetId: z.string().nullable().default(null),
   referenceName: z.string().max(200).default(''),
+  /** Set when the value was accepted from the summary of several reference videos (design §4.3.1.5). */
+  referenceAssetIds: z.array(z.string()).max(12).default([]),
 });
 export type Pin = z.infer<typeof PinSchema>;
 
@@ -632,7 +634,7 @@ export function pinOwnerSetFields(prefs: EditingPreferences, defaults: EditingPr
   for (const field of LEARNABLE_FIELDS) {
     if (pinned[field]) continue;
     if (JSON.stringify(declaredValue(prefs, field)) !== JSON.stringify(declaredValue(defaults, field))) {
-      pinned[field] = { by: 'owner', at, referenceAssetId: null, referenceName: '' };
+      pinned[field] = { by: 'owner', at, referenceAssetId: null, referenceName: '', referenceAssetIds: [] };
     }
   }
   return { ...prefs, learning: { ...prefs.learning, pinned } };

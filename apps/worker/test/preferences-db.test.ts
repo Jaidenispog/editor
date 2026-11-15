@@ -17,7 +17,7 @@ import pino from 'pino';
 import { execa } from 'execa';
 import { eq } from 'drizzle-orm';
 import { loadEnv } from '@studio/config';
-import { DEFAULT_SETTINGS, newId, type AppSettings, type EditPlan, type JobType, type PlanFacts } from '@studio/core';
+import { DEFAULT_SETTINGS, newId, readReferenceProfile, type AppSettings, type EditPlan, type JobType, type PlanFacts } from '@studio/core';
 import { schema, type DatabaseHandle } from '@studio/db';
 import { LocalDiskStore, storageKeys } from '@studio/storage';
 import { createAiProviders, type OnScreenTextEstimator } from '@studio/ai';
@@ -31,6 +31,7 @@ import { buildPlannerInput } from '../src/handlers/generate.js';
 import { handleRender } from '../src/handlers/render.js';
 import { loadProjectFootage, loadSettings } from '../src/lib/plan-context.js';
 import { LOGO_MISSING_NOTE } from '../src/modules/preferences/brand.js';
+import { buildFixture, fixtureSpecs } from '../../../packages/media/test/fixtures/make-reference-fixtures.js';
 import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 import { fakeRun } from './helpers/fakes.js';
 
@@ -104,6 +105,7 @@ describe.skipIf(skip)('preferences, reference videos and brand (database-backed)
   const projectId = newId();
   const clipId = newId();
   const referenceId = newId();
+  const flashRefId = newId();
   const resolve = (key: string) => (ctx.store as LocalDiskStore).resolvePath(key);
   const asset = async (id: string) => (await handle.db.query.mediaAssets.findFirst({ where: eq(schema.mediaAssets.id, id) }))!;
   const storedSettings = async () => (await handle.db.query.settings.findFirst({ where: eq(schema.settings.id, 'default') }))!.data as AppSettings;
@@ -184,6 +186,13 @@ describe.skipIf(skip)('preferences, reference videos and brand (database-backed)
       expiresAt: new Date(Date.now() + 3600_000),
     });
     await handleIngestAsset(ctx, fakeRun(), { assetId: referenceId, projectId });
+
+    // A SYNTHETIC reference with a white flash on every 4th beat (design §4.3.1.10 R2), uploaded without the text tick.
+    const flashFile = await buildFixture(path.join(root, 'fixtures'), fixtureSpecs()['r2']!);
+    const flashKey = storageKeys.assetOriginal(projectId, flashRefId, 'mp4');
+    await store.putFile(flashKey, flashFile);
+    await handle.db.insert(schema.mediaAssets).values({ id: flashRefId, projectId, kind: 'reference_video', originalFilename: 'synthetic-r2.mp4', mimeType: 'video/mp4', byteSize: 1, sortOrder: 6, originalKey: flashKey, status: 'uploaded' });
+    await handleIngestAsset(ctx, fakeRun(), { assetId: flashRefId, projectId });
     await refreshProjectReadiness(ctx, projectId);
   }, 600_000);
 
@@ -223,6 +232,49 @@ describe.skipIf(skip)('preferences, reference videos and brand (database-backed)
     expect(after.proxyKey).toBeNull();
     expect(after.analysis?.sampledFrames).toEqual([]);
     expect(existsSync(resolve(after.thumbnailKey!))).toBe(true);
+    // Reference style v2: a version 2 profile with the style signals; numbers only.
+    expect(profile.version).toBe(2);
+    const read = readReferenceProfile(profile)!;
+    expect(read.style).not.toBeNull();
+    expect(read.style!.estimate).toBe(true);
+  }, 300_000);
+
+  it('measures transitions and the beat of a SYNTHETIC reference, keeps only numbers and deletes the files', async () => {
+    const calls = estimatorCalls.length;
+    const usageBefore = (await handle.db.query.aiUsage.findMany()).length;
+    const queued = enqueued.find((e) => e.type === 'reference.analyse' && e.payload['assetId'] === flashRefId);
+    expect(queued?.payload).toEqual({ assetId: flashRefId, projectId, useVision: false });
+    await handleReferenceAnalyse(ctx, fakeRun(), { assetId: flashRefId, projectId, useVision: false });
+    const after = await asset(flashRefId);
+    expect(after.status).toBe('ready');
+    const profile = readReferenceProfile(after.referenceProfile)!;
+    expect(profile.version).toBe(2);
+    const style = profile.style!;
+    expect(style.transitions.counts.fade_white ?? 0).toBeGreaterThanOrEqual(6);
+    expect(style.beat).toMatchObject({ status: 'measured', reportable: true });
+    expect(style.transitions.flashesOnBeat).toBeGreaterThanOrEqual(6);
+    expect(profile.text.source).toBe('not_measured');
+    // No beat times, cut times, energy curve, audio or frames are stored.
+    const lengths: number[] = [];
+    JSON.stringify(after.referenceProfile, (_k, v) => {
+      if (Array.isArray(v)) lengths.push(v.length);
+      return v;
+    });
+    expect(Math.max(0, ...lengths)).toBeLessThanOrEqual(8);
+    // No AI call at all for this upload (no tick, and the sound is never sent anywhere).
+    expect(estimatorCalls.length).toBe(calls);
+    expect((await handle.db.query.aiUsage.findMany()).length).toBe(usageBefore);
+    // Only the thumbnail remains under the asset's storage prefix; the original is gone too.
+    const { readdir } = await import('node:fs/promises');
+    const listAll = async (dir: string): Promise<string[]> => {
+      if (!existsSync(dir)) return [];
+      const out: string[] = [];
+      for (const e of await readdir(dir, { withFileTypes: true })) out.push(...(e.isDirectory() ? await listAll(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+      return out;
+    };
+    const remaining = await listAll(resolve(storageKeys.assetPrefix(projectId, flashRefId)));
+    expect(remaining).toEqual([resolve(after.thumbnailKey!)]);
+    expect(existsSync(resolve(after.originalKey))).toBe(false);
   }, 300_000);
 
   it('never treats a reference as footage: not in loaded footage, style support or planner input', async () => {

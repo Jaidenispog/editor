@@ -6,8 +6,8 @@ import {
   CancelledError,
   REFERENCE_MIN_DURATION_SEC,
   REFERENCE_TEXT_FRAMES,
-  ReferenceStyleProfileSchema,
   describeReferenceProfile,
+  readReferenceProfile,
   effectivePreferences,
   profileReference,
   type AssetAnalysis,
@@ -16,7 +16,7 @@ import {
 } from '@studio/core';
 import { schema, type MediaAsset, type Project } from '@studio/db';
 import { storageKeys } from '@studio/storage';
-import { analyseAudio, assembleShots, detectScenes, extractFrames, makeProxy, makeThumbnail, measureLook, measureQuality, probeMedia } from '@studio/media';
+import { analyseAudio, assembleShots, detectScenes, extractFrames, makeProxy, makeThumbnail, measureLook, measureQuality, measureReferenceStyle, probeMedia } from '@studio/media';
 import type { WorkerContext } from '../context.js';
 import { INTERRUPTED_MESSAGE, stopOutcome, type TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
@@ -136,9 +136,12 @@ async function deleteReferenceOriginals(ctx: WorkerContext, asset: MediaAsset): 
 }
 
 /**
- * `reference.analyse`: measures the look on the proxy, uses the stored shots, optionally estimates on-screen text
- * (≤ 8 frames, only with the owner's tick), stores the profile with suggestions, then deletes the original, proxy and
- * frames. Skips measuring when the profile already exists; deleting is last and tolerant, so a retry is safe.
+ * `reference.analyse`: measures the look on the proxy, then the reference style v2 signals (transitions, beat sync,
+ * the drop, zooms, the music's tempo and energy shape; design §4.3.1.2), optionally estimates on-screen text (≤ 8
+ * frames, only with the owner's tick), stores a version 2 profile with suggestions, then deletes the original, proxy
+ * and frames. The reference's sound is decoded in memory only to measure numbers: it is never kept, never used in an
+ * export and never sent to an AI model. Skips measuring when any profile (v1 or v2) already exists; deleting is last
+ * and tolerant, so a retry is safe.
  */
 export async function handleReferenceAnalyse(ctx: WorkerContext, run: TrackedRun, payload: ReferenceAnalysePayload): Promise<void> {
   const asset = await ctx.db.query.mediaAssets.findFirst({ where: and(eq(schema.mediaAssets.id, payload.assetId), isNull(schema.mediaAssets.deletedAt)) });
@@ -146,7 +149,9 @@ export async function handleReferenceAnalyse(ctx: WorkerContext, run: TrackedRun
   if (asset.kind !== 'reference_video') throw new AppError('VALIDATION', 'Only reference videos are measured for style');
   const set = (values: Partial<typeof schema.mediaAssets.$inferInsert>) => ctx.db.update(schema.mediaAssets).set({ ...values, updatedAt: new Date() }).where(eq(schema.mediaAssets.id, asset.id));
 
-  let profile = asset.referenceProfile ? ReferenceStyleProfileSchema.parse(asset.referenceProfile) : null;
+  const stored = asset.referenceProfile ? readReferenceProfile(asset.referenceProfile) : null;
+  if (asset.referenceProfile && !stored) throw new AppError('PROCESSING_FAILED', 'The stored measurements of this reference video could not be read.');
+  let profile = stored;
   if (!profile) {
     if (!asset.analysis || !asset.proxyKey) throw new AppError('PROCESSING_FAILED', 'This reference video has not finished processing.');
     const tmp = await createJobTempDir(ctx.tmpRoot, run.jobId);
@@ -155,6 +160,29 @@ export async function handleReferenceAnalyse(ctx: WorkerContext, run: TrackedRun
       const proxyPath = path.join(tmp, 'proxy.mp4');
       await ctx.store.downloadToFile(asset.proxyKey, proxyPath);
       const look = await measureLook(proxyPath, { ffmpegPath: ctx.env.FFMPEG_PATH, signal: run.signal });
+      run.checkCancelled();
+
+      // Reference style v2: picture passes first ("Measuring transitions"), then the sound ("Measuring the beat").
+      await run.progress(0.2, 'Measuring transitions');
+      const proxyProbe = await probeMedia(proxyPath, ctx.env.FFPROBE_PATH);
+      let lastMessage = '';
+      const statusWrites: Array<Promise<unknown>> = [];
+      const measured = await measureReferenceStyle(proxyPath, {
+        probe: proxyProbe,
+        speechLikely: asset.analysis.audio.speechLikely,
+        ffmpegPath: ctx.env.FFMPEG_PATH,
+        ffprobePath: ctx.env.FFPROBE_PATH,
+        signal: run.signal,
+        onProgress: (fraction, message) => {
+          void run.progress(0.2 + 0.3 * fraction, message);
+          if (message !== lastMessage) {
+            lastMessage = message;
+            statusWrites.push(set({ statusMessage: message }).catch(() => undefined));
+          }
+        },
+      });
+      // The step messages land before the profile, never after it.
+      await Promise.all(statusWrites);
       run.checkCancelled();
 
       let text: { framesChecked: number; framesWithText: number } | null = null;
@@ -187,6 +215,7 @@ export async function handleReferenceAnalyse(ctx: WorkerContext, run: TrackedRun
           look,
           text,
           measuredAt: new Date(),
+          style: measured.signals,
         },
         effectivePreferences(settings.preferences),
       );
@@ -202,9 +231,13 @@ export async function handleReferenceAnalyse(ctx: WorkerContext, run: TrackedRun
   if (!profile.originalsDeletedAt) {
     await run.progress(0.9, 'Deleting the original');
     await deleteReferenceOriginals(ctx, asset);
-    const done = { ...profile, originalsDeletedAt: new Date().toISOString() };
+    const deletedAt = new Date().toISOString();
+    const done = { ...profile, originalsDeletedAt: deletedAt };
+    // A stored v1 profile keeps its version, so it stays recognisable as an older measurement.
+    const raw = asset.referenceProfile;
+    const toStore = raw && raw.version === 1 ? { ...raw, originalsDeletedAt: deletedAt } : done;
     const analysis = asset.analysis ? { ...asset.analysis, sampledFrames: [] } : null;
-    await set({ referenceProfile: done, proxyKey: null, analysis, status: 'ready', statusMessage: describeReferenceProfile(done) });
+    await set({ referenceProfile: toStore, proxyKey: null, analysis, status: 'ready', statusMessage: describeReferenceProfile(done) });
   }
   await run.progress(1, 'Reference measured');
 }

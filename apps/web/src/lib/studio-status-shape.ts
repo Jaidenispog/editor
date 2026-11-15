@@ -1,4 +1,4 @@
-import { ReferenceStyleProfileSchema, STYLES, STYLE_IDS, applyManualLabels, effectivePreferences, licenceStateOf, type AppSettings, type MusicLicence, type StyleId, type StyleSupport } from '@studio/core';
+import { readReferenceProfile, STYLES, STYLE_IDS, applyManualLabels, effectivePreferences, licenceStateOf, type AppSettings, type MusicLicence, type StyleId, type StyleSupport } from '@studio/core';
 import type { Edit, EditVersion, Generation, JobRow, MediaAsset, MusicTrack, Project } from '@studio/db';
 import { downsampleEnergy } from './shared/music-curve.js';
 import type { AssetDto, AssetShotsDto, EditDto, GenerationDto, MusicOptionDto, ReferenceDto, ShotDto, StudioStatusDto, StyleOptionDto, VersionDto } from './shared/studio-dto.js';
@@ -127,14 +127,14 @@ export function shapeMusicOption(track: MusicTrack): MusicOptionDto {
  * the profile with its suggestions. Never anything that could be used as footage.
  */
 export async function shapeReference(asset: MediaAsset, sign: LinkSigner): Promise<ReferenceDto> {
-  const parsed = asset.referenceProfile ? ReferenceStyleProfileSchema.safeParse(asset.referenceProfile) : null;
+  const profile = asset.referenceProfile ? readReferenceProfile(asset.referenceProfile) : null;
   return {
     id: asset.id,
     filename: asset.originalFilename,
     status: asset.status,
     statusMessage: asset.statusMessage,
     thumbnailUrl: asset.thumbnailKey ? await sign(asset.thumbnailKey) : null,
-    profile: parsed?.success ? parsed.data : null,
+    profile,
     createdAt: asset.createdAt.toISOString(),
   };
 }

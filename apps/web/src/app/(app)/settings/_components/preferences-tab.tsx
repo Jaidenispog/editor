@@ -7,6 +7,7 @@ import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { Input, Select, Textarea } from '@/components/ui/field';
 import { LearnedPreferences, ReferenceSuggestionsList } from './learned-preferences';
 import { useSaveSettings } from './use-save-settings';
+import { YourStyleSummary } from './your-style-summary';
 
 /** Fields this form edits (learning state and learned values have their own controls). */
 type EditableField =
@@ -64,6 +65,7 @@ export function PreferencesTab({ preferences, disabled }: { preferences: Editing
   return (
     <div className="space-y-6">
       <LearnedPreferences key={saves} canEdit={!disabled} />
+      <YourStyleSummary canEdit={!disabled} />
       {!disabled ? <ReferenceSuggestionsList /> : null}
       <form onSubmit={submit} className="space-y-6">
         <Card>

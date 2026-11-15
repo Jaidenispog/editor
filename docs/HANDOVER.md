@@ -180,6 +180,21 @@ History of the background runs:
     - The preview/showcase restart is scripted: `scratchpad/restart-preview.sh` (stops by pgid, copies the
       standalone build, migrates both databases, restarts, records new pgids). Run it without a pipe to `tail`.
 
+16. 2026-11-15, branch `worktree-wf_d3892033-bcb-1`: **reference style v2 — "your style from your videos"** (owner's
+    request to base the edits on their TikTok: animations, transitions, music; preferences design §4.3.1). TikTok is
+    never read or scraped; the owner uploads their own posted videos as reference videos. Built: measuring in
+    `packages/media/src/analysis/reference-style.ts` (transitions, beat sync with a chance correction, drop, zooms,
+    music tempo/energy shape, end screen; numbers only, the reference sound never kept or sent anywhere), the v2
+    profile and summary in `packages/core` (`reference-signals.ts`, `reference-style.ts`, `editing-style.ts`; v1
+    profiles read unchanged), `reference.analyse` writing `version: 2`, the summary routes, the rules planner and AI
+    brief using accepted values in the existing renderer vocabulary only, music ranking by tempo/drop over the owner's
+    licensed tracks, and Settings → Editing preferences → "Your style from your videos" plus the v2 line on Studio
+    reference cards. No migration (jsonb). Deviations from the design numbers, all documented in code: the reveal may
+    sit at 45–90 % of the edit (styles hold the result for the last 15–30 %), the drop time starts from the middle of
+    the first louder 0.25 s window, and a single knock is rejected by requiring the median power to rise too.
+    **Next:** run it on 3–5 of the owner's real posted videos and tune the thresholds (design §4.3.1.10); every
+    threshold is a starting value from synthetic clips.
+
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
 session reviews and commits their output. If no run is alive, compare the repo with the run's goals (each agent

@@ -1,3 +1,4 @@
+import type { MusicFit } from './editing-style.js';
 import { licenceStateOf, type MusicLicence } from './music.js';
 import { STYLES, type StyleId } from './styles.js';
 import { formatSeconds } from './time.js';
@@ -20,6 +21,8 @@ export interface RankableTrack {
   durationSec: number | null;
   status: 'uploaded' | 'processing' | 'ready' | 'failed';
   licence: MusicLicence;
+  /** The track's strongest lift (from its stored energy curve, `findDrop`); null when it has none or was not measured. */
+  drop?: { riseDb: number } | null;
 }
 
 /** One track's place in the "Suggested for you" list. */
@@ -56,16 +59,21 @@ export function trackUnusableReason(track: RankableTrack, editSec: number, now: 
   return null;
 }
 
+/** A track has a clear drop when its strongest lift rises at least this much. */
+export const TRACK_DROP_MIN_RISE_DB = 6;
+
 /**
  * Ranks the owner's own tracks for an edit: +3 per matching genre, +2 per matching mood, +3 for an artist they like,
- * +1 when the tempo suits the style. Unusable tracks (not ready, licence not confirmed or expired, shorter than the
+ * +1 when the tempo suits the style. With `fit` (the tempo and energy measured from the owner's own videos and accepted
+ * in Settings): +2 when the track's BPM is in the range, +1 when only half or double its BPM is, +1 for a clear drop
+ * when the owner's videos have one. Only numbers are compared: nothing is fetched, played or looked up. Unusable tracks (not ready, licence not confirmed or expired, shorter than the
  * edit) are kept in the list, last, with the reason. The top three usable tracks with a positive score get a rank.
  * Nothing is ever chosen automatically: "No music" stays a first-class choice in the form. Deterministic.
  */
 export function rankTracksForPreferences(
   tracks: readonly RankableTrack[],
   taste: MusicTaste,
-  opts: { durationSec: number; styleId?: StyleId | null; now?: Date; limit?: number },
+  opts: { durationSec: number; styleId?: StyleId | null; now?: Date; limit?: number; fit?: MusicFit | null },
 ): TrackSuggestion[] {
   const genres = new Set(taste.genres.map(norm).filter(Boolean));
   const moods = new Set(taste.moods.map(norm).filter(Boolean));
@@ -94,6 +102,20 @@ export function rankTracksForPreferences(
       if (t.bpm >= lo && t.bpm <= hi) {
         score += 1;
         reasons.push(`${Math.round(t.bpm)} BPM suits the ${STYLES[opts.styleId].name.toLowerCase()}`);
+      }
+    }
+    const fit = opts.fit;
+    if (fit) {
+      if (t.bpm && t.bpm >= fit.bpmLow && t.bpm <= fit.bpmHigh) {
+        score += 2;
+        reasons.push(`Tempo close to your videos (${Math.round(fit.bpmLow)}–${Math.round(fit.bpmHigh)} BPM)`);
+      } else if (t.bpm && [t.bpm / 2, t.bpm * 2].some((b) => b >= fit.bpmLow && b <= fit.bpmHigh)) {
+        score += 1;
+        reasons.push('Half-time feel close to your videos');
+      } else if (!t.bpm) reasons.push('tempo unknown');
+      if (fit.prefersClearDrop && t.drop && t.drop.riseDb >= TRACK_DROP_MIN_RISE_DB) {
+        score += 1;
+        reasons.push('Builds to a clear drop, like your videos');
       }
     }
     const unusable = trackUnusableReason(t, opts.durationSec, opts.now);

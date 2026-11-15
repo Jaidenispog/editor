@@ -223,7 +223,32 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   it never hides a style.
 - **Reference videos**: `kind = 'reference_video'` assets with their own upload route and ingest branch; they are
   excluded by kind from footage, style support, the status clip list and planner input. `reference.analyse` stores
-  only measurements and deletes the original, proxy and frames.
+  only measurements and deletes the original, proxy and frames (deletion stays last and tolerant, so a retry is safe).
+- **Reference style v2 — "your style from your videos"** (preferences design §4.3.1). TikTok is never read: the owner
+  uploads their own posted videos as references. Three layers, each with one job:
+  - `packages/media/src/analysis/reference-style.ts` (`measureReferenceStyle`): on the proxy, Pass A (one FFmpeg run:
+    scene score, YAVG/YDIF, blur per frame), Pass B (72 × 128 grey frames at 30 fps, in memory) and Pass C (the
+    reference's own sound through the existing `decodePcm` + `detectBeats`, in memory only). Pure frame maths finds
+    flashes/dips, hard cuts (local-median threshold, ±2-frame maximum, no shift between the frames either side),
+    punch-in jumps (scale fit), gradual joins (cross-fade fit on every frame, vertical/horizontal shift, moving band,
+    zoom), zooms inside shots (scale fit at 15 %/50 %/85 %) and a dark end screen. Honours the AbortSignal between
+    passes and inside the loops; a failed sound pass leaves beat, drop and music unmeasured.
+  - `packages/core/src/reference-style.ts` (pure): `assembleReferenceSignals` reduces the raw events to the stored
+    numbers (`reference-signals.ts` schema), with beat sync reportable only above chance (binomial p < 0.01),
+    `findDrop` on the 0.25 s energy curve (also used for the owner's tracks), `paletteFromCounts` in
+    `TRANSITION_TYPES` only, `summariseReferenceStyle` (latest 12 profiles, ≥ 60 % agreement), wording that always
+    says "estimate", and `applySummaryDecisions` / `resetEditingStyle`.
+  - `preferences.editingStyle` (`packages/core/src/editing-style.ts`, defaults change nothing): `transitionPalette`,
+    `beatSync`, `beatsPerCut`, `reveal`, `zoom`, `musicFit`, plus server-managed `sources` and `summaryDecisions`.
+    Only an owner decision writes it (summary routes or Settings, through `updateSettingsLocked`).
+  The rules planner applies it in the existing vocabulary only (`packages/ai/src/rules/editing-style.ts`): palette
+  transitions at the joins each style allows, accents whose peak (20 % into `fadewhite`/`fadeblack`) lands on every
+  4th/8th beat in the beat montage and on the reveal elsewhere, cuts in whole N-beat steps, the reveal on the track's
+  strongest beat (`strongestBeat`; with the music start on automatic the start moves by whole bars), and `none` /
+  push-in / punch-in zooms capped so exports do not soften; clean promo stays calm. With the default style every plan
+  is byte-identical to before (snapshot test). The AI brief gets `job.editingStyle` (with the reveal's output time)
+  and the palette in `allowedTransitions`; the validator's `extraStyleTransitions` silences only the
+  `OFF_STYLE_TRANSITION` warning. `musicFit` only ranks the owner's own licensed tracks.
 - **Brand in videos**: `packages/media/src/render/logo.ts` lays out the corner mark (≤ 150 px, inset 12 px in R_head)
   and the end card (≤ 420 × 300 px at y 380, last min(2 s, 30 %)) from the text layout of the same render, so the
   corner mark steps aside for top text and the end card is skipped when top or centre text overlaps it; every

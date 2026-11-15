@@ -143,7 +143,7 @@ export function placeWindow(
 }
 
 /** How far (source seconds) a draft's window can extend forwards and backwards without overlapping others. */
-function extension(d: Draft, drafts: readonly Draft[]): { forward: number; backward: number } {
+export function extension(d: Draft, drafts: readonly Draft[]): { forward: number; backward: number } {
   let forward = d.cand.endSec - d.outSec;
   let backward = d.inSec - d.cand.startSec;
   for (const [a, b] of occupied(d.cand.assetId, drafts, d)) {
