@@ -617,7 +617,7 @@ async function applyRead(ctx: WorkerContext, target: TargetRow, post: Record<str
 
 /** Saves the Zernio post id the moment it is known (a retry then never creates again). */
 async function savePostId(ctx: WorkerContext, target: TargetRow, postId: string): Promise<TargetRow> {
-  const saved = await updateTarget(ctx.db, target.id, ['processing', 'queued', 'manual_step_required', 'failed'], { externalPostId: postId, providerState: { zernioLookupAttempt: null, zernioHintPostId: null } });
+  const saved = await updateTarget(ctx.db, target.id, ['processing', 'queued', 'manual_step_required', 'failed'], { externalPostId: postId, providerState: { zernioLookupAttempt: null, zernioHintPostId: null, zernioHintVerified: null } });
   return saved ?? { ...target, externalPostId: postId };
 }
 
@@ -991,30 +991,39 @@ export async function runZernioPoll(ctx: WorkerContext, run: TrackedRun, target:
     const awaitingCheck = target.status === 'manual_step_required' && target.manualStep === 'check_before_retry';
     if (target.status !== 'processing' && !(hintMode && awaitingCheck)) return;
     const submittedAccount = str(target.providerState['submittedAccountId']);
-    // Lookup mode (step 5d): first the webhook's hint, read back by id and adopted only when both our metadata and
-    // the account match (§7.2.5), then the account's recent posts.
+    // Ours only when Zernio's own read-back carries our metadata AND its TikTok entry is on our account (the one in
+    // use now, or the one the create went to). An entry without an account is never ours.
+    const isOurs = (p: Record<string, unknown>): boolean => {
+      if (rec(p['metadata'])['studioTargetId'] !== target.id) return false;
+      const entry = tiktokEntry(p);
+      const entryAccount = entry ? (str(entry['accountId']) ?? str(rec(entry['accountId'])['_id'])) : null;
+      return entryAccount !== null && (entryAccount === account.externalId || entryAccount === submittedAccount);
+    };
+    // Lookup mode (step 5d): first the webhook's hint, read back by id and adopted only when it is ours (§7.2.5),
+    // then the account's recent posts.
     const hint = str(target.providerState['zernioHintPostId']);
     if (hint) {
       let hinted: Record<string, unknown> | null = null;
+      // Zernio answered about this id (a post, or a 4xx such as 404 for an id it does not know): read, so dropped
+      // unless ours. A failed read (5xx, network, 429) keeps the hint for the next read; the list lookup still runs.
+      let answered = true;
       try {
         hinted = await client.getPost(hint);
-      } catch {
-        hinted = null;
+      } catch (err) {
+        if (err instanceof CancelledError || err instanceof JobInterruptedError) throw err;
+        answered = err instanceof ZernioApiError && err.httpStatus >= 400 && err.httpStatus < 500 && err.httpStatus !== 429;
       }
-      const entry = hinted ? tiktokEntry(hinted) : null;
-      const entryAccount = entry ? (str(entry['accountId']) ?? str(rec(entry['accountId'])['_id'])) : null;
-      const accountMatches = entryAccount !== null && (entryAccount === account.externalId || entryAccount === submittedAccount);
-      if (hinted && rec(hinted['metadata'])['studioTargetId'] === target.id && accountMatches) {
-        return await adoptFound(ctx, target, hint, hinted);
-      }
-      await updateTarget(ctx.db, target.id, [target.status], { providerState: { zernioHintPostId: null } });
+      if (hinted && isOurs(hinted)) return await adoptFound(ctx, target, hint, hinted);
+      if (answered) await clearHint(ctx, target.id, hint);
     }
-    // The scheduled lookups are over for a target waiting for the owner's check: only a hint's read-back reaches it.
-    if (awaitingCheck) return;
+    // A webhook-triggered read of a target waiting for the owner's check also runs the bounded, read-only metadata
+    // lookup once: the hint it read may have been a forged or stale id, while the genuine post is in Zernio's list.
+    // It never uses up or schedules a lookup (the scheduled ones are over); a scheduled poll never reaches here.
+    if (awaitingCheck && !hintMode) return;
     const since = new Date((target.submittedAt?.getTime() ?? Date.now()) - 2 * 60_000);
     const found = await client.findRecentPost(
       { accountId: submittedAccount && submittedAccount === account.externalId ? submittedAccount : null, updatedSince: since },
-      (p) => rec(p['metadata'])['studioTargetId'] === target.id && Boolean(str(p['_id'])),
+      (p) => Boolean(str(p['_id'])) && (hintMode ? isOurs(p) : rec(p['metadata'])['studioTargetId'] === target.id),
     );
     if (found) return await adoptFound(ctx, target, str(found['_id']) ?? '', found);
     // A webhook-triggered read never uses up a lookup or schedules one: the scheduled lookup poll is still queued.
@@ -1052,7 +1061,7 @@ async function adoptFound(ctx: WorkerContext, target: TargetRow, postId: string,
       manualStep: null,
       externalPostId: postId,
       statusMessage: 'Zernio has this post. Checking its status with TikTok…',
-      providerState: { zernioLookupAttempt: null, zernioHintPostId: null },
+      providerState: { zernioLookupAttempt: null, zernioHintPostId: null, zernioHintVerified: null },
     });
     if (!resumed) return;
     await writeWorkerAudit(ctx.db, { userId: null, action: 'publish.target.reconciled', entityType: 'publish_target', entityId: target.id, data: { platform: 'tiktok', from: 'check_before_retry', to: 'processing' } }, ctx.logger);
@@ -1195,7 +1204,7 @@ export async function checkZernio(ctx: WorkerContext, run: TrackedRun, conn: Con
  * `metadata.studioTargetId` first, then by the post id against `external_post_id`, and the only effect is a read
  * (`publish.poll`) with our own key. A forged or replayed event can at most cause an extra read.
  */
-export async function handleZernioWebhook(ctx: WorkerContext, _run: TrackedRun, event: { payload: Record<string, unknown> }): Promise<void> {
+export async function handleZernioWebhook(ctx: WorkerContext, _run: TrackedRun, event: { payload: Record<string, unknown>; signatureValid: boolean }): Promise<void> {
   const env = event.payload;
   const name = str(env['event']) ?? '';
   if (name === 'account.disconnected') {
@@ -1212,13 +1221,44 @@ export async function handleZernioWebhook(ctx: WorkerContext, _run: TrackedRun, 
   if (!target || target.confirmedAt || target.status === 'cancelled') return;
   if (!target.externalPostId && !target.submittedAt) return;
   // Outcome unknown (no post id yet): the hinted id is kept for a read-back, also once the target waits for the owner's
-  // check, so a genuine late event can still prevent a second send. It is adopted only if the read-back matches.
+  // check, so a genuine late event can still prevent a second send. It is adopted only if the read-back matches, and
+  // an unverified id never replaces a verified one that has not been read yet (storeHint).
   const lookingUp = target.status === 'processing' || (target.status === 'manual_step_required' && target.manualStep === 'check_before_retry');
-  if (!target.externalPostId && postId && lookingUp) await updateTarget(ctx.db, target.id, [target.status], { providerState: { zernioHintPostId: postId.slice(0, 64) } });
+  if (!target.externalPostId && postId && lookingUp) await storeHint(ctx, target.id, postId.slice(0, 64), event.signatureValid === true);
   await enqueueTracked(
     ctx,
     'publish.poll',
     { targetId: target.id, postId: target.postId, projectId: await projectOf(ctx, target.postId), pollNo: Number(target.providerState['lastPollNo'] ?? 0), hint: true },
     { singletonKey: `publish-poll-hint:${target.id}` },
   );
+}
+
+/** Waiting for an id: no post id yet, and the create's outcome is still being looked up or waits for the owner. */
+function awaitingPostId() {
+  const t = schema.publishTargets;
+  return and(isNull(t.externalPostId), or(eq(t.status, 'processing'), and(eq(t.status, 'manual_step_required'), eq(t.manualStep, 'check_before_retry'))));
+}
+
+/**
+ * Keeps a webhook's post id for the next read-back, in one conditional update so concurrent deliveries cannot race:
+ * a verified id always replaces the stored one, an unverified id only replaces another unverified one (or none). So a
+ * forged or unsigned event can never push out a genuine event's id before it is read. `updated_at` is left alone: a
+ * hint is not progress, and forged deliveries must not keep a lost target looking alive to the dispatch net.
+ */
+async function storeHint(ctx: WorkerContext, targetId: string, postId: string, verified: boolean): Promise<void> {
+  const t = schema.publishTargets;
+  const patch = JSON.stringify({ zernioHintPostId: postId, zernioHintVerified: verified });
+  await ctx.db
+    .update(t)
+    .set({ providerState: sql`${t.providerState} || ${patch}::jsonb` })
+    .where(and(eq(t.id, targetId), awaitingPostId(), verified ? undefined : sql`coalesce(${t.providerState}->>'zernioHintVerified', 'false') <> 'true'`));
+}
+
+/** Drops a hint that was read and is not ours, unless a newer hint has replaced it meanwhile (that one is still unread). */
+async function clearHint(ctx: WorkerContext, targetId: string, postId: string): Promise<void> {
+  const t = schema.publishTargets;
+  await ctx.db
+    .update(t)
+    .set({ providerState: sql`(${t.providerState} - 'zernioHintPostId') - 'zernioHintVerified'` })
+    .where(and(eq(t.id, targetId), sql`${t.providerState}->>'zernioHintPostId' = ${postId}`));
 }
