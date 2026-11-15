@@ -192,6 +192,13 @@ History of the background runs:
     reference cards. No migration (jsonb). Deviations from the design numbers, all documented in code: the reveal may
     sit at 45–90 % of the edit (styles hold the result for the last 15–30 %), the drop time starts from the middle of
     the first louder 0.25 s window, and a single knock is rejected by requiring the median power to rise too.
+    Review fix-up on the same branch: "cut every N beats" fitted to each style's shot range (every 8 beats no
+    longer breaks the beat montage), a music-length repair when a trimmed-to-the-track edit ran past the music, a
+    last-resort rebuild without the editing style (plan note), the "lands on the biggest lift" note rechecked on the
+    final plan; measuring: flashes need a near-uniform frame (bright/dark shots are cuts), only start/end screens
+    are screens, gradual limits in seconds with a fixed 1/30 s change measure (60 fps proxies), zoom joins gated by
+    the scale-fit residual, blur transitions never cross-fades, soft wipes told from cross-fades by the per-column/row
+    blend spread; edge fixtures X1–X8 (design §4.3.1.10).
     **Next:** run it on 3–5 of the owner's real posted videos and tune the thresholds (design §4.3.1.10); every
     threshold is a starting value from synthetic clips.
 

@@ -1150,7 +1150,9 @@ export function applySummaryDecisions(prefs: EditingPreferences, summary: Refere
 
 /**
  * "Go back to each style's own": transitions, beat, reveal, zoom and music matching return to their defaults (and
- * their summary decisions are forgotten so the rows can be accepted again). Length, pace, colour and text stay.
+ * their summary decisions are forgotten so the rows can be accepted again). Length, pace, colour and text stay, and so
+ * does `preferences.transitions` ('varied', pinned by the reference) when accepting a bolder palette turned it on: it
+ * is an ordinary preference the owner changes in Settings, and the reset copy says it stays.
  */
 export function resetEditingStyle(prefs: EditingPreferences): EditingPreferences {
   const decisions = { ...(prefs.editingStyle?.summaryDecisions ?? {}) };

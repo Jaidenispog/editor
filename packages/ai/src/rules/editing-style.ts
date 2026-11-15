@@ -257,18 +257,39 @@ export function planReveal(input: PlannerInput, s: EffectiveSettings, revealSec:
   return best ? { musicStartSec: round(best.start, 3), targetOutputSec: round(best.out, 3), note } : { musicStartSec: null, targetOutputSec: null, note: 'The biggest lift in this track does not fit this edit, so the reveal lands on a downbeat.' };
 }
 
-/** Applies the reveal plan after timing is final; falls back to the nearest downbeat. */
-export function applyReveal(ctx: BuildContext, drafts: Draft[], grid: BeatGrid | null, plan: RevealPlan): void {
-  if (!grid?.fromMusic) return;
+/** Note for a reveal that could not be moved (or kept) on the strongest beat. */
+export const REVEAL_MISSED_NOTE = 'The reveal could not be kept exactly on the biggest lift with this footage, so it lands close to it.';
+
+/**
+ * Applies the reveal plan after timing is final; falls back to the nearest downbeat. Returns the output time the
+ * reveal landed on when the plan note says it lands on the biggest lift (to be rechecked once the plan is final, see
+ * {@link recheckRevealNote}), else null.
+ */
+export function applyReveal(ctx: BuildContext, drafts: Draft[], grid: BeatGrid | null, plan: RevealPlan): { targetSec: number; note: string } | null {
+  if (!grid?.fromMusic) return null;
   const r = revealIndex(ctx.input.styleId, drafts);
   if (plan.targetOutputSec !== null && r > 0) {
     if (landRevealAt(drafts, r, plan.targetOutputSec)) {
       if (plan.note) ctx.notes.push(plan.note);
-      return;
+      return plan.note ? { targetSec: plan.targetOutputSec, note: plan.note } : null;
     }
   }
   if (ctx.input.styleId !== 'beat_montage') landRevealOnBeat(drafts, grid);
   ctx.notes.push(plan.targetOutputSec !== null ? 'The reveal could not be moved onto the biggest lift with this footage, so it lands on a downbeat.' : (plan.note ?? 'The reveal lands on a downbeat.'));
+  return null;
+}
+
+/**
+ * Later steps (zooms, fitting repairs) can move the reveal after it was landed: when it is more than 0.1 s from the
+ * biggest lift, the "lands on the biggest lift" note is replaced so the plan never claims what it does not do.
+ * Returns false once the note has been replaced.
+ */
+export function recheckRevealNote(ctx: BuildContext, drafts: readonly Draft[], landed: { targetSec: number; note: string }): boolean {
+  const r = revealIndex(ctx.input.styleId, drafts);
+  if (r > 0 && Math.abs(feltCutTime(drafts, r) - landed.targetSec) <= 0.1) return true;
+  const k = ctx.notes.indexOf(landed.note);
+  if (k >= 0) ctx.notes[k] = REVEAL_MISSED_NOTE;
+  return false;
 }
 
 /** Largest zoom that does not soften the picture: min(scale, 1.25, max(1.10, short side ÷ 1080)). */

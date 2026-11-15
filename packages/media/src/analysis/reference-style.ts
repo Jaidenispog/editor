@@ -11,7 +11,8 @@ import { throwIfAborted, type AnalysisToolOptions } from './common.js';
  *
  * - Pass A, one FFmpeg run at the proxy's frame rate: per-frame scene score, YAVG/YMIN/YMAX/YDIF and blur.
  * - Pass B, one FFmpeg run: tiny grey frames (72 × 128, 30 fps) for the shape tests FFmpeg filters cannot report as
- *   numbers (cross-correlation, the cross-fade fit, moving bands and shifts, the zoom scale fit).
+ *   numbers (cross-correlation, the cross-fade fit and its spatial spread, moving bands and shifts, the zoom scale fit,
+ *   how uniform a flash frame is, and the change per 1/30 s that marks gradual joins at any frame rate).
  * - Pass C, only with sound: the existing beat tracker on mono PCM (tempo, beat grid, 0.25 s energy).
  *
  * Every number is an estimate. Frames and PCM live only in memory for the duration of the call; the caller keeps
@@ -30,16 +31,33 @@ export const REFERENCE_STYLE_MEASURE = {
   cutMedianFactor: 8,
   /** NCC(frame t − 2, frame t + 2) at or above this rules out a cut (fast motion, a camera flash). */
   cutMaxNcc: 0.5,
+  /** …unless that NCC is at least this much below the NCC within each side (different shots that look alike). */
+  cutNccDrop: 0.25,
+  /** A spike below this scene score followed by a burst of change is the start of a transition, not a cut. */
+  cutWeakScore: 0.25,
   flashWhiteMin: 200,
   flashWhiteLift: 60,
   flashBlackMax: 30,
+  /**
+   * A flash or dip is a nearly uniform white or black frame: the 10th–90th percentile spread of the Pass B grey frame
+   * at its extreme is at most this (a bright or dark shot keeps its picture detail and is joined by cuts instead).
+   */
+  flashUniformSpread: 24,
   /** A run at the extreme for longer than this is a title or end screen, not a transition. */
   screenMinSec: 0.6,
   flashSettle: 15,
+  /** A frame is part of a gradual change when the grey picture changes this much more than its local median (per 1/30 s). */
   gradualYdifFactor: 1.6,
-  gradualMinFrames: 4,
-  gradualMaxFrames: 45,
+  /** Gradual joins last 0.13–1.5 s (in seconds, so the limits hold at any proxy frame rate up to 60 fps). */
+  gradualMinSec: 0.13,
+  gradualMaxSec: 1.5,
+  /** A gradual window this close to a cut or flash is a busy shot next to it, not a transition. */
+  gradualTouchSec: 0.1,
   crossFadeResidual: 0.35,
+  /** A cross-fade changes the whole frame at once: per-column (and per-row) blend amounts spread at most this much. */
+  crossFadeMaxSpread: 0.35,
+  /** A join whose frames are this much blurrier than the shots around it is a blur transition (never a cross-fade). */
+  blurTransitionRatio: 1.5,
   punchMin: 1.08,
   punchMax: 1.6,
   punchResidualRatio: 0.4,
@@ -298,6 +316,95 @@ export function crossFadeFit(start: Uint8Array, end: Uint8Array, inner: Uint8Arr
   return { ok: worst / span <= M.crossFadeResidual && monotonic >= 0.8, residualRatio, monotonic };
 }
 
+/** 10th–90th percentile spread of a grey frame (small for a nearly uniform white or black frame, even with a caption). */
+export function percentileSpread(frame: Uint8Array): number {
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < frame.length; i++) hist[frame[i]!] = hist[frame[i]!]! + 1;
+  const at = (q: number) => {
+    const target = q * (frame.length - 1);
+    let acc = 0;
+    for (let v = 0; v < 256; v++) {
+      acc += hist[v]!;
+      if (acc > target) return v;
+    }
+    return 255;
+  };
+  return at(0.9) - at(0.1);
+}
+
+/** Is every frame a blend of `start` and `end` (no monotonic check; for one or two ramp frames)? True with no frames. */
+export function blendFits(start: Uint8Array, end: Uint8Array, frames: readonly Uint8Array[]): boolean {
+  const n = start.length;
+  let span = 0;
+  let norm = 0;
+  for (let i = 0; i < n; i++) {
+    const d = end[i]! - start[i]!;
+    span += Math.abs(d);
+    norm += d * d;
+  }
+  span /= n;
+  if (norm <= 0 || span < 3) return true;
+  for (const f of frames) {
+    let dot = 0;
+    for (let i = 0; i < n; i++) dot += (f[i]! - start[i]!) * (end[i]! - start[i]!);
+    const a = Math.max(0, Math.min(1, dot / norm));
+    let r = 0;
+    for (let i = 0; i < n; i++) r += Math.abs(f[i]! - (start[i]! + a * (end[i]! - start[i]!)));
+    if (r / n / span > M.crossFadeResidual) return false;
+  }
+  return true;
+}
+
+/**
+ * How unevenly a join changes the frame (design §4.3.1.3a): for inner frames about a quarter to three quarters of the
+ * way from `start` to `end`, the blend amount is estimated per column and per row; the result is the median over those
+ * frames of the larger 10th–90th percentile spread. Near 0 for a cross-fade (the whole frame changes at once), near 1
+ * for a wipe, even a soft-edged one (one side has changed, the other not yet).
+ */
+export function blendSpread(start: Uint8Array, end: Uint8Array, inner: readonly Uint8Array[], w: number, h: number): number {
+  const n = start.length;
+  let norm = 0;
+  for (let i = 0; i < n; i++) norm += (end[i]! - start[i]!) ** 2;
+  if (norm <= 0) return 0;
+  const spreads: number[] = [];
+  const spreadOf = (vals: number[]) => {
+    if (vals.length < 5) return 0;
+    const sorted = [...vals].sort((a, b) => a - b);
+    return sorted[Math.floor(0.9 * (sorted.length - 1))]! - sorted[Math.floor(0.1 * (sorted.length - 1))]!;
+  };
+  for (const f of inner) {
+    let dot = 0;
+    for (let i = 0; i < n; i++) dot += (f[i]! - start[i]!) * (end[i]! - start[i]!);
+    const a = dot / norm;
+    if (a < 0.25 || a > 0.75) continue;
+    const colNum = new Float64Array(w);
+    const colDen = new Float64Array(w);
+    const rowNum = new Float64Array(h);
+    const rowDen = new Float64Array(h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const p = y * w + x;
+        const d = end[p]! - start[p]!;
+        if (Math.abs(d) < 8) continue;
+        const num = (f[p]! - start[p]!) * d;
+        const den = d * d;
+        colNum[x] = colNum[x]! + num;
+        colDen[x] = colDen[x]! + den;
+        rowNum[y] = rowNum[y]! + num;
+        rowDen[y] = rowDen[y]! + den;
+      }
+    }
+    const alphas = (num: Float64Array, den: Float64Array, minDen: number) => {
+      const out: number[] = [];
+      for (let k = 0; k < num.length; k++) if (den[k]! >= minDen) out.push(Math.max(-0.25, Math.min(1.25, num[k]! / den[k]!)));
+      return out;
+    };
+    // A column or row needs enough difference between the shots to say how far it has changed.
+    spreads.push(Math.max(spreadOf(alphas(colNum, colDen, h * 64 * 0.2)), spreadOf(alphas(rowNum, rowDen, w * 64 * 0.2))));
+  }
+  return spreads.length ? medianOf(spreads) : 0;
+}
+
 /** Band test: is frame-to-frame change concentrated in a band of rows or columns whose centre moves one way? */
 export function movingBand(frames: Uint8Array[], w: number, h: number): { axis: 'rows' | 'cols'; direction: 'up' | 'down' | 'left' | 'right' } | null {
   const results: Array<{ axis: 'rows' | 'cols'; centroid: number }> = [];
@@ -380,19 +487,39 @@ export interface DetectionResult {
 
 /**
  * Finds flashes, cuts, punch-in jumps and gradual joins on the Pass A scores and Pass B frames (design §4.3.1.3a),
- * in that order; each frame belongs to at most one event.
+ * in that order; each frame belongs to at most one event. Every duration limit is in seconds, so detection holds at
+ * any proxy frame rate up to 60 fps.
  */
 export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps: number, signal?: AbortSignal): DetectionResult {
   const n = frames.length;
   const used = new Uint8Array(n);
   const events: DetectedEvent[] = [];
   const screens: Array<[number, number]> = [];
+  /** Screens found in the flash pass with how they were entered (to count the cut into a screen inside the video). */
+  const screenRuns: Array<{ from: number; entry: number; to: number; kind: 'white' | 'black' }> = [];
   const y = frames.map((f) => f.yavg);
   const sec = (s: number) => Math.max(1, Math.round(s * fps));
   const g = (t: number) => frameAtTime(grey, t);
   const dt = 1 / fps;
+  const w = grey.width;
+  const h = grey.height;
+  // Change per 1/30 s from the Pass B grey frames (fixed rate, so a slow cross-fade at 60 fps changes as much per step
+  // as at 30 fps; YDIF between 60 fps frames halves while sensor noise does not).
+  const greyStep = new Float64Array(grey.count);
+  for (let k = 1; k < grey.count; k++) greyStep[k] = meanAbsDiff(frameAt(grey, k - 1), frameAt(grey, k));
+  const change = frames.map((f) => greyStep[Math.min(grey.count - 1, Math.max(1, Math.round((f.t - grey.t0) * grey.fps + 1e-6)))]!);
+  /** The picture changes clearly more than usual for this part of the video (a transition, not the shot's own motion). */
+  const busy = change.map((v, i) => v >= M.gradualYdifFactor * Math.max(0.5, localMedian(change, i, sec(1.5))));
+  const busyShare = (from: number, to: number) => {
+    let c = 0;
+    let k = 0;
+    for (let q = Math.max(0, from); q <= Math.min(n - 1, to); q++, k++) if (busy[q]) c++;
+    return k ? c / k : 0;
+  };
+  const peakSpread = (k: number) => percentileSpread(g(frames[k]!.t));
 
-  // 1. Flashes and dips.
+  // 1. Flashes and dips: a nearly uniform white or black frame, entered from a steady picture or by a blend towards
+  //    the extreme. A bright or dark shot keeps its detail and is left to the cut test.
   for (let i = 1; i < n; i++) {
     if (used[i]) continue;
     if (i % 256 === 0) throwIfAborted(signal, 'Reference style');
@@ -406,11 +533,17 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     const test = kind === 'white' ? isWhite : isBlack;
     let runEnd = i;
     while (runEnd + 1 < n && test(y[runEnd + 1]!)) runEnd++;
+    let peak = i;
+    for (let k = i; k <= runEnd; k++) if (kind === 'white' ? y[k]! > y[peak]! : y[k]! < y[peak]!) peak = k;
+    const uniform = peakSpread(peak) <= M.flashUniformSpread;
     if ((runEnd - i + 1) / fps > M.screenMinSec) {
-      let s = i;
-      while (s - 1 >= 0 && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(0.5)) s--;
-      screens.push([frames[s]!.t, frames[runEnd]!.t + dt]);
-      for (let k = s; k <= runEnd; k++) used[k] = 1;
+      // A long uniform run is a title or end screen; a long bright or dark run with detail is just a shot.
+      if (uniform) {
+        let s = i;
+        while (s - 1 >= 0 && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(0.5)) s--;
+        screenRuns.push({ from: s, entry: i, to: runEnd, kind });
+        for (let k = s; k <= runEnd; k++) used[k] = 1;
+      }
       i = runEnd;
       continue;
     }
@@ -419,10 +552,25 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     const nextLevel = medianOf(y.slice(Math.min(n, runEnd + 1 + sec(0.2)), Math.min(n, runEnd + 1 + sec(0.5))));
     let e = runEnd;
     while (e + 1 < n && Math.abs(y[e + 1]! - nextLevel) >= M.flashSettle && e - s < sec(1.5)) e++;
-    let peak = i;
-    for (let k = i; k <= runEnd; k++) if (kind === 'white' ? y[k]! > y[peak]! : y[k]! < y[peak]!) peak = k;
     const before = g(frames[Math.max(0, s - 1)]!.t);
     const after = g(frames[Math.min(n - 1, e + 1)]!.t);
+    const extreme = g(frames[peak]!.t);
+    const rampIn: Uint8Array[] = [];
+    for (let k = s; k < i; k++) rampIn.push(g(frames[k]!.t));
+    const rampOut: Uint8Array[] = [];
+    for (let k = runEnd + 1; k <= e; k++) rampOut.push(g(frames[k]!.t));
+    // Uniform at its extreme, or (for a flash that does not reach full white or black) ramping over 2+ frames each way.
+    const shaped = uniform || (i - s >= 2 && e - runEnd >= 2);
+    // Reached by blending towards the extreme, not by zooming into a flat part of the picture (FFmpeg's zoomin
+    // passes through a single-colour frame that can be white).
+    const ts = frames[s]!.t;
+    const lead = scaleFit(g(ts - 3 / grey.fps), g(ts - 1 / grey.fps), w, h);
+    const zoomingIn = lead.scale >= 1.06 && lead.errorAtOne >= M.zoomMinTexture && lead.error <= M.zoomResidualRatio * lead.errorAtOne;
+    const blended = blendFits(before, extreme, rampIn) && blendFits(extreme, after, rampOut);
+    if (!shaped || zoomingIn || !blended) {
+      i = runEnd;
+      continue;
+    }
     events.push({
       kind: kind === 'white' ? 'fade_white' : 'fade_black',
       timeSec: frames[peak]!.t,
@@ -438,6 +586,7 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
   // 2. Hard cuts and 3. punch-in jumps.
   const scene = frames.map((f) => f.scene);
   const thresholds = scene.map((_, i) => Math.max(M.cutMinScore, M.cutMedianFactor * localMedian(scene, i, sec(1))));
+  const near = sec(0.1);
   for (let i = 1; i < n; i++) {
     if (used[i]) continue;
     if (i % 256 === 0) throwIfAborted(signal, 'Reference style');
@@ -447,17 +596,28 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     for (let k = Math.max(0, i - 2); k <= Math.min(n - 1, i + 2); k++) if (k !== i && scene[k]! > s) isMax = false;
     if (!isMax) continue;
     if ((scene[i - 1] ?? 0) > 0.5 * s || (scene[i + 1] ?? 0) > 0.5 * s) continue;
+    // A spike inside a short burst of change (a zoom into a flat frame, a blur) belongs to a gradual join: busy on both
+    // sides, or a weak spike followed by a burst that is over within 0.6 s (a busy shot keeps changing).
+    const busyAfter = busyShare(i + 1, i + near) >= 0.6;
+    const burstEnds = busyShare(i + sec(0.6), i + sec(1)) < 0.5;
+    if (busyAfter && (busyShare(i - near, i - 1) >= 0.6 || (s < M.cutWeakScore && burstEnds))) continue;
     const t = frames[i]!.t;
-    const a = g(t - 2 * dt);
-    const b = g(t + 2 * dt);
-    const fit = () => scaleFit(g(t - dt), g(t + dt), grey.width, grey.height, { min: 1, max: M.punchMax });
+    // Pass B steps (1/30 s), so the frames either side are different grey frames at any proxy frame rate.
+    const gs = 1 / grey.fps;
+    const a = g(t - 2 * gs);
+    const b = g(t + 2 * gs);
+    const fit = () => scaleFit(g(t - gs), g(t + gs), grey.width, grey.height, { min: 1, max: M.punchMax });
     // The picture sliding or wiping along an axis is a transition (or camera motion), not a cut.
     const moving = (['y', 'x'] as const).some((axis) => {
-      const r = shiftFit(g(t - dt), g(t + dt), grey.width, grey.height, axis, Math.round((axis === 'y' ? grey.height : grey.width) / 3));
+      const r = shiftFit(g(t - gs), g(t + gs), grey.width, grey.height, axis, Math.round((axis === 'y' ? grey.height : grey.width) / 3));
       return Math.abs(r.shift) >= 2 && r.error <= 0.5 * r.errorAtZero;
     });
     if (moving) continue;
-    const correlated = ncc(a, b) >= M.cutMaxNcc;
+    // Frames either side that still look alike rule out a cut (fast motion, a camera flash), unless they look clearly
+    // less alike than the frames within each side do (two different but similar-looking shots).
+    const across = ncc(a, b);
+    const within = Math.min(ncc(g(t - 4 * gs), a), ncc(b, g(t + 4 * gs)));
+    const correlated = across >= M.cutMaxNcc && across >= within - M.cutNccDrop;
     const f = fit();
     const punch = f.scale >= M.punchMin && f.scale <= M.punchMax && f.error <= M.punchResidualRatio * f.errorAtOne;
     if (correlated && !punch) continue;
@@ -466,8 +626,15 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
   }
 
   // 4. Gradual joins: runs where the picture keeps changing more than usual without a cut.
-  const ydif = frames.map((f) => f.ydif);
-  const active = frames.map((f, i) => !used[i] && f.scene < thresholds[i]! && ydif[i]! >= M.gradualYdifFactor * Math.max(0.5, localMedian(ydif, i, sec(1.5))));
+  // Frames with a scene spike that was not a cut (it failed the tests above) can be part of a gradual join.
+  const active = frames.map((_, i) => !used[i] && busy[i]!);
+  const blurs = frames.map((f) => f.blur);
+  const medianBlur = (from: number, to: number) => {
+    const vals: number[] = [];
+    for (let k = Math.max(0, from); k <= Math.min(n - 1, to); k++) if (blurs[k] !== null && blurs[k] !== undefined) vals.push(blurs[k]!);
+    return vals.length ? medianOf(vals) : null;
+  };
+  const touch = sec(M.gradualTouchSec);
   for (let i = 0; i < n; i++) {
     if (!active[i]) continue;
     let j = i;
@@ -479,23 +646,21 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     const len = j - i + 1;
     const start = i;
     i = j;
-    if (len < M.gradualMinFrames || len > M.gradualMaxFrames) continue;
+    if (len / fps < M.gradualMinSec - 1e-9 || len / fps > M.gradualMaxSec + 1e-9) continue;
     // A join needs a shot on each side: a window running into a cut or flash is a busy shot, not a transition.
     let touches = false;
-    for (let k = Math.max(0, start - 3); k < start; k++) if (used[k]) touches = true;
-    for (let k = j + 1; k <= Math.min(n - 1, j + 3); k++) if (used[k]) touches = true;
+    for (let k = Math.max(0, start - touch); k < start; k++) if (used[k]) touches = true;
+    for (let k = j + 1; k <= Math.min(n - 1, j + touch); k++) if (used[k]) touches = true;
     if (touches) continue;
     const tStart = frames[start]!.t;
     const tEnd = frames[j]!.t;
-    const before = g(tStart - 2 * dt);
-    const after = g(tEnd + 2 * dt);
+    const before = g(tStart - 2 / grey.fps);
+    const after = g(tEnd + 2 / grey.fps);
     if (ncc(before, after) >= 0.6) continue;
     throwIfAborted(signal, 'Reference style');
     const inner: Uint8Array[] = [];
     for (let t = tStart; t <= tEnd + 1e-6; t += 1 / grey.fps) inner.push(g(t));
     const ev: DetectedEvent = { kind: 'unclear', timeSec: (tStart + tEnd) / 2, durationSec: len / fps, from: start, to: j };
-    const w = grey.width;
-    const h = grey.height;
     const seq = [before, ...inner, after];
     const shifts = (axis: 'x' | 'y') =>
       seq.slice(1).map((f, k) => {
@@ -507,7 +672,12 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
       const neg = signs.filter((v) => v < 0).length;
       return Math.max(pos, neg) >= 3 && Math.min(pos, neg) <= 1 ? (pos > neg ? 1 : -1) : 0;
     };
-    if (crossFadeFit(before, after, inner).ok) ev.kind = 'cross_fade';
+    const blurIn = medianBlur(start, j);
+    const aroundBlurs = [...frames.slice(Math.max(0, start - sec(0.5)), start), ...frames.slice(j + 1, j + 1 + sec(0.5))].map((f) => f.blur).filter((b): b is number => b !== null);
+    const blurAround = aroundBlurs.length ? medianOf(aroundBlurs) : null;
+    const blurry = blurIn !== null && blurAround !== null && blurAround > 0 && blurIn >= M.blurTransitionRatio * blurAround;
+    // A cross-fade blends the whole frame at once: a soft-edged wipe fits a blend on average but changes one side first.
+    if (!blurry && crossFadeFit(before, after, inner).ok && blendSpread(before, after, inner, w, h) <= M.crossFadeMaxSpread) ev.kind = 'cross_fade';
     else {
       const sy = consistent(shifts('y'));
       const sx = sy === 0 ? consistent(shifts('x')) : 0;
@@ -521,18 +691,35 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
       } else if (band) {
         ev.kind = band.axis === 'cols' ? 'wipe_horizontal' : 'slide_vertical';
         ev.direction = band.direction;
-        const blurs = frames.slice(start, j + 1).map((f) => f.blur).filter((b): b is number => b !== null);
-        const around = [...frames.slice(Math.max(0, start - sec(0.5)), start), ...frames.slice(j + 1, j + 1 + sec(0.5))].map((f) => f.blur).filter((b): b is number => b !== null);
-        if (band.axis === 'cols' && len / fps <= 0.3 && blurs.length && around.length && medianOf(blurs) >= 1.8 * medianOf(around)) ev.kind = 'whip_like';
-      } else {
-        const scales = seq.slice(1).map((f, k) => scaleFit(seq[k]!, f, w, h, { min: 0.9, max: 1.12 }).scale);
-        const ups = scales.filter((s) => s >= 1.03).length;
-        const downs = scales.filter((s) => s <= 1 / 1.03).length;
-        if (Math.max(ups, downs) >= 3) ev.kind = 'zoom';
+        // Sideways movement through blurred frames is a whip (FFmpeg's blur transitions read the same way).
+        if (band.axis === 'cols' && blurry) ev.kind = 'whip_like';
+      } else if (!blurry) {
+        // A zoom: consecutive frames fit a scale change (with little error left over on textured frames), one way.
+        const scales = seq.slice(1).map((f, k) => {
+          const fit = scaleFit(seq[k]!, f, w, h);
+          return fit.errorAtOne >= M.zoomMinTexture && fit.error <= M.zoomResidualRatio * fit.errorAtOne ? fit.scale : 1;
+        });
+        const ups = scales.filter((v) => v >= 1.03).length;
+        const downs = scales.filter((v) => v <= 1 / 1.03).length;
+        if (Math.max(ups, downs) >= 3 && Math.min(ups, downs) <= Math.floor(Math.max(ups, downs) / 4)) ev.kind = 'zoom';
       }
     }
     events.push(ev);
     for (let k = start; k <= j; k++) used[k] = 1;
+  }
+
+  // Screens: only a screen at the very start or after the last join is a title or end screen; the cut (or fade) into a
+  // screen inside the video is a join, and the screen is not taken out of the shots around it.
+  for (const r of screenRuns) {
+    const startT = frames[r.from]!.t;
+    const endT = frames[r.to]!.t + dt;
+    const later = events.some((e) => e.timeSec > endT - dt / 2);
+    if (r.from <= sec(0.1) || !later) {
+      screens.push([startT, endT]);
+      continue;
+    }
+    const entryT = frames[r.entry]!.t;
+    events.push(r.from === r.entry ? { kind: 'hard', timeSec: entryT, durationSec: 0, from: r.entry, to: r.entry } : { kind: r.kind === 'white' ? 'fade_white' : 'fade_black', timeSec: entryT, durationSec: (r.entry - r.from + 1) / fps, from: r.from, to: r.entry });
   }
   events.sort((a, b) => a.timeSec - b.timeSec);
   return { events, screens };

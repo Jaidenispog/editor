@@ -194,6 +194,21 @@ function businessText(ctx: BuildContext): string | null {
 
 // ---------------------------------------------------------------- beat montage
 
+/**
+ * Shot lengths for "cut every N beats" in the beat montage, kept inside its 0.4 s–`hi` shot range: whole multiples
+ * of N (N, 2N, 4N) that fit; when N beats are longer than the montage's shots, the largest whole divisor of N that fits
+ * (so cuts still fall on the N-beat grid), with a note; no options when nothing fits (the montage's own steps apply).
+ */
+export function montageBeatSteps(everyN: number, iv: number, hi: number): { options: number[]; note: string | null } {
+  const fits = (n: number) => n * iv >= 0.4 - 1e-6 && n * iv <= hi + 1e-6;
+  const multiples = [everyN, 2 * everyN, 4 * everyN].filter(fits);
+  if (multiples.length) return { options: multiples.slice(0, 2), note: null };
+  const divisor = [4, 2, 1].filter((d) => d < everyN && everyN % d === 0).find(fits);
+  const beats = (n: number) => `${n} beat${n === 1 ? '' : 's'}`;
+  if (divisor) return { options: [divisor, 2 * divisor].filter(fits), note: `Your videos cut every ${beats(everyN)}; at this tempo that is longer than a beat montage shot, so it cuts every ${beats(divisor)} instead.` };
+  return { options: [], note: `Your videos cut every ${beats(everyN)}; that does not fit a beat montage at this tempo, so it keeps its own beat steps.` };
+}
+
 function buildBeatMontage(ctx: BuildContext): BuildResult {
   const { s, footage } = ctx;
   const all = footage.candidates;
@@ -205,11 +220,12 @@ function buildBeatMontage(ctx: BuildContext): BuildResult {
   const hi = Math.max(clamp(1.25 * s.pacing, 0.6, 2.2), s.target / 34);
   let options = [1, 2, 3, 4, 6, 8].filter((n) => n * iv >= 0.4 - 1e-6 && n * iv <= hi + 1e-6);
   if (options.length === 0) options.push(Math.max(1, Math.ceil(0.4 / iv)));
-  // "Cut every N beats" from the owner's videos: shots of N or 2N beats (2N and 4N when N beats are under 0.4 s).
+  // "Cut every N beats" from the owner's videos, fitted to the montage's 0.4 s–hi shot range (see montageBeatSteps).
   const everyN = s.styleFromVideos?.beatsPerCut ?? null;
   if (everyN) {
-    const n = everyN * iv < 0.4 - 1e-6 ? 2 * everyN : everyN;
-    options = [n, 2 * n];
+    const fitted = montageBeatSteps(everyN, iv, hi);
+    if (fitted.options.length) options = fitted.options;
+    if (fitted.note) ctx.notes.push(fitted.note);
   }
   const a = options[0]!;
   const b = options[1] ?? a;

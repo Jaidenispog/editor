@@ -5,6 +5,7 @@ import {
   DEFAULT_SETTINGS,
   STYLE_IDS,
   computeTimeline,
+  parseRevisionInstruction,
   validateEditPlan,
   type EditPlan,
   type EditingPreferences,
@@ -163,8 +164,11 @@ describe('editing style from your videos in the rules planner', () => {
 
   it('punch-in: the same shot continues with a static 1.2× zoom; never above 1.25', () => {
     let pairs = 0;
-    for (const styleId of STYLE_IDS) {
-      const segs = accepted.get(styleId)!.segments;
+    // Punch-ins need room after the shot they continue, so whether one fits depends on the footage and the length:
+    // 2-beat shots (the accepted "every 2 beats") at 15, 20 and 25 s.
+    const plans = [...STYLE_IDS.map((id) => accepted.get(id)!), ...[15, 25].flatMap((t) => STYLE_IDS.map((id) => planner.plan(inputFor(id, ACCEPTED, { targetDurationSec: t }))))];
+    for (const plan of plans) {
+      const segs = plan.segments;
       for (const s of segs) if (s.zoom) expect(Math.max(s.zoom.from, s.zoom.to)).toBeLessThanOrEqual(1.25);
       for (let i = 1; i < segs.length; i++) {
         const a = segs[i - 1]!;
@@ -235,5 +239,14 @@ describe('editing style in the AI brief', () => {
     expect(res.warnings.filter((w) => w.code === 'OFF_STYLE_TRANSITION')).toEqual([]);
     const without = validateEditPlan(plan, contextFor(input, { extraStyleTransitions: [] }));
     expect(without.warnings.some((w) => w.code === 'OFF_STYLE_TRANSITION')).toBe(true);
+  });
+});
+
+describe('beat sync precedence is the same in both planners', () => {
+  it('the AI brief puts a revision hint before the accepted editing style', () => {
+    const job = (extra: Partial<PlannerInput>) => JSON.parse(buildPlannerUserContent(inputFor('process_story', ACCEPTED, extra))[0]!.text.replace(/^Job description \(JSON\):\n/, '')) as { music: { beatSync: string } };
+    expect(job({}).music.beatSync).toBe('on');
+    expect(job({ revisionHints: { ...parseRevisionInstruction('ignore the beat') } }).music.beatSync).toBe('off');
+    expect(job({ beatSync: 'on', revisionHints: { ...parseRevisionInstruction('ignore the beat') } }).music.beatSync).toBe('on');
   });
 });

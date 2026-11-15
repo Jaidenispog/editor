@@ -19,9 +19,9 @@ import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '..
 import { fitDuration, play, startTimes, totalDuration, grow, shrink, type Draft } from './draft.js';
 import { collectFootage, type Candidate, type Footage } from './footage.js';
 import { alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
-import { ACCENT_PEAK_FRACTION, alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, isAccent, notePalette, planReveal, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
+import { ACCENT_PEAK_FRACTION, alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, isAccent, notePalette, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
 import { clamp, hashString, round, seededRandom } from './random.js';
-import { effectiveSettings, tameTransition, type EffectiveSettings } from './settings.js';
+import { beatSyncFor, effectiveSettings, tameTransition, type EffectiveSettings } from './settings.js';
 import { STYLE_BUILDERS, applyOpening, type BuildContext, type Recipe } from './styles.js';
 import { buildCaptions, resolveText } from './text.js';
 
@@ -83,12 +83,34 @@ export class RulesPlanner implements EditPlanner {
     for (let take = 0; take < 3; take++) {
       const intro = [STYLE_RATIONALE[input.styleId], ...(attempt > 0 && !base.revising ? [`Take ${attempt + 1} uses different shots and timing from the earlier takes.`] : [])];
       const s: EffectiveSettings = { ...base, attempt, notes: [...intro, ...base.notes], emphasise: [...base.emphasise], deemphasise: [...base.deemphasise] };
-      plan = buildPlan(input, s, footage);
+      plan = buildWithStyleFallback(input, s, footage);
       const isRegenerate = !s.revising && previous && attempt > 0;
       if (!isRegenerate || signature(plan) !== signature(previous)) return plan;
       attempt += 1;
     }
     return plan!;
+  }
+}
+
+/**
+ * Last resort for the owner's accepted editing style: when the edit cannot be built with it but can without it, the
+ * edit is built with each style's own timing and transitions and the plan says so; the owner's settings stay as they
+ * are. Errors that also happen without the editing style (and cancellations) are passed on unchanged.
+ */
+export function buildWithStyleFallback(
+  input: PlannerInput,
+  s: EffectiveSettings,
+  footage: Footage,
+  build: (input: PlannerInput, s: EffectiveSettings, footage: Footage) => EditPlan = buildPlan,
+): EditPlan {
+  if (!s.styleFromVideos) return build(input, s, footage);
+  const before = { notes: [...s.notes], emphasise: [...s.emphasise], deemphasise: [...s.deemphasise] };
+  try {
+    return build(input, s, footage);
+  } catch (err) {
+    if (!(err instanceof AppError) || err.code !== 'PROCESSING_FAILED') throw err;
+    const plain: EffectiveSettings = { ...s, ...before, styleFromVideos: null, notes: [...before.notes, "Your editing style could not be fitted to this footage at this length, so this version uses the style's own timing and transitions."] };
+    return build(input, plain, footage);
   }
 }
 
@@ -168,10 +190,10 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     });
   };
   retransition(drafts);
-  const fit = () =>
+  const fit = (cap?: number) =>
     fitDuration(drafts, {
-      target: s.target,
-      tolerance: Math.max(0.12, s.target * 0.015),
+      target: cap ?? s.target,
+      tolerance: cap !== undefined ? 0.05 : Math.max(0.12, s.target * 0.015),
       minSegments: recipe.minSegments,
       addFiller: makeFillerAdder(recipe),
       retransition,
@@ -194,8 +216,8 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     fullGrid = beatGrid(input.music, s.target, s.attempt, undefined, reveal.musicStartSec);
     if (grid) grid = fullGrid;
   }
-  if (reveal) applyReveal(ctx, drafts, grid ?? fullGrid, reveal);
-  else if (grid?.fromMusic && input.revealOnBeat) {
+  let landedReveal = reveal ? applyReveal(ctx, drafts, grid ?? fullGrid, reveal) : null;
+  if (!reveal && grid?.fromMusic && input.revealOnBeat) {
     if (landRevealOnBeat(drafts, grid)) ctx.notes.push('The first shot of the finished cut starts on a beat.');
     else ctx.notes.push('The reveal could not be moved onto a beat with this footage, so it stays where the cut works best.');
   }
@@ -246,7 +268,12 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   };
 
   let lastErrors: PlanIssue[] = [];
+  // The plan only says the finished look lands on the biggest lift while it still does.
+  const recheckReveal = () => {
+    if (landedReveal && !recheckRevealNote(ctx, drafts, landedReveal)) landedReveal = null;
+  };
   for (let round = 0; round < 8; round++) {
+    recheckReveal();
     const plan = compose(ctx, drafts, textFor, state, previous, grid);
     const res = validateEditPlan(plan, vctx);
     if (res.ok && res.plan) return res.plan;
@@ -254,6 +281,7 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     if (!repair(ctx, drafts, plan, res.errors, state, fit, retransition)) break;
   }
   // Last chance: accept a plan that is a little off the ±5 % aim but inside the window the worker allows.
+  recheckReveal();
   const plan = compose(ctx, drafts, textFor, state, previous, grid);
   const slack = Math.max(2, s.target * 0.12);
   const loose = validateEditPlan(plan, { ...vctx, durationBounds: { min: s.target - slack, max: s.target + slack } });
@@ -596,15 +624,6 @@ function colourFor(s: EffectiveSettings, previous: EditPlan | null): EditPlan['c
   return previous?.colourPreset ?? s.colourPreset;
 }
 
-/** The beat option for this plan: the Sound panel's choice, else a revision's "cut to the beat" / "ignore the beat". */
-function beatSyncFor(input: PlannerInput, s: EffectiveSettings): 'auto' | 'on' | 'off' {
-  if (input.beatSync && input.beatSync !== 'auto') return input.beatSync;
-  const hinted = s.revisionHints?.beatSync;
-  if (hinted === 'on' || hinted === 'off') return hinted;
-  // The owner's accepted style applies when neither the form nor the Sound panel nor a revision chose.
-  return s.styleFromVideos?.beatSync ?? 'auto';
-}
-
 /** A factual one-paragraph description of the edit that was actually built (max 280 characters). */
 function describe(ctx: BuildContext, drafts: Draft[], total: number, musicTitle: string | null, originalSound: boolean): string {
   const first = drafts[0];
@@ -637,11 +656,13 @@ function repair(
   plan: EditPlan,
   errors: PlanIssue[],
   state: ComposeState,
-  fit: () => void,
+  fit: (cap?: number) => void,
   retransition: (list: Draft[]) => void,
 ): boolean {
   let changed = false;
   let refit = false;
+  /** A shorter length to fit to (the music ends before the edit and its start cannot move earlier). */
+  let cap: number | undefined;
   const indexOf = (e: PlanIssue) => {
     const m = e.path?.match(/^(segments|textOverlays|captions)\.(\d+)/);
     return m ? Number(m[2]) : -1;
@@ -698,6 +719,13 @@ function repair(
             state.musicOffset = next;
             changed = true;
           } else {
+            // The fit's tolerance can land a little past the end of a track the target was trimmed to: fit to
+            // what the music leaves instead (the validator's length window still applies).
+            const room = music.durationSec - state.musicOffset - 0.15;
+            if (total > room && room > 0) {
+              cap = room - 0.05;
+              changed = true;
+            }
             refit = true;
           }
         }
@@ -728,6 +756,6 @@ function repair(
     changed = true;
     refit = true;
   }
-  if (refit) fit();
+  if (refit) fit(cap);
   return changed;
 }

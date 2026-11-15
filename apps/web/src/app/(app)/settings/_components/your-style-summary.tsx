@@ -165,7 +165,7 @@ export function YourStyleSummary({ canEdit }: { canEdit: boolean }) {
     setBusy('reset');
     try {
       await apiRequest('/api/references/summary/reset', { method: 'POST' });
-      toast.success("Back to each style's own", 'Length, pace, colour and text stay as they are.');
+      toast.success("Back to each style's own", 'Length, pace, colour, text and the Transitions setting stay as they are.');
       setConfirm(null);
       load();
     } catch (err) {
@@ -320,7 +320,7 @@ export function YourStyleSummary({ canEdit }: { canEdit: boolean }) {
         open={confirm === 'reset'}
         onClose={() => setConfirm(null)}
         title="Go back to each style's own?"
-        description="Transitions, beat, reveal, zoom and music matching go back to each style's own. Length, pace, colour and text stay as they are."
+        description="Transitions, beat, reveal, zoom and music matching go back to each style's own. Length, pace, colour and text stay as they are. If accepting your style turned on varied (bolder) transitions, that stays on too; change it under Transitions in your editing preferences."
         footer={
           <>
             <Button variant="ghost" onClick={() => setConfirm(null)}>

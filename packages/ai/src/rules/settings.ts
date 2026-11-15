@@ -186,6 +186,17 @@ export function effectiveSettings(input: PlannerInput): EffectiveSettings {
 }
 
 /**
+ * The beat option for this plan (both planners): the Sound panel's choice, else a revision's "cut to the beat" /
+ * "ignore the beat", else the owner's accepted editing style, else automatic.
+ */
+export function beatSyncFor(input: Pick<PlannerInput, 'beatSync'>, s: Pick<EffectiveSettings, 'revisionHints' | 'styleFromVideos'>): 'auto' | 'on' | 'off' {
+  if (input.beatSync && input.beatSync !== 'auto') return input.beatSync;
+  const hinted = s.revisionHints?.beatSync;
+  if (hinted === 'on' || hinted === 'off') return hinted;
+  return s.styleFromVideos?.beatSync ?? 'auto';
+}
+
+/**
  * Picks a transition for this style and take from a preference list, honouring calm/none settings.
  * Returns null for a hard cut.
  */

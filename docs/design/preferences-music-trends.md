@@ -323,9 +323,15 @@ Detected in this order on the measured span; each frame belongs to at most one e
 1. **Flashes and dips (white/black).** Baseline `Yb` = median YAVG of the 0.5 s before the event. A white event is a
    run of frames with YAVG ≥ max(200, Yb + 60); a black event a run with YAVG ≤ 30 and `Yb − YAVG ≥ 0.5 × Yb`.
    The event spans from the first frame where |YAVG − Yb| ≥ 15 to the frame where YAVG settles within 15 of the
-   next shot's level (capped at 1.5 s); its time is the frame of peak (white) or trough (black) luma. A run at the
-   extreme for more than 0.6 s is a black/white screen (title card, end screen), not a transition, and is not
-   counted. Kind: `fade_white` / `fade_black`. If NCC(frame before, frame after) ≥ 0.6, the flash happened inside
+   next shot's level (capped at 1.5 s); its time is the frame of peak (white) or trough (black) luma. Brightness
+   alone is not enough: the extreme frame must be nearly uniform (10th–90th percentile spread of the Pass B grey frame
+   ≤ 24 levels, so a caption does not matter), or the brightness must ramp over ≥ 2 frames each way; the ramp frames
+   must be blends towards the extreme, and the picture must not be zooming into it (FFmpeg's `zoomin` passes through
+   a single-colour frame). Otherwise the frames go to the cut test: a short bright or dark *shot* between two hard
+   cuts is two cuts, not a flash. A uniform run at the extreme for more than 0.6 s is a black/white screen; only a
+   screen at the very start or after the last join is a title or end screen and left out of the shots — the cut (or
+   fade) into a screen inside the video counts as a join. A long bright or dark run with picture detail is just a
+   shot. Kind: `fade_white` / `fade_black`. If NCC(frame before, frame after) ≥ 0.6, the flash happened inside
    one shot (`inShot`); it maps the same way, because the renderer can only place it at a join.
    *Prototype*: an `xfade=fadewhite` of 0.2 s read YAVG 125 → 244 then back over 5 frames; `fadeblack` 0.3 s read
    125 → 5. FFmpeg's `fadewhite`/`fadeblack` reach their extreme about 20 % into the transition (measured at 0.2,
@@ -335,28 +341,38 @@ Detected in this order on the measured span; each frame belongs to at most one e
    NCC(frame t−2, frame t+2) < 0.5 (rules out fast motion and camera flashes). *Prototype*: real cuts scored
    0.26–0.91; one scored 0.264, below `detectScenes`' default 0.3, which is why v2 does not reuse that threshold.
    A busy single shot (Game-of-Life pattern) reached 0.27 on the frame after a cut, rejected by the ±2-frame
-   local-maximum rule.
+   local-maximum rule. A spike inside a short burst of change (busy on both sides, or a spike below 0.35 followed by
+   a burst) belongs to a gradual join and is left for step 4 (FFmpeg's `zoomin` and blur transitions both have one).
 3. **Punch-in jumps.** A cut where the scale fit (§4.3.1.3d step 2) between the frame before and the frame
    after finds `s` in 1.08–1.6 with residual ≤ 0.4 × the unscaled residual is reclassified `punch_in`: the same
    shot, cropped in. It still counts as a cut for pace and beat sync, but not as a transition; it feeds the zoom
    signal.
-4. **Gradual joins.** Candidate windows are runs of 4–45 frames (0.13–1.5 s, the `TransitionSchema` range) where
-   scene score stays below the cut threshold but YDIF ≥ 1.6 × its median over ±1.5 s for ≥ 80 % of the frames, and
-   the frames just outside the window differ (NCC < 0.6). Each window is then tested in turn:
+4. **Gradual joins.** Candidate windows are runs of 0.13–1.5 s (the `TransitionSchema` range; limits in seconds so
+   they hold at any proxy frame rate up to 60 fps) of frames not taken by steps 1–3 where the Pass B grey picture
+   changes per 1/30 s by ≥ 1.6 × its median over ±1.5 s (a fixed step: YDIF between 60 fps frames halves while sensor
+   noise does not, so a 1 s cross-fade vanished at 60 fps), more than 0.1 s from a cut or flash, and the frames just
+   outside the window differ (NCC < 0.6). Each window is then tested in turn:
    - **Cross-fade** (`cross_fade`): every inner frame fits `F ≈ (1 − α)·F_start + α·F_end` with residual ≤
-     0.35 × the mean |F_end − F_start|, and α rises with time (Spearman ≥ 0.8). *Prototype*: a 0.5 s join kept
+     0.35 × the mean |F_end − F_start|, α rises with time (Spearman ≥ 0.8), the whole frame changes at once (α
+     estimated per column and per row spreads ≤ 0.35 between the 10th and 90th percentile; a soft-edged wipe such
+     as `smoothleft` fits a blend on average but measured a spread of about 0.8), and the frames are not blurrier
+     than the shots around them (median `lavfi.blur` < 1.5 × the neighbours: a blur transition is never a
+     cross-fade). *Prototype*: a 0.5 s join kept
      scene scores ≤ 0.03 while YDIF sat at 1.9 × baseline and YAVG ramped linearly between the two shots' levels.
    - **Slide/wipe**: per-frame change concentrates in a band (≥ 55 % of the |ΔF| in the top 30 % of rows or
      columns) whose centroid moves the same way for ≥ 3 frames. Rows → `slide_vertical` with direction up/down;
      columns → `wipe_horizontal` with direction left/right. *Prototype*: an `xfade=slideup` of 0.3 s kept scene
      scores ≤ 0.09 while YDIF ramped from 11 to 37.
-   - **Zoom transition** (`zoom`): the frame-to-frame scale fit is ≥ 1.03 per frame in the same direction for ≥ 3
-     frames.
-   - **Whip-like** (`whip_like`): `lavfi.blur` ≥ 1.8 × the median of the neighbouring shots for ≤ 0.3 s together with
-     a moving band; direction from the band.
+   - **Zoom transition** (`zoom`): on frames that are not blurrier than the neighbours, the frame-to-frame scale fit
+     counts only where it explains the change (residual ≤ 0.5 × the unscaled residual on a textured frame, as for
+     zooms in shots); ≥ 3 such pairs at ≥ 1.03 (or ≤ 1/1.03) and at most one in four the other way.
+   - **Whip-like** (`whip_like`): a moving band of columns through frames with median `lavfi.blur` ≥ 1.5 × the
+     neighbouring shots; direction from the band.
    - Otherwise `unclear` (counted, never mapped).
-   Known limit: FFmpeg's own `xfade=zoomin` passes through a dark frame (YAVG 39 in the prototype), so it reads as
-   a dip to black. That matters only for round-trip tests, which therefore do not use `zoomin` (§4.3.1.10).
+   Known limits: FFmpeg's `zoomin` zooms the outgoing shot into its centre pixel, so out of a flat or noise-like
+   shot (a smooth gradient, a cellular pattern) the zoom cannot be seen and the join reads as a cross-fade from a
+   flat colour or as `unclear`; a blur of a smooth gradient is equally invisible. The edge fixtures use textured
+   outgoing shots (§4.3.1.10).
 
 **Mapping of measured kinds to the renderer's vocabulary:**
 
@@ -633,10 +649,13 @@ effective preferences; with the defaults every plan is byte-identical to today's
   transition starts at `beat − 0.2 × duration`, so its white or black peak lands on the beat (§4.3.1.3a), and the
   segments either side are lengthened so the total length stays the same. `audio.beatAlignment.alignedCutTimesSec`
   reports the peak time.
-- **Beat sync**: `PlannerInput.beatSync` defaults to `editingStyle.beatSync` when neither the form nor the Sound
-  panel set it. `on` runs `snapCutsToBeats` for styles that do not cut on the beat by themselves (existing).
-- **Cut every N beats**: the beat montage's beats-per-shot options become [N, 2N] (or [2N, 4N] when N beats last
-  under 0.4 s); other styles round each shot to a whole number of N-beat steps before snapping, inside their own
+- **Beat sync**: `PlannerInput.beatSync` defaults to `editingStyle.beatSync` when neither the form, the Sound
+  panel nor a revision ("ignore the beat") set it — the same order in the rules planner and the AI brief
+  (`beatSyncFor`). `on` runs `snapCutsToBeats` for styles that do not cut on the beat by themselves (existing).
+- **Cut every N beats**: the beat montage's beats-per-shot options become the whole multiples of N (N, 2N, 4N) that
+  fit its 0.4 s–`hi` shot range; when N beats are longer than a montage shot (every 8 beats at 120 BPM is 4 s), the
+  largest whole divisor of N that fits is used, with a plan note, and when nothing fits the montage keeps its own
+  steps (note). Other styles round each shot to a whole number of N-beat steps before snapping, inside their own
   `minShotSec`–`maxShotSec` (the style's range wins; the plan note says so).
 - **Reveal on the strongest beat**: `strongestBeat(track)` runs the §4.3.1.3c drop function on the track's stored
   energy curve and beat grid. When the owner left the music start on automatic, the music start is chosen so this
@@ -651,6 +670,12 @@ effective preferences; with the defaults every plan is byte-identical to today's
   remains. Scale is capped at `min(scale, 1.25, max(1.10, sourceShortSide ÷ 1080))` so exports do not soften;
   the AI prompt's "subtle zooms (1.0–1.1)" line gains "or up to the accepted punch-in scale".
 - **Music fit**: no planner effect; ranking only (§4.3.1.7).
+- **Never worse than the defaults**: when an edit cannot be built with the accepted editing style but can without it,
+  it is built with each style's own timing and transitions and the plan says so ("Your editing style could not be
+  fitted to this footage at this length…"); the owner's settings are not changed. The "finished look lands on the
+  biggest lift" note is rechecked on the final plan and replaced when later steps moved the reveal more than 0.1 s
+  away. A planner test sweeps every N, cross-fades of 0.3–1 s with no straight cuts and 15/30/45 s across the five
+  styles and four music cases.
 
 Each style keeps its character, so the five edits stay different:
 
@@ -758,6 +783,7 @@ offsets. The click track is
 | R9 talking | hard cuts over the speech-like signal from `packages/media/test/analysis-fixtures.ts` | no musical beat | beat `not_measured` (`mostly_speech` or `no_clear_beat`), never "off the beat" |
 | R10 124 BPM, every beat | a cut on each beat of a 124 BPM click for 15 s (beats not on the frame grid) | one cut per beat (≈ 31) | tempo 124 ± 2; `within1Frame` ≥ 85 %; `beatsPerCut` 1 |
 | R11 random cuts | 15 cuts at seeded random times over the 120 BPM click | chance alignment | beat `reportable: false`; no beat-sync suggestion |
+| X1–X8 review edge cases | dark and bright shots of 2 s between hard cuts; 0.3 s bright inserts between hard cuts; `fadeblack` 0.4 s; `zoomin` 0.4 s out of textured shots; `hblur` 0.4 s; `smoothleft/up/right/down`; 0.5 s and 1 s cross-fades with hard cuts on the 120 BPM beat at 60 and 25 fps | flash and screen rules, zoom gate, blur transitions, soft wipes, frame-rate independence | X1 5 hard, no flash or screen, 6 shots; X2 4 hard, no flash; X3 5 dips; X4 ≥ 4 of 5 zoom, no flash or cross-fade; X5 no zoom or cross-fade; X6 ≥ 4 of 5 right axis and direction, no cross-fade; X7/X8 ≥ 3 of 4 cross-fades within 0.15 s of their length (a 1 s one among them), cuts within a frame, beat 120 ± 1.5 BPM with ≥ 85 % of cuts within 80 ms |
 
 **Unit (vitest, no FFmpeg)**: `packages/media` frame maths on hand-built metric arrays and tiny frames (cut rule
 edges, flash run lengths, linearity residual, band centroid direction, scale fit on a synthetic 72 × 128 frame

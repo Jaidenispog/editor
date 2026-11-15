@@ -6,26 +6,28 @@ import { fileURLToPath } from 'node:url';
 /**
  * SYNTHETIC reference fixtures with known ground truth (preferences design §4.3.1.10). Generated at test time with
  * FFmpeg `lavfi` sources only; nothing is committed and nothing is ever seeded into a development or preview database.
- * 540 × 960, 30 fps, 48 kHz audio; every frame carries a small "SYNTHETIC TEST CLIP" label; files are named
+ * 540 × 960, 30 fps unless a spec sets `fps` (the 60 and 25 fps edge cases), 48 kHz audio; every frame carries a small "SYNTHETIC TEST CLIP" label; files are named
  * `synthetic-*.mp4` with a ground-truth JSON beside each.
  */
 
 const FONT = fileURLToPath(new URL('../../../../assets/fonts/Inter-Regular.otf', import.meta.url));
 export const FPS = 30;
+const DEFAULT_FPS = FPS;
 const W = 540;
 const H = 960;
 
 /** Eight visually different sources (design §4.3.1.10), each with temporal noise and a hue offset. */
-const SOURCES = [
-  `testsrc2=s=${W}x${H}:r=${FPS}`,
-  `mandelbrot=s=${W}x${H}:r=${FPS}:end_pts=1000000`,
-  `cellauto=s=${W}x${H}:r=${FPS}:rule=110:scroll=0:seed=3`,
-  `smptebars=s=${W}x${H}:r=${FPS}`,
-  `gradients=s=${W}x${H}:r=${FPS}:speed=0.02:seed=7`,
-  `life=s=${W}x${H}:r=${FPS}:mold=10:ratio=0.3:seed=5:life_color=#ff8000:death_color=#002040`,
-  `rgbtestsrc=s=${W}x${H}:r=${FPS}`,
-  `testsrc=s=${W}x${H}:r=${FPS}`,
-] as const;
+const sourcesAt = (fps: number) =>
+  [
+    `testsrc2=s=${W}x${H}:r=${fps}`,
+    `mandelbrot=s=${W}x${H}:r=${fps}:end_pts=1000000`,
+    `cellauto=s=${W}x${H}:r=${fps}:rule=110:scroll=0:seed=3`,
+    `smptebars=s=${W}x${H}:r=${fps}`,
+    `gradients=s=${W}x${H}:r=${fps}:speed=0.02:seed=7`,
+    `life=s=${W}x${H}:r=${fps}:mold=10:ratio=0.3:seed=5:life_color=#ff8000:death_color=#002040`,
+    `rgbtestsrc=s=${W}x${H}:r=${fps}`,
+    `testsrc=s=${W}x${H}:r=${fps}`,
+  ] as const;
 
 /** Click track; `bpm` sets the beat, `gain` an optional level expression of t. */
 export function clickTrack(bpm = 120, gain = '1'): string {
@@ -62,19 +64,20 @@ export interface FixtureSpec {
   totalSec: number;
   audio: string | null;
   truth: Record<string, unknown>;
+  /** Frame rate of the whole fixture (default 30). */
+  fps?: number;
 }
 
-const frames = (sec: number) => Math.round(sec * FPS);
-
-function shotInput(s: ShotSpec, lenFrames: number, index: number): { args: string[]; chain: string } {
+function shotInput(s: ShotSpec, lenFrames: number, index: number, fps: number): { args: string[]; chain: string } {
   const noise = s.noise ?? 4;
   const hue = s.hue ?? (index * 47) % 360;
   if (s.still) {
-    return { args: ['-loop', '1', '-framerate', String(FPS), '-t', ((lenFrames + 2) / FPS).toFixed(4), '-i', s.still], chain: `${s.filter ? `${s.filter},` : ''}scale=${W}:${H},setsar=1` };
+    return { args: ['-loop', '1', '-framerate', String(fps), '-t', ((lenFrames + 2) / fps).toFixed(4), '-i', s.still], chain: `${s.filter ? `${s.filter},` : ''}scale=${W}:${H},setsar=1` };
   }
-  const src = s.lavfi ?? SOURCES[(s.source ?? index) % SOURCES.length]!;
+  const sources = sourcesAt(fps);
+  const src = s.lavfi ?? sources[(s.source ?? index) % sources.length]!;
   return {
-    args: ['-f', 'lavfi', '-t', ((lenFrames + 2) / FPS).toFixed(4), '-i', src],
+    args: ['-f', 'lavfi', '-t', ((lenFrames + 2) / fps).toFixed(4), '-i', src],
     chain: `${s.filter ? `${s.filter},` : ''}scale=${W}:${H},setsar=1,hue=h=${hue},noise=alls=${noise}:allf=t`,
   };
 }
@@ -86,6 +89,8 @@ function shotInput(s: ShotSpec, lenFrames: number, index: number): { args: strin
 export async function buildFixture(dir: string, spec: FixtureSpec): Promise<string> {
   await mkdir(dir, { recursive: true });
   const file = path.join(dir, `synthetic-${spec.name}.mp4`);
+  const FPS = spec.fps ?? DEFAULT_FPS;
+  const frames = (sec: number) => Math.round(sec * FPS);
   const n = spec.shots.length;
   const startOf = (j: number) => (j === 0 ? 0 : spec.joins[j - 1]!.atSec);
   const endOf = (j: number) => {
@@ -97,7 +102,7 @@ export async function buildFixture(dir: string, spec: FixtureSpec): Promise<stri
   const graph: string[] = [];
   spec.shots.forEach((s, j) => {
     const len = frames(endOf(j)) - frames(startOf(j));
-    const input = shotInput(s, len, j);
+    const input = shotInput(s, len, j, FPS);
     args.push(...input.args);
     graph.push(`[${j}:v]${input.chain},format=yuv420p,fps=${FPS},trim=end_frame=${len},setpts=PTS-STARTPTS,settb=1/${FPS}[s${j}]`);
   });
@@ -260,4 +265,65 @@ export async function zoomFixture(dir: string): Promise<{ file: string; truthPus
   const b = 2.9;
   const truthPushScale = z(a + 0.85 * (b - a)) / z(a + 0.15 * (b - a));
   return { file: await buildFixture(dir, spec), truthPushScale };
+}
+
+/**
+ * Edge cases from review (all SYNTHETIC, ground truth beside each): bright and dark shots joined by hard cuts (not
+ * flashes or screens), dips to black, FFmpeg's zoomin, a horizontal blur, soft-edged wipes and cross-fades at 60 and
+ * 25 fps with hard cuts on the beat.
+ */
+export function edgeFixtureSpecs(): Record<string, FixtureSpec> {
+  const shots = (count: number) => Array.from({ length: count }, (_, i): ShotSpec => ({ source: i }));
+  const xfades = (transition: string | string[], times: number[], durationSec: number): JoinSpec[] =>
+    times.map((t, i): JoinSpec => ({ type: 'xfade', transition: Array.isArray(transition) ? transition[i % transition.length]! : transition, atSec: t, durationSec }));
+  // Hard cuts on the 120 BPM beat with 1 s and 0.5 s cross-fades between steady, clearly different sources.
+  const mixed: JoinSpec[] = [
+    ...cuts([1, 2, 3]),
+    { type: 'xfade', transition: 'fade', atSec: 4, durationSec: 1 },
+    ...cuts([6, 7]),
+    { type: 'xfade', transition: 'fade', atSec: 8, durationSec: 0.5 },
+    ...cuts([9.5, 10.5, 11.5]),
+    { type: 'xfade', transition: 'fade', atSec: 12.5, durationSec: 1 },
+    ...cuts([14.5, 15.5]),
+    { type: 'xfade', transition: 'fade', atSec: 16.5, durationSec: 0.5 },
+    ...cuts([18, 19]),
+  ];
+  const mixedShots = Array.from({ length: mixed.length + 1 }, (_, i): ShotSpec => ({ source: [0, 1, 3, 4, 6, 7][i % 6] }));
+  const mixedTruth = {
+    cuts: [1, 2, 3, 6, 7, 9.5, 10.5, 11.5, 14.5, 15.5, 18, 19],
+    crossFades: [{ atSec: 4, durationSec: 1 }, { atSec: 8, durationSec: 0.5 }, { atSec: 12.5, durationSec: 1 }, { atSec: 16.5, durationSec: 0.5 }],
+    bpm: 120,
+  };
+  const textured = [0, 1, 3, 7, 0, 2].map((source): ShotSpec => ({ source }));
+  return {
+    x1: {
+      name: 'x1-dark-and-bright-shots',
+      shots: [{ source: 0 }, { source: 7, filter: 'eq=brightness=-0.55' }, { source: 2 }, { source: 3, filter: 'eq=brightness=0.6' }, { source: 1 }, { source: 6 }],
+      joins: cuts([2, 4, 6, 8, 10]),
+      totalSec: 12,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4, 6, 8, 10], flashes: 0, screens: 0 },
+    },
+    x2: {
+      name: 'x2-bright-inserts',
+      shots: [{ source: 0 }, { source: 1, filter: 'eq=brightness=0.5' }, { source: 2 }, { source: 3, filter: 'eq=brightness=0.5' }, { source: 4 }],
+      joins: cuts([2, 2.3, 5, 5.3]),
+      totalSec: 8,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 2.3, 5, 5.3], flashes: 0 },
+    },
+    x3: { name: 'x3-dips-to-black', shots: shots(6), joins: xfades('fadeblack', [2, 4, 6, 8, 10], 0.4), totalSec: 12.4, audio: PINK_NOISE, truth: { dips: 5, durationSec: 0.4 } },
+    x4: { name: 'x4-zoomin', shots: textured, joins: xfades('zoomin', [2, 4, 6, 8, 10], 0.4), totalSec: 12.4, audio: PINK_NOISE, truth: { zooms: 5, flashes: 0 } },
+    x5: { name: 'x5-horizontal-blur', shots: textured, joins: xfades('hblur', [2, 4, 6, 8, 10], 0.4), totalSec: 12.4, audio: PINK_NOISE, truth: { zooms: 0, crossFades: 0 } },
+    x6: {
+      name: 'x6-soft-wipes',
+      shots: [0, 3, 1, 6, 7, 4].map((source) => ({ source })),
+      joins: xfades(['smoothleft', 'smoothup', 'smoothright', 'smoothdown', 'smoothleft'], [2, 4, 6, 8, 10], 0.4),
+      totalSec: 12.4,
+      audio: PINK_NOISE,
+      truth: { motion: [{ axis: 'x', direction: 'left' }, { axis: 'y', direction: 'up' }, { axis: 'x', direction: 'right' }, { axis: 'y', direction: 'down' }, { axis: 'x', direction: 'left' }] },
+    },
+    x7: { name: 'x7-cross-fades-and-beat-cuts-60fps', shots: mixedShots, joins: mixed, totalSec: 20, audio: clickTrack(120), truth: mixedTruth, fps: 60 },
+    x8: { name: 'x8-cross-fades-and-beat-cuts-25fps', shots: mixedShots, joins: mixed, totalSec: 20, audio: clickTrack(120), truth: mixedTruth, fps: 25 },
+  };
 }

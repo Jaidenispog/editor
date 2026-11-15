@@ -155,6 +155,8 @@ export async function handleReferenceAnalyse(ctx: WorkerContext, run: TrackedRun
   if (!profile) {
     if (!asset.analysis || !asset.proxyKey) throw new AppError('PROCESSING_FAILED', 'This reference video has not finished processing.');
     const tmp = await createJobTempDir(ctx.tmpRoot, run.jobId);
+    // Step-message writes started while measuring; always settled before any later status write.
+    const statusWrites: Array<Promise<unknown>> = [];
     try {
       await run.progress(0.1, 'Measuring style');
       const proxyPath = path.join(tmp, 'proxy.mp4');
@@ -166,7 +168,6 @@ export async function handleReferenceAnalyse(ctx: WorkerContext, run: TrackedRun
       await run.progress(0.2, 'Measuring transitions');
       const proxyProbe = await probeMedia(proxyPath, ctx.env.FFPROBE_PATH);
       let lastMessage = '';
-      const statusWrites: Array<Promise<unknown>> = [];
       const measured = await measureReferenceStyle(proxyPath, {
         probe: proxyProbe,
         speechLikely: asset.analysis.audio.speechLikely,
@@ -221,6 +222,8 @@ export async function handleReferenceAnalyse(ctx: WorkerContext, run: TrackedRun
       );
       await set({ referenceProfile: profile, status: 'ready', statusMessage: describeReferenceProfile(profile) });
     } catch (err) {
+      // A late "Measuring the beat" write must not land after the stopped/cancelled message.
+      await Promise.allSettled(statusWrites);
       await markReferenceStopped(ctx, run, asset.id, err);
       throw err;
     } finally {

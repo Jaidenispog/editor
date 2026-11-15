@@ -5,17 +5,20 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CancelledError, paletteFromCounts, type ReferenceStyleSignals } from '@studio/core';
 import { probeMedia } from '../src/ffprobe.js';
 import {
+  blendFits,
+  blendSpread,
   crossFadeFit,
   measureReferenceStyle,
   movingBand,
   ncc,
   parseFrameScores,
+  percentileSpread,
   scaleFit,
   shiftFit,
   type ReferenceStyleMeasurement,
 } from '../src/analysis/reference-style.js';
 import { hasFfmpeg } from './analysis-fixtures.js';
-import { buildFixture, fixtureSpecs, zoomFixture, type FixtureSpec } from './fixtures/make-reference-fixtures.js';
+import { buildFixture, edgeFixtureSpecs, fixtureSpecs, zoomFixture, type FixtureSpec } from './fixtures/make-reference-fixtures.js';
 
 const W = 72;
 const H = 128;
@@ -88,6 +91,32 @@ describe('reference style frame maths (no FFmpeg)', () => {
     expect(ncc(a, a.map((v) => 255 - v))).toBeCloseTo(-1, 6);
   });
 
+  it('tells a soft-edged wipe from a cross-fade by how evenly the frame changes', () => {
+    const a = texture(1);
+    const b = texture(40);
+    const blend = (alpha: number) => a.map((v, i) => Math.round(v + alpha * (b[i]! - v)));
+    // A smooth wipe: the blend amount ramps across a soft edge 1/3 of the frame wide, moving right to left.
+    const soft = (k: number) => a.map((v, i) => { const x = i % W; const edge = W * (1 - k / 6); const alpha = Math.min(1, Math.max(0, (x - edge) / (W / 3) + 0.5)); return Math.round(v + alpha * (b[i]! - v)); });
+    const fades = [0.2, 0.4, 0.6, 0.8].map(blend);
+    const wipes = [1, 2, 3, 4, 5].map(soft);
+    expect(blendSpread(a, b, fades, W, H)).toBeLessThan(0.1);
+    expect(blendSpread(a, b, wipes, W, H)).toBeGreaterThan(0.5);
+  });
+
+  it('measures how uniform a frame is and whether ramp frames are blends', () => {
+    const white = new Uint8Array(W * H).fill(250);
+    // A caption box in the lower part does not stop a white frame being uniform.
+    for (let y = H - 10; y < H - 2; y++) for (let x = 5; x < 40; x++) white[y * W + x] = 10;
+    expect(percentileSpread(white)).toBeLessThanOrEqual(5);
+    const bright = texture(2).map((v) => Math.min(255, v + 110));
+    expect(percentileSpread(bright)).toBeGreaterThan(24);
+    const a = texture(1);
+    const b = texture(40);
+    expect(blendFits(a, white, [a.map((v, i) => Math.round(v + 0.5 * (white[i]! - v)))])).toBe(true);
+    expect(blendFits(a, white, [b])).toBe(false);
+    expect(blendFits(a, white, [])).toBe(true);
+  });
+
   it('finds a vertical shift (content moving up)', () => {
     const a = texture(3);
     const up = new Uint8Array(W * H);
@@ -126,6 +155,11 @@ describe.skipIf(!ffmpeg)('reference style on SYNTHETIC fixtures (FFmpeg)', () =>
     await measure('r4', zoom.file);
     const noAudio: FixtureSpec = { ...specs['r1']!, name: 'r1-no-audio', audio: null };
     await measure('silent', await buildFixture(dir, noAudio));
+    const edge = edgeFixtureSpecs();
+    const edgeKeys = Object.keys(edge);
+    for (let i = 0; i < edgeKeys.length; i += 3) {
+      await Promise.all(edgeKeys.slice(i, i + 3).map(async (key) => measure(key, await buildFixture(dir, edge[key]!))));
+    }
   }, 600_000);
 
   afterAll(async () => {
@@ -262,6 +296,74 @@ describe.skipIf(!ffmpeg)('reference style on SYNTHETIC fixtures (FFmpeg)', () =>
     expect(s.music.status).toBe('not_measured');
     expect(s.drop.status).toBe('not_measured');
     expect(count('silent', 'hard')).toBeGreaterThanOrEqual(14);
+  });
+
+  it('X1: dark and bright shots joined by hard cuts are cuts (not flashes or screens), and shots keep their length', () => {
+    const truth = truths.get('x1')!['cuts'] as number[];
+    expect(count('x1', 'hard')).toBe(5);
+    expect(count('x1', 'fade_white') + count('x1', 'fade_black')).toBe(0);
+    expect(results.get('x1')!.details.screens).toEqual([]);
+    for (const t of truth) expect(results.get('x1')!.details.events.some((e) => e.kind === 'hard' && Math.abs(e.timeSec - t) <= 1 / 30 + 1e-6)).toBe(true);
+    expect(sig('x1').shots.count).toBe(6);
+  });
+
+  it('X2: a short bright insert between two hard cuts is two cuts, not a white flash', () => {
+    expect(count('x2', 'fade_white')).toBe(0);
+    expect(count('x2', 'hard')).toBe(4);
+  });
+
+  it('X3: dips to black are read as dips', () => {
+    expect(count('x3', 'fade_black')).toBe(5);
+    expect(Math.abs(sig('x3').transitions.flashMedianSec! - 0.4)).toBeLessThanOrEqual(0.1);
+  });
+
+  it("X4: FFmpeg's zoomin is a zoom (4 or 5 of 5) and never a white flash", () => {
+    expect(count('x4', 'zoom')).toBeGreaterThanOrEqual(4);
+    expect(count('x4', 'fade_white')).toBe(0);
+    expect(count('x4', 'cross_fade')).toBe(0);
+  });
+
+  it('X5: a horizontal blur transition is neither a zoom nor a cross-fade', () => {
+    expect(count('x5', 'zoom')).toBe(0);
+    expect(count('x5', 'cross_fade')).toBe(0);
+  });
+
+  it('X6: soft-edged wipes keep their axis and direction and are never cross-fades', () => {
+    const truth = truths.get('x6')!['motion'] as Array<{ axis: 'x' | 'y'; direction: string }>;
+    const events = results.get('x6')!.details.events;
+    let right = 0;
+    truth.forEach((t, i) => {
+      const e = events.find((x) => Math.abs(x.timeSec - (2 * (i + 1) + 0.2)) <= 0.25);
+      const kind = t.axis === 'y' ? 'slide_vertical' : 'wipe_horizontal';
+      if (e && e.kind === kind && e.direction === t.direction) right++;
+    });
+    expect(right).toBeGreaterThanOrEqual(4);
+    expect(count('x6', 'cross_fade')).toBe(0);
+  });
+
+  it.each([
+    ['x7', 60],
+    ['x8', 25],
+  ] as const)('%s: 0.5 s and 1 s cross-fades and beat cuts at %i fps', (key, fps) => {
+    const m = results.get(key)!;
+    expect(Math.abs(m.details.raw.fps - fps)).toBeLessThanOrEqual(0.1);
+    const truth = truths.get(key)! as { cuts: number[]; crossFades: Array<{ atSec: number; durationSec: number }> };
+    const fades = m.details.events.filter((e) => e.kind === 'cross_fade');
+    expect(fades.length).toBeGreaterThanOrEqual(3);
+    for (const f of fades) {
+      const t = truth.crossFades.find((c) => f.timeSec >= c.atSec - 0.1 && f.timeSec <= c.atSec + c.durationSec + 0.1);
+      expect(t, `cross-fade at ${f.timeSec}`).toBeDefined();
+      expect(Math.abs(f.durationSec - t!.durationSec)).toBeLessThanOrEqual(0.15);
+    }
+    expect(fades.some((f) => f.durationSec >= 0.85)).toBe(true);
+    const hard = m.details.events.filter((e) => e.kind === 'hard');
+    expect(hard.length).toBeGreaterThanOrEqual(truth.cuts.length - 1);
+    for (const e of hard) expect(Math.min(...truth.cuts.map((t) => Math.abs(t - e.timeSec)))).toBeLessThanOrEqual(1 / fps + 1e-6);
+    const b = sig(key).beat;
+    expect(b.status).toBe('measured');
+    if (b.status !== 'measured') return;
+    expect(Math.abs(b.bpm - 120)).toBeLessThanOrEqual(1.5);
+    expect(b.within80ms / b.cuts).toBeGreaterThanOrEqual(0.85);
   });
 
   it('keeps only numbers in the signals: no array longer than 8', () => {

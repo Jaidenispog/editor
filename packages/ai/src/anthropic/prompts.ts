@@ -2,7 +2,7 @@ import { STYLES, STYLE_IDS, computeTimeline, paletteTransitionTypes, type StyleI
 import type { LabelShotsContext, PlannerInput } from '../types.js';
 import { planReveal } from '../rules/editing-style.js';
 import { beatGrid } from '../rules/music.js';
-import { CALM_TRANSITIONS, effectiveSettings, revisionHintsFor } from '../rules/settings.js';
+import { CALM_TRANSITIONS, beatSyncFor, effectiveSettings, revisionHintsFor } from '../rules/settings.js';
 
 /** Most shots described to the planner per project (the best-labelled and best-quality ones). */
 export const MAX_PLANNER_SHOTS = 60;
@@ -213,7 +213,7 @@ export function buildPlannerUserContent(input: PlannerInput): Array<{ type: 'tex
           beatTimesSec: input.music.beatTimesSec.slice(0, MAX_PLANNER_BEATS).map(r2),
           volume: r2(s.musicVolume),
           ...(fixedStart !== null ? { fixedStartOffsetSec: fixedStart } : {}),
-          beatSync: input.beatSync && input.beatSync !== 'auto' ? input.beatSync : (s.styleFromVideos?.beatSync ?? input.beatSync ?? 'auto'),
+          beatSync: beatSyncFor(input, s),
           revealOnBeat: input.revealOnBeat ?? false,
         }
       : null,
