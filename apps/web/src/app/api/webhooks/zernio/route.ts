@@ -9,7 +9,7 @@ import { readRawBody } from '@/lib/webhooks';
  * checks `X-Zernio-Signature` (hex HMAC-SHA256 of the raw body) when ZERNIO_WEBHOOK_SECRET is set, stores an envelope
  * once (under the event id only when verified, otherwise under `unverified:<sha256>`), queues `webhook.process`, and
  * answers JSON 200 at once. A badly signed delivery is still answered 200 and stored as unverified: deliveries are
- * only hints that trigger a read with our own key, so a forged one can at most cause an extra read. Nothing calls
+ * only hints that trigger a read with our own key, so a forged one can at most cause a bounded, read-only re-check. Nothing calls
  * Zernio in the request.
  */
 export const POST = handlePublicApi(

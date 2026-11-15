@@ -38,6 +38,7 @@ import { resolveSafeAddress, systemResolver, type HostResolver } from '../websit
 import { ZERNIO_CHOOSE_AGAIN_MESSAGE, ZERNIO_KEY_REFUSED_MESSAGE, ZERNIO_RECONNECT_MESSAGE, ZernioApiError, mapZernioError } from './errors.js';
 import { liveEligibility, recordPublishedEffects, refreshPostStatus, toManualStep, updateTarget, type PostRow, type TargetRow } from './post-status.js';
 
+
 /**
  * TikTok automatic posting through Zernio (`method = zernio`, docs/design/publishing.md §7.2; every path, field and
  * header is quoted in docs/research/zernio-api.md). Behind `TIKTOK_PUBLISH_PROVIDER=zernio`; nothing here runs, and
@@ -49,6 +50,9 @@ import { liveEligibility, recordPublishedEffects, refreshPostStatus, toManualSte
  * if it exists). After an unclear create the post is looked up read-only by `metadata.studioTargetId`. A failed post
  * is retried with `/v1/posts/{id}/retry`, never a new post. Webhooks only ever trigger a read.
  */
+
+/** Statuses with which Zernio answers about a hinted post id itself; anything else keeps the hint (§7.2.5). */
+const HINT_ANSWER_STATUSES: ReadonlySet<number> = new Set([400, 404, 410, 422]);
 
 /** The settings the adapter reads. */
 export type ZernioEnv = Pick<Env, 'NODE_ENV' | 'TIKTOK_PUBLISH_PROVIDER' | 'ZERNIO_API_BASE_URL'>;
@@ -1004,14 +1008,15 @@ export async function runZernioPoll(ctx: WorkerContext, run: TrackedRun, target:
     const hint = str(target.providerState['zernioHintPostId']);
     if (hint) {
       let hinted: Record<string, unknown> | null = null;
-      // Zernio answered about this id (a post, or a 4xx such as 404 for an id it does not know): read, so dropped
-      // unless ours. A failed read (5xx, network, 429) keeps the hint for the next read; the list lookup still runs.
+      // Zernio answered about this id (a post, or 400/404/410/422 for an id it does not know or accept): read, so
+      // dropped unless ours. Any other failure (5xx, network, 429, or 401/402/403 about the key or the account) says
+      // nothing about the id, so the hint is kept for the next read; the list lookup still runs.
       let answered = true;
       try {
         hinted = await client.getPost(hint);
       } catch (err) {
         if (err instanceof CancelledError || err instanceof JobInterruptedError) throw err;
-        answered = err instanceof ZernioApiError && err.httpStatus >= 400 && err.httpStatus < 500 && err.httpStatus !== 429;
+        answered = err instanceof ZernioApiError && HINT_ANSWER_STATUSES.has(err.httpStatus);
       }
       if (hinted && isOurs(hinted)) return await adoptFound(ctx, target, hint, hinted);
       if (answered) await clearHint(ctx, target.id, hint);
@@ -1202,7 +1207,7 @@ export async function checkZernio(ctx: WorkerContext, run: TrackedRun, conn: Con
 /**
  * The `zernio` webhook handler (design §7.2.5). The stored envelope is only a hint: the target is found by
  * `metadata.studioTargetId` first, then by the post id against `external_post_id`, and the only effect is a read
- * (`publish.poll`) with our own key. A forged or replayed event can at most cause an extra read.
+ * (`publish.poll`) with our own key. A forged or replayed event can at most cause one read-back plus, at "check before retry", one bounded (≤ 10 pages) read-only list lookup per hint read.
  */
 export async function handleZernioWebhook(ctx: WorkerContext, _run: TrackedRun, event: { payload: Record<string, unknown>; signatureValid: boolean }): Promise<void> {
   const env = event.payload;

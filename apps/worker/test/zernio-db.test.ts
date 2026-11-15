@@ -828,6 +828,25 @@ describe.skipIf(skip)('TikTok via Zernio with a fake Zernio API (WP10)', () => {
         expect(creates()).toHaveLength(1);
       }, 60_000);
 
+      it('a verified hint survives a read refused for the key (401/403): only an answer about the id itself drops it', async () => {
+        const { tid, zid } = await atCheckBeforeRetry();
+        await deliver({ id: `evt_k_${tid}`, event: 'post.platform.published', postId: zid, studioTargetId: tid, platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID }, true);
+        for (const status of [401, 403]) {
+          zernio.scenario.failOnce.get_post = { status, body: { error: 'Refused', type: status === 401 ? 'authentication_error' : 'permission_error' } };
+          await runHintOnce(tid).catch(() => undefined);
+          expect((await target(tid)).providerState).toMatchObject({ zernioHintPostId: zid, zernioHintVerified: true });
+          // Queue the next hint read the way a later delivery would (an unverified one never replaces the verified hint).
+          await deliver({ id: `evt_u${status}_${tid}`, event: 'post.platform.published', postId: 'forged-post-id', studioTargetId: tid, platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID }, false);
+          expect((await target(tid)).providerState['zernioHintPostId']).toBe(zid);
+        }
+        // Zernio answering about the id itself (404: it does not know it) drops the hint.
+        await runHintOnce(tid);
+        const t = await target(tid);
+        expect(t).toMatchObject({ status: 'manual_step_required', manualStep: 'check_before_retry', externalPostId: null });
+        expect(t.providerState['zernioHintPostId'] ?? null).toBeNull();
+        expect(creates()).toHaveLength(1);
+      }, 60_000);
+
       it('a forged event alone never adopts anything, signed or not: not another target\'s post, not an unknown id, not our metadata on another account', async () => {
         const { tid } = await atCheckBeforeRetry();
         const otherTarget = zernio.addPost({ status: 'published', metadata: { studioTargetId: 'someone-else' }, platforms: [{ platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID, status: 'published' }], updatedAt: new Date().toISOString() });

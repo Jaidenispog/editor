@@ -300,7 +300,7 @@ The post detail shows one card per manual destination (built for a phone):
     2. Choose the TikTok account Zernio reports.
     3. Shows "Not verified. Your first post through Zernio is a real, public TikTok post."
     4. After the verification post: a switch "Publish directly via Zernio" and, once a draft verification has been done, "Send to TikTok drafts".
-  - Without the flag, nothing about Zernio is shown, except one line in the setup checklist on the Publishing page.
+  - Without the flag, nothing about Zernio is shown anywhere: the TikTok checklist line only says that posting it yourself works (the review on 15 Nov 2026 removed the last mention).
 
 ---
 
@@ -924,7 +924,7 @@ only shown to the owner (zernio-api §2).
   post and polling resumes before the owner sends it again, even if a forged event's id was read in its place. The
   hinted id is kept in `provider_state.zernioHintPostId` with `zernioHintVerified`: a verified event's id replaces any
   stored id, an unverified one only replaces another unverified one, and a read-back drops only the id it read. Storing
-  a hint never touches `updated_at`. A forged or replayed event can at most trigger an extra read.
+  a hint never touches `updated_at`. A forged or replayed event can at most trigger one read-back of the hinted id plus, for a target waiting at "check before retry", one bounded (≤ 10 pages) read-only list lookup per hint read; the hint poll's singleton key allows one queued and one running read per target. A refusal about the key (401/402/403) keeps a verified hint; only an answer about the id (400/404/410/422) drops it.
 - **No authoritative mode.** `GET /v1/posts/{postId}` exists, so webhooks never set state.
 - **Events used:** `post.platform.published`, `post.platform.failed`, `post.published`, `post.partial`,
   `post.failed`, `post.tiktok.url_resolved` (all confirmed, zernio-api §11), plus `account.disconnected`, which enqueues
