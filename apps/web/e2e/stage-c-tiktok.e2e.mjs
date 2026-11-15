@@ -20,9 +20,9 @@
  *           signed webhooks trigger reads while forged/unsigned ones change nothing and cannot take a real event's id;
  *           a draft ends as "finish in the TikTok app", never published; a failed post's Retry calls /retry (no second
  *           create).
- *   off     TIKTOK_PUBLISH_PROVIDER=none (ZERNIO_API_BASE_URL still set): nothing about Zernio is shown except the
- *           integrations checklist line, the webhook route and key route refuse, queued Zernio reads do nothing, and
- *           the fake records zero requests.
+ *   off     TIKTOK_PUBLISH_PROVIDER=none (ZERNIO_API_BASE_URL still set): nothing about Zernio is shown anywhere
+ *           (the integrations checklist line is provider-neutral), the webhook route and key route refuse, queued
+ *           Zernio reads do nothing, and the fake records zero requests.
  * Each later phase loads the earlier phases' results from E2E_STATE_FILE; the last prints the total.
  *
  * Settings (environment variables): E2E_PHASE (setup | on | off), E2E_BASE_URL, E2E_FAKE_CONTROL_URL,
@@ -841,10 +841,10 @@ async function offPhase({ browser, q, watch }) {
   check(!/Zernio/i.test(sectionText) && /Post it yourself/.test(sectionText), 'the TikTok section says nothing about Zernio, only "Post it yourself"', sectionText.slice(0, 260));
   check((await page.getByLabel('Zernio API key').count()) === 0, 'there is no key field');
   const line = await textOf(tiktokChecklistLine(page));
-  check(/the optional route through Zernio is off on this server\./.test(line), 'the checklist line says the Zernio route is off on this server', line.slice(0, 260));
+  // With the flag off the card is provider-neutral (design §4.5; the review removed the last Zernio wording).
+  check(/Post it yourself works now/.test(line) && !/Zernio/i.test(line), 'the checklist line says manual posting works and does not mention Zernio', line.slice(0, 260));
   const mainText = await textOf(page.locator('main'));
-  const withoutLine = mainText.replace(line, '');
-  check((mainText.match(/Zernio/g) ?? []).length >= 1 && !/Zernio/i.test(withoutLine), 'the checklist line is the only place on the page that mentions Zernio', (withoutLine.match(/.{0,60}Zernio.{0,60}/i) ?? [''])[0]);
+  check(!/Zernio/i.test(mainText), 'nothing on the Integrations page mentions Zernio with the flag off', (mainText.match(/.{0,60}Zernio.{0,60}/i) ?? [''])[0]);
   const dto = await apiGet(page, '/api/integrations/zernio');
   check(dto.enabled === false && dto.keyHint !== FAKE_KEY && !JSON.stringify(dto).includes(FAKE_KEY), 'the API reports the flag off and never the key', JSON.stringify({ enabled: dto.enabled }));
 

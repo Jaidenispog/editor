@@ -872,9 +872,9 @@ webhook rows, job runs):
   When the fake fails the post, the card shows "Failed" with TikTok's message and Retry; Retry calls
   `/v1/posts/{id}/retry` once with no body, with no second create and no new upload; when the fake then publishes it,
   the card shows the link. Settings counts 2 of 15 videos.
-- *Flag off*: the TikTok section says only "Post it yourself", there is no key field, and the checklist line ("the
-  optional route through Zernio is off on this server") is the only mention of Zernio on the page; the composer offers
-  only "Post it yourself" for TikTok. The webhook route answers 404, a key is refused (409), a `social.check` and a
+- *Flag off*: the TikTok section says only "Post it yourself", there is no key field, the checklist line says manual
+  posting works, and nothing on the Integrations page mentions Zernio at all; the composer offers only "Post it
+  yourself" for TikTok. The webhook route answers 404, a key is refused (409), a `social.check` and a
   `publish.poll` for a Zernio post (`apps/web/e2e/enqueue-job.ts`) finish without calling, and the fake records zero
   requests for the whole phase.
 - No page or console errors in any phase (none are caused on purpose: the refusals are checked through the API).
