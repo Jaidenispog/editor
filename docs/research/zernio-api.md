@@ -71,6 +71,8 @@ Used by: `docs/design/publishing.md` §7.2 (the adapter design) and `docs/design
 | Only live content counts for the dedup. | "Only scheduled, publishing or published content counts, not failed or cancelled targets." | https://docs.zernio.com/guides/idempotency.mdx |
 | There is no external-reference field, but `metadata` is free-form, stored, returned on reads and echoed in webhooks. | "**metadata** `object`: Free-form key/value pairs of your own, stored on the post and returned on reads and in webhook payloads. Zernio also writes the bookkeeping keys `usageCounted`, `usageRefunded` and `hidden` into this object; do not set them" | https://docs.zernio.com/posts/create-post.mdx |
 | Posts can be listed by account and change time, with `metadata` in the returned fields (used to find a post after a crash). | "**updatedSince** (optional) in query: Only posts whose `updatedAt` is at or after this ISO 8601 timestamp (an offset or `Z` required)." … "**accountId** (optional) in query: Filter posts to those published via a specific account" … "**fields** … Accepted: … `metadata` …" | https://docs.zernio.com/posts/list-posts.mdx |
+| The list's 200 body is `{ posts, pagination }`. With `fields`, each item still carries `_id`. (Re-read 15 Nov 2026 for the crash-recovery lookup.) | "#### 200: Paginated posts … - **posts** `array[Post]`: … - **pagination**: No description" and "**fields** (optional) in query: Comma-separated list of post fields to return. Each post then carries `_id` plus only these fields" | https://docs.zernio.com/posts/list-posts.mdx |
+| Further pages: send `cursor` = the previous response's `pagination.nextCursor`, with the same filters. `updatedSince` combines with `cursor`. The `pagination` object itself has no description beyond `nextCursor`, so a missing `nextCursor` is read as the last page. | "**cursor** (optional) in query: Opaque cursor from a previous response's `pagination.nextCursor`. Returns the next page in the same `sortBy` order and takes precedence over `page` and `offset`." … "Send the same filters and `sortBy` as the request that issued it." and "Combines with the other filters and with `cursor`." | https://docs.zernio.com/posts/list-posts.mdx |
 | Idempotency on create is recent. | "\"date\": \"2026-09-25 ...\" \"title\": \"Post creation now supports idempotency keys\"" | https://docs.zernio.com/changelog.json |
 | The retry endpoint does not list an `Idempotency-Key`. It refuses a post that is already publishing. | "#### 409: Post is currently publishing" | https://docs.zernio.com/posts/retry-post.mdx |
 
@@ -267,3 +269,8 @@ These are the gaps. None of them needs a guess in code: each has a safe fallback
     any other 4xx → `failed`, not retryable, and the uploaded file is discarded so an owner Retry re-uploads.
 15. **Live behaviour to record on the first verification post:** URL resolution delay, `integrationLane` of the
     owner's account, the exact `errorCategory` values TikTok errors map to, and whether the pricing above still holds.
+16. **The shape of `pagination` on `GET /v1/posts` (§3).** Only `pagination.nextCursor` is named (by the `cursor`
+    parameter); the object has "No description", and the default page size and maximum `limit` are not stated.
+    Fallback: the crash-recovery lookup follows `nextCursor` while it is a non-empty string, stops when it is missing,
+    and reads at most 10 pages per lookup. Not finding the post there leads to `check_before_retry` (the owner checks
+    TikTok), never to a second create.

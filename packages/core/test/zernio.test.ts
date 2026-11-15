@@ -68,29 +68,44 @@ describe('approval binding and interactions', () => {
 });
 
 describe('poll and lookup schedules', () => {
-  it('reads at 1, 2, 5 and 10 minutes, every 15 minutes to 6 hours, then under the hour to 50 hours', () => {
+  it('reads at 1, 2, 5 and 10 minutes, every 15 minutes to 6 hours, then hourly to 50 hours', () => {
     expect(zernioPollDelaySeconds(0)).toBe(60);
     expect(zernioPollDelaySeconds(60)).toBe(60);
     expect(zernioPollDelaySeconds(120)).toBe(180);
     expect(zernioPollDelaySeconds(300)).toBe(300);
     expect(zernioPollDelaySeconds(600)).toBe(900);
     expect(zernioPollDelaySeconds(1500)).toBe(900);
-    const long = zernioPollDelaySeconds(7 * 3600)!;
-    expect(long).toBeGreaterThan(0);
-    expect(long).toBeLessThan(3600);
+    expect(zernioPollDelaySeconds(6 * 3600)).toBe(3600);
+    expect(zernioPollDelaySeconds(7 * 3600 + 600)).toBe(3000);
     expect(zernioPollDelaySeconds(50 * 3600)).toBeNull();
-    // The whole schedule stays inside the 50-hour window and never waits an hour or more.
-    let t = 0;
+    // The whole schedule stays inside the 50-hour window and never waits more than an hour.
+    let t = 60;
     let n = 0;
     for (;;) {
       const d = zernioPollDelaySeconds(t);
       if (d === null) break;
-      expect(d).toBeLessThan(3600);
+      expect(d).toBeLessThanOrEqual(3600);
       t += d;
       n++;
     }
     expect(t).toBeLessThanOrEqual(50 * 3600);
     expect(n).toBeGreaterThan(60);
+  });
+
+  it('always reads once more at exactly 50 hours, so the end of the window is reached and then ends', () => {
+    // The last read lands on the window's end, whatever the grid; the read after it is null (check before retry).
+    let t = 60;
+    for (;;) {
+      const d = zernioPollDelaySeconds(t);
+      if (d === null) break;
+      t += d;
+    }
+    expect(t).toBe(50 * 3600);
+    // Part-way through the last hour, the next read is the window's end itself, not null.
+    expect(zernioPollDelaySeconds(49.33 * 3600)).toBe(Math.round(50 * 3600 - 49.33 * 3600));
+    expect(zernioPollDelaySeconds(49.5 * 3600)).toBe(1800);
+    expect(zernioPollDelaySeconds(50 * 3600 - 100)).toBe(100);
+    expect(zernioPollDelaySeconds(50 * 3600 + 60)).toBeNull();
   });
 
   it('looks a post up four times, honouring Retry-After', () => {

@@ -231,6 +231,9 @@ describe('target actions', () => {
     expect(targetActionsFor({ ...base, status: 'manual_step_required', manualStep: 'post_in_app', mediaReady: true })).toEqual(['download', 'confirm', 'cancel']);
     expect(targetActionsFor({ ...base, method: 'instagram_api', status: 'manual_step_required', manualStep: 'review_copyright_match' })).toEqual(['post_without_music', 'post_manually', 'cancel']);
     expect(targetActionsFor({ ...base, method: 'instagram_api', status: 'manual_step_required', manualStep: 'review_copyright_match', variant: 'no_music' })).toEqual(['post_manually', 'cancel']);
+    // A Zernio approval binds the file: swapping in the music-free one could only fail, so it is not offered.
+    expect(targetActionsFor({ ...base, method: 'zernio', status: 'manual_step_required', manualStep: 'music_licence_changed' })).toEqual(['post_manually', 'cancel']);
+    expect(targetActionsFor({ ...base, method: 'instagram_api', status: 'manual_step_required', manualStep: 'music_licence_changed' })).toEqual(['post_without_music', 'post_manually', 'cancel']);
     expect(targetActionsFor({ ...base, method: 'instagram_api', status: 'manual_step_required', manualStep: 'check_before_retry' })).toEqual(['confirm', 'retry_anyway']);
     expect(targetActionsFor({ ...base, method: 'instagram_api', status: 'failed' })).toEqual(['retry', 'post_manually']);
     expect(targetActionsFor({ ...base, method: 'instagram_api', status: 'failed', retryable: false })).toEqual(['post_manually']);

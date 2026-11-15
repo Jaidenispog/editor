@@ -17,7 +17,14 @@ export const PUBLISHING_JOB_TYPES = {
 
 export const PublishPreparePayloadSchema = z.object({ postId: z.string().min(1), projectId: z.string().nullable() });
 export const PublishTargetPayloadSchema = z.object({ targetId: z.string().min(1), postId: z.string().min(1), projectId: z.string().nullable() });
-export const PublishPollPayloadSchema = z.object({ targetId: z.string().min(1), postId: z.string().min(1), projectId: z.string().nullable(), pollNo: z.number().int().min(0) });
+export const PublishPollPayloadSchema = z.object({
+  targetId: z.string().min(1),
+  postId: z.string().min(1),
+  projectId: z.string().nullable(),
+  pollNo: z.number().int().min(0),
+  /** A read a webhook asked for (Zernio, design §7.2.5): it never uses up or reschedules a scheduled lookup. */
+  hint: z.boolean().optional(),
+});
 export const PublishDispatchPayloadSchema = z.object({});
 export const SocialCheckPayloadSchema = z.object({
   /** The connection to check, or null for every publishing connection. */

@@ -150,6 +150,16 @@ suite('TikTok through Zernio: routes (database-backed)', () => {
     const got = await call(r.GET, 'GET', '/api/integrations/zernio');
     expect(got.json).toMatchObject({ enabled: true, configured: true, connectionStatus: 'connected', keyHint: KEY.slice(-4), account: null, webhookSigning: true, webhookUrl: `${ORIGIN}/api/webhooks/zernio` });
     expect(got.text).not.toContain(KEY);
+    // With the server flag off, nothing about the leftover connection leaves the server (design §4.5).
+    process.env.TIKTOK_PUBLISH_PROVIDER = 'none';
+    try {
+      const off = await call(r.GET, 'GET', '/api/integrations/zernio');
+      expect(off.status).toBe(200);
+      expect(off.json).toEqual({ enabled: false, configured: false, missingEnv: [], canManage: true, connectionStatus: 'none', keyHint: null, lastError: null, lastCheckedAt: null, candidates: [], account: null, webhookSigning: false, webhookUrl: null });
+      expect(off.text).not.toContain(KEY.slice(-4));
+    } finally {
+      process.env.TIKTOK_PUBLISH_PROVIDER = 'zernio';
+    }
     const audit = await (await db()).query.auditLog.findMany({ where: eq(schema.auditLog.action, 'integration.zernio.connected') });
     expect(JSON.stringify(audit)).not.toContain(KEY);
   });
@@ -260,6 +270,33 @@ suite('TikTok through Zernio: routes (database-backed)', () => {
     const eligibility = await import('../src/app/api/publishing/eligibility/route');
     const res = await call(eligibility.GET, 'GET', `/api/publishing/eligibility?versions=${ids.v1}`);
     expect(res.json.items[0].methods.tiktok[1]).toMatchObject({ method: 'zernio', delivery: 'draft', available: true, isVerification: false });
+  });
+
+  it('a Zernio target whose music licence changed is never offered "post without music", and the route refuses it without touching the approval', async () => {
+    const posts = await import('../src/app/api/publish-posts/[id]/route');
+    const resolve = await import('../src/app/api/publish-targets/[id]/resolve/route');
+    const schema = await sch();
+    const { eq } = await drizzle();
+    const acct = (await (await db()).query.socialAccounts.findFirst({ where: eq(schema.socialAccounts.externalId, 'acc1') }))!;
+    const postId = randomUUID();
+    const targetId = randomUUID();
+    const consent = { tiktokPublic: true, at: new Date().toISOString(), userId: owner.id, binding: { caption: 'Fade', coverTimeSec: null, variant: 'standard', delivery: 'publish', accountRowId: acct.id, handle: acct.username, interactions: { allowComment: true, allowDuet: false, allowStitch: false } } };
+    await (await db()).insert(schema.publishPosts).values({ id: postId, projectId: ids.project, editVersionId: ids.v1, createdBy: owner.id, caption: 'Fade', mode: 'now', status: 'in_progress', approvedAt: new Date(), approvedBy: owner.id });
+    await (await db()).insert(schema.publishTargets).values({ id: targetId, postId, platform: 'tiktok', accountId: acct.id, idempotencyKey: `pt_${targetId}`, method: 'zernio', mediaVariant: 'standard', status: 'manual_step_required', manualStep: 'music_licence_changed', providerState: { consent } });
+    signIn(owner);
+    const dto = await call(posts.GET, 'GET', `/api/publish-posts/${postId}`, { id: postId });
+    expect(dto.status).toBe(200);
+    expect(dto.json.targets[0].actions).not.toContain('post_without_music');
+    expect(dto.json.targets[0].actions).toContain('post_manually');
+    const res = await call(resolve.POST, 'POST', `/api/publish-targets/${targetId}/resolve`, { id: targetId }, { action: 'post_without_music' });
+    expect(res.status).toBe(409);
+    expect(res.json.error.message).toMatch(/Make the post again without music and approve it/);
+    const t = (await (await db()).query.publishTargets.findFirst({ where: eq(schema.publishTargets.id, targetId) }))!;
+    expect(t).toMatchObject({ status: 'manual_step_required', manualStep: 'music_licence_changed', mediaVariant: 'standard', method: 'zernio' });
+    expect(t.providerState['consent']).toEqual(consent);
+    // Posting it yourself still works.
+    expect((await call(resolve.POST, 'POST', `/api/publish-targets/${targetId}/resolve`, { id: targetId }, { action: 'post_manually' })).status).toBe(200);
+    expect((await (await db()).query.publishTargets.findFirst({ where: eq(schema.publishTargets.id, targetId) }))!.method).toBe('manual');
   });
 
   it('webhooks: a signed delivery is stored once under its event id; a badly signed one under unverified:; only an envelope is kept', async () => {

@@ -431,7 +431,7 @@ If no row comes back, another attempt owns the target, and the job exits success
 | `publish.prepare` | `{ postId: string, projectId: string \| null }` | `publish-prepare:{postId}` | 3, 30 s backoff; 10 min; hb 60 s | Makes sure each target's media exists. If an export is missing, enqueue `render.export` (`variant` as needed, singletonKey `export:{versionId}:{variant}`) and exit. The render handler re-enqueues `publish.prepare` for waiting posts when it finishes. When the media exists: ffprobe **preflight** (`checkMediaForPlatform`, §6.2); cut the cover JPEG with `extractFrames(export, [coverTimeSec])` and store it at `publishCover(postId)`; set `media_key`. Manual targets go to `manual_step_required` / `post_in_app` (mode `now`/`draft_handoff`) or wait until due (scheduled). For mode `now`, enqueue `publish.target` for automated targets. |
 | `publish.target` | `{ targetId, postId, projectId \| null }` | `publish-target:{targetId}` (= `idempotency_key` family) | 3, 60 s backoff, transient errors only; 45 min; hb 60 s; concurrency 1 | Adapter state machine (§7.1.4, §7.2.4). Permanent errors are written to the row and the job **completes** (no pg-boss retry). Transient errors are rethrown. Re-checks eligibility, account status and quota first. |
 | `publish.poll` | `{ targetId, postId, projectId \| null, pollNo: int ≥ 0 }` | `publish-poll:{targetId}` | 5, 60 s backoff; 15 min | Reads the authoritative status: Instagram container `status_code` / copyright, Zernio post. It re-enqueues itself with `startAfter` on a schedule: Instagram every 60 s for 5 polls, then every 5 min until the container is 24 h old; Zernio at 1, 2, 5 and 10 min, then every 15 min up to 6 h, then hourly up to 50 h (TikTok can stay `publishing` for 48 h, §7.2.4). |
-| `publish.dispatch` | `{}` | cron `* * * * *` | 0; 2 min | Finds targets that are `queued`, not manual, have `media_key` set and `scheduled_for <= now()` on an `approved`/`in_progress` post, and enqueues `publish.target`. Manual scheduled targets that are due become `manual_step_required` / `post_in_app` ("Due now"). Posts still preparing are left alone, and the message says they are late. |
+| `publish.dispatch` | `{}` | cron `* * * * *` | 0; 2 min | Finds targets that are `queued`, not manual, have `media_key` set and `scheduled_for <= now()` on an `approved`/`in_progress` post, and enqueues `publish.target`. Manual scheduled targets that are due become `manual_step_required` / `post_in_app` ("Due now"). Posts still preparing are left alone, and the message says they are late. Safety net: a non-manual `processing` target untouched for 60 min lost its job (sent without a post id → `check_before_retry`, otherwise `failed`, retryable), except a Zernio target with a post id while a `publish.poll` of it is queued or running (it is read hourly between 6 h and 50 h). |
 | `social.check` | `{ connectionId: string \| null, reason: 'connect'\|'manual'\|'daily'\|'pre_publish' }` (null = all) | `social-check:{connectionId ?? 'all'}` | 2, 60 s; 5 min | **Read-only.** Meta: `debug_token`, discovery, `/{ig-id}?fields=id,username`, `content_publishing_limit`. Zernio: key validity and account list. Updates `social_accounts` and `integration_connections` (status, capabilities, `last_error`). Daily cron `23 4 * * *` (Melbourne time). **Never posts.** |
 | `webhook.process` | `{ webhookEventId }` | `webhook:{webhookEventId}` | 5, 10 s backoff; 2 min | Built once by WP0 as a dispatcher that calls the handler a module registers for the event's `provider`. This module's `zernio` handler (WP10) loads the stored event, finds the target by `(platform='tiktok', external_post_id)`, and enqueues `publish.poll`. Sets `processed_at`. **Never changes target state from the payload** (§7.2.5). |
 | `render.export` (existing; `variant` added by WP1) | add `variant: z.enum(['standard','no_music']).default('standard')` | `export:{versionId}:{variant}` | unchanged | `no_music` clones the plan with `audio.music = null`, writes `editExportVariant`, and updates `variant_exports.no_music`. On success the render handler calls the worker's export-ready hooks (WP0); this module registers a hook that enqueues `publish.prepare` for posts in `approved`/`in_progress` whose targets use this version and variant. |
@@ -829,8 +829,11 @@ documented").
       `GET {base}/v1/posts?accountId=<id>&updatedSince=<submitted_at − 2 min>&fields=metadata,status,platforms` and
       match `metadata.studioTargetId`. Only listed parameters and `fields` values are used, because `GET /v1/posts`
       answers 400 to an unknown one (zernio-api §2). If the account's id has changed since submission (§7.2.1), the
-      lookup drops `accountId` and pages through `updatedSince` alone. Repeat at 1, 2, 5 and 10 min (as `publish.poll` jobs in lookup mode, so the
-      `publish.target` job ends at once). Found → adopt `_id` and poll. Not found →
+      lookup drops `accountId` and uses `updatedSince` alone. The 200 body is `{ posts, pagination }` and, with
+      `fields`, each item keeps `_id` (zernio-api §3); the lookup follows `pagination.nextCursor` with `cursor=` and the
+      same filters, up to 10 pages per lookup (more than that counts as not found). Repeat at 1, 2, 5 and 10 min (as
+      `publish.poll` jobs in lookup mode, so the `publish.target` job ends at once). A read a webhook triggers
+      (§7.2.5) tries the same lookup once but never uses up or reschedules one of these four. Found → adopt `_id` and poll. Not found →
       `manual_step_required` / `check_before_retry` (§6.3 rule 4). When the owner chooses **It's not there, try
       again** within 24 h of `submitted_at`, the one new create carries the **same** `Idempotency-Key`, so Zernio
       returns the original post instead of making a second one if it did exist (zernio-api §3).
@@ -852,8 +855,10 @@ documented").
    - Events can reverse: Zernio may later report a published target as failed (reconciliation) or a failed one as
      published (zernio-api §11). The poll applies what Zernio reports now, writes audit `publish.target.reconciled`, and
      never invents a link.
-   - Schedule: 1, 2, 5 and 10 min, then every 15 min up to 6 h, then hourly up to 50 h. If it is still not final
-     after 50 h → `manual_step_required` / `check_before_retry`. Polling stops once `published` has a URL, or when a
+   - Schedule: 1, 2, 5 and 10 min, then every 15 min up to 6 h, then hourly up to 50 h; the last read is at exactly
+     50 h whatever the grid. If it is still not final then (`processing`, or `queued` while held at Zernio) →
+     `manual_step_required` / `check_before_retry`. The `publish.dispatch` stall net leaves a Zernio target with a post
+     id alone while one of its reads is queued or running, so the hourly gap is never mistaken for a lost job. Polling stops once `published` has a URL, or when a
      draft is handed over (after that, the `post.tiktok.url_resolved` webhook or the owner's confirmation moves it).
 7. **Retry of a failed Zernio target.** Re-read the post first. Only when Zernio's `post.status` is `failed` or
    `partial`: `POST {base}/v1/posts/{postId}/retry` (no body), never a new post (zernio-api §10). 200 → poll; 207 → map
@@ -910,8 +915,11 @@ only shown to the owner (zernio-api §2).
   description"); record it with the first verification webhook. Either way it only enqueues `publish.poll`, which
   asks Zernio with our key: a target with `external_post_id` is read by that id (never by the webhook's), and a
   target in the outcome-unknown path reads `GET /v1/posts/{post.id}` and adopts it only if the read-back
-  `metadata.studioTargetId` and account match. If that read fails, the normal metadata lookup (step 5d) runs. A
-  forged or replayed event can at most trigger an extra read.
+  `metadata.studioTargetId` and the TikTok entry's `accountId` both match (an entry without an account is not
+  adopted). If that read fails, the normal metadata lookup (step 5d) runs once, without using up one of the four
+  scheduled lookups. A target already at `check_before_retry` without a post id still takes this read-back (and only
+  it), so a genuine late event adopts the post and polling resumes before the owner sends it again. A forged or
+  replayed event can at most trigger an extra read.
 - **No authoritative mode.** `GET /v1/posts/{postId}` exists, so webhooks never set state.
 - **Events used:** `post.platform.published`, `post.platform.failed`, `post.published`, `post.partial`,
   `post.failed`, `post.tiktok.url_resolved` (all confirmed, zernio-api §11), plus `account.disconnected`, which enqueues
