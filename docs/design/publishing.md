@@ -858,7 +858,9 @@ documented").
    - Schedule: 1, 2, 5 and 10 min, then every 15 min up to 6 h, then hourly up to 50 h; the last read is at exactly
      50 h whatever the grid. If it is still not final then (`processing`, or `queued` while held at Zernio) →
      `manual_step_required` / `check_before_retry`. The `publish.dispatch` stall net leaves a Zernio target with a post
-     id alone while one of its reads is queued or running, so the hourly gap is never mistaken for a lost job. Polling stops once `published` has a URL, or when a
+     id alone while one of its reads is queued or running, so the hourly gap is never mistaken for a lost job, but
+     only while the target was touched in the last 2 h 15 min (two hourly gaps plus a margin; every read touches it).
+     A target silent for longer is settled by the net even if a tracking row still says `queued` (orphaned). Polling stops once `published` has a URL, or when a
      draft is handed over (after that, the `post.tiktok.url_resolved` webhook or the owner's confirmation moves it).
 7. **Retry of a failed Zernio target.** Re-read the post first. Only when Zernio's `post.status` is `failed` or
    `partial`: `POST {base}/v1/posts/{postId}/retry` (no body), never a new post (zernio-api §10). 200 → poll; 207 → map
@@ -917,9 +919,12 @@ only shown to the owner (zernio-api §2).
   target in the outcome-unknown path reads `GET /v1/posts/{post.id}` and adopts it only if the read-back
   `metadata.studioTargetId` and the TikTok entry's `accountId` both match (an entry without an account is not
   adopted). If that read fails, the normal metadata lookup (step 5d) runs once, without using up one of the four
-  scheduled lookups. A target already at `check_before_retry` without a post id still takes this read-back (and only
-  it), so a genuine late event adopts the post and polling resumes before the owner sends it again. A forged or
-  replayed event can at most trigger an extra read.
+  scheduled lookups. A target already at `check_before_retry` without a post id still takes this read-back, plus that
+  one bounded metadata lookup (adopted only when the entry's account matches too), so a genuine late event adopts the
+  post and polling resumes before the owner sends it again, even if a forged event's id was read in its place. The
+  hinted id is kept in `provider_state.zernioHintPostId` with `zernioHintVerified`: a verified event's id replaces any
+  stored id, an unverified one only replaces another unverified one, and a read-back drops only the id it read. Storing
+  a hint never touches `updated_at`. A forged or replayed event can at most trigger an extra read.
 - **No authoritative mode.** `GET /v1/posts/{postId}` exists, so webhooks never set state.
 - **Events used:** `post.platform.published`, `post.platform.failed`, `post.published`, `post.partial`,
   `post.failed`, `post.tiktok.url_resolved` (all confirmed, zernio-api §11), plus `account.disconnected`, which enqueues

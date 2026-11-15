@@ -770,6 +770,90 @@ describe.skipIf(skip)('TikTok via Zernio with a fake Zernio API (WP10)', () => {
       expect(await target(tid)).toMatchObject({ status: 'published', manualStep: null, externalPostId: zid, publishedUrl: 'https://www.tiktok.com/@ivanhoe_studio_test/video/7366666666666666666' });
       expect(creates()).toHaveLength(1);
     }, 60_000);
+    describe('hints at "check before retry": a forged or unsigned event never takes a genuine one\'s place', () => {
+      const lookup = () => webhookLookupFor([publishingModule]);
+      const deliver = async (payload: Record<string, unknown>, verified: boolean) => {
+        const id = newId();
+        await handle.db.insert(schema.webhookEvents).values({ id, provider: 'zernio', externalEventId: verified ? String(payload['id']) : `unverified:${id}`, eventType: String(payload['event']), payload, signatureValid: verified });
+        await handleWebhookProcess(ctx, makeRun(newId()), { webhookEventId: id }, lookup());
+      };
+      /** Runs one hint read; any other hint read still queued for the target is dropped, as the singleton key does. */
+      const runHintOnce = async (tid: string) => {
+        const isHint = (j: Queued) => j.type === 'publish.poll' && j.payload['hint'] === true && j.payload['targetId'] === tid;
+        const idx = queue.findIndex(isHint);
+        expect(idx).toBeGreaterThanOrEqual(0);
+        const [job] = queue.splice(idx, 1);
+        for (let i = queue.length - 1; i >= 0; i--) if (isHint(queue[i]!)) queue.splice(i, 1);
+        await runJob(job!);
+      };
+      /** A target whose create's answer was lost, at "check before retry" after the four lookups found nothing. */
+      const atCheckBeforeRetry = async (): Promise<{ tid: string; zid: string; created: Record<string, unknown> }> => {
+        zernio.scenario.dropAfterCreate = true;
+        const { targetIds } = await createPost({ targets: [{ platform: 'tiktok', method: 'zernio', isVerification: true }] });
+        const tid = targetIds[0]!;
+        await drain(['publish.prepare', 'publish.target']);
+        const [zid, created] = [...zernio.posts.entries()].find(([, p]) => (p['metadata'] as Record<string, unknown>)['studioTargetId'] === tid)!;
+        zernio.posts.delete(zid);
+        for (let i = 0; i < 4; i++) await runNext('publish.poll');
+        expect(await target(tid)).toMatchObject({ status: 'manual_step_required', manualStep: 'check_before_retry', externalPostId: null });
+        queue.length = 0;
+        return { tid, zid, created };
+      };
+
+      it('a genuine signed late event followed by a forged one before the hint read runs: the post is still adopted', async () => {
+        const { tid, zid, created } = await atCheckBeforeRetry();
+        zernio.posts.set(zid, created);
+        zernio.setPost(zid, { status: 'published', entry: { status: 'published', platformPostUrl: 'https://www.tiktok.com/@ivanhoe_studio_test/video/7377777777777777777' } });
+        await deliver({ id: `evt_g_${tid}`, event: 'post.platform.published', postId: zid, studioTargetId: tid, platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID }, true);
+        await deliver({ id: `evt_f_${tid}`, event: 'post.platform.published', postId: 'forged-post-id', studioTargetId: tid, platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID }, false);
+        // The unverified id did not replace the verified one.
+        expect((await target(tid)).providerState).toMatchObject({ zernioHintPostId: zid, zernioHintVerified: true });
+        await runHintOnce(tid);
+        expect(await target(tid)).toMatchObject({ status: 'published', manualStep: null, externalPostId: zid, publishedUrl: 'https://www.tiktok.com/@ivanhoe_studio_test/video/7377777777777777777' });
+        expect(creates()).toHaveLength(1);
+      }, 60_000);
+
+      it('with no webhook secret (every event unsigned), a forged id that replaced the genuine one is rejected and the metadata lookup still adopts the post', async () => {
+        const { tid, zid, created } = await atCheckBeforeRetry();
+        zernio.posts.set(zid, created);
+        zernio.setPost(zid, { status: 'publishing', entry: { status: 'processing' } });
+        await deliver({ id: `evt_g_${tid}`, event: 'post.platform.published', postId: zid, studioTargetId: tid, platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID }, false);
+        await deliver({ id: `evt_f_${tid}`, event: 'post.platform.published', postId: 'forged-post-id', studioTargetId: tid, platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID }, false);
+        expect((await target(tid)).providerState['zernioHintPostId']).toBe('forged-post-id');
+        const before = zernio.calls.length;
+        await runHintOnce(tid);
+        expect(await target(tid)).toMatchObject({ status: 'processing', manualStep: null, externalPostId: zid });
+        const list = zernio.calls.slice(before).find((c) => c.endpoint === 'list_posts')!;
+        expect(Object.keys(list.query).sort()).toEqual(['accountId', 'fields', 'updatedSince']);
+        expect(creates()).toHaveLength(1);
+      }, 60_000);
+
+      it('a forged event alone never adopts anything, signed or not: not another target\'s post, not an unknown id, not our metadata on another account', async () => {
+        const { tid } = await atCheckBeforeRetry();
+        const otherTarget = zernio.addPost({ status: 'published', metadata: { studioTargetId: 'someone-else' }, platforms: [{ platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID, status: 'published' }], updatedAt: new Date().toISOString() });
+        const otherAccount = zernio.addPost({ status: 'published', metadata: { studioTargetId: tid }, platforms: [{ platform: 'tiktok', accountId: 'another-account-id', status: 'published' }], updatedAt: new Date().toISOString() });
+        const forged = [
+          { postId: otherTarget, verified: false },
+          { postId: 'no-such-post', verified: false },
+          { postId: otherAccount, verified: false },
+          { postId: otherAccount, verified: true },
+        ];
+        for (const [i, f] of forged.entries()) {
+          await deliver({ id: `evt_x${i}_${tid}`, event: 'post.published', postId: f.postId, studioTargetId: tid, platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID }, f.verified);
+          await runHintOnce(tid);
+          const t = await target(tid);
+          expect(t).toMatchObject({ status: 'manual_step_required', manualStep: 'check_before_retry', externalPostId: null });
+          expect(t.providerState['zernioHintPostId'] ?? null).toBeNull();
+          expect(queue.filter((j) => j.type === 'publish.poll')).toHaveLength(0);
+        }
+        // The list was searched read-only each time and never changed anything at Zernio.
+        expect(zernio.count('list_posts')).toBeGreaterThanOrEqual(forged.length);
+        expect(creates()).toHaveLength(1);
+        expect(zernio.count('retry')).toBe(0);
+        zernio.posts.delete(otherTarget);
+        zernio.posts.delete(otherAccount);
+      }, 60_000);
+    });
   });
 
   describe('publish.dispatch safety net (only for targets with no live read)', () => {
@@ -790,6 +874,20 @@ describe.skipIf(skip)('TikTok via Zernio with a fake Zernio API (WP10)', () => {
       expect(await target(live)).toMatchObject({ status: 'processing' });
       expect(await target(lost)).toMatchObject({ status: 'failed' });
       expect((await target(lost)).statusMessage).toMatch(/Publishing stopped part-way/);
+    }, 60_000);
+
+    it('does not trust an orphaned "queued" read for ever: a target silent for longer than two hourly gaps plus a margin is settled', async () => {
+      const { postId, targetIds } = await createPost({ targets: [{ platform: 'tiktok', method: 'zernio', isVerification: true }] });
+      const tid = targetIds[0]!;
+      const longAgo = new Date(Date.now() - 3 * 3600_000);
+      await handle.db.update(schema.publishTargets).set({ status: 'processing', submittedAt: new Date(Date.now() - 20 * 3600_000), externalPostId: `zp-orphan-${tid.slice(-6)}`, updatedAt: longAgo }).where(eq(schema.publishTargets.id, tid));
+      // pg-boss gave up on this read while the worker was down; its tracking row still says "queued".
+      await handle.db.insert(schema.jobs).values({ id: newId(), type: 'publish.poll', projectId, refId: tid, payload: { targetId: tid, postId, projectId, pollNo: 20 }, status: 'queued', createdAt: longAgo, updatedAt: longAgo });
+      await handlePublishDispatch(ctx, makeRun(newId()), {}, new Date());
+      const t = await target(tid);
+      expect(t).toMatchObject({ status: 'failed' });
+      expect(t.statusMessage).toMatch(/Publishing stopped part-way/);
+      expect(t.providerState['retryable']).toBe(true);
     }, 60_000);
 
     it('keeps the plain net for Instagram and for a Zernio target without a post id, even with a read queued', async () => {
