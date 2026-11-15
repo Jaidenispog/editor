@@ -245,20 +245,47 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
 - Unit: `packages/core/test/reference-style.test.ts` (binomial kMin table 15 → 10, 30 → 17, 8 → 7; reasons the beat was
   not measured; drop on a step, single knock rejected, click windows smoothed; every palette family and the worked
   example; v1 → v2 reads; summary 1 of 1, 1 of 2 differs, 3 of 4 pooled, octave-folded tempos, older profiles only for
-  v1 rows; `alsoChanges`, `valueKey` stability and conflicts; no "exact/precise/detected/trending/viral" wording),
+  v1 rows, profiles from an older measuring version (a simulated bump to version 2) combined into no row, the pace
+  included, and counted with the "measured with an older version of the measuring" wording; `alsoChanges`,
+  `valueKey` stability and conflicts; no "exact/precise/detected/trending/viral" wording),
+  `packages/core/test/editing-style.test.ts` (an accepted music fit alone is not a planning value; `MusicFitSchema`
+  accepts an ordered range and a single tempo and refuses `bpmLow` above `bpmHigh`, nested too),
   `packages/core/test/music-ranking.test.ts` (fit: in-range above out-of-range, half time +1, drop +1, unusable last,
   no fit = unchanged order), `packages/ai/test/rules-editing-style.test.ts` (defaults: a stored hash of 40 plans equal
   to the commit before this feature; accepted style: all five plans valid with no errors and still different, beat
   montage accents on every 4th beat within ±40 ms, 2-beat shots, process story ≥ 70 % of cuts on the beat, the reveal
   on the strongest beat within ±0.1 s, punch-ins continuing the same shot at 1.2× and never above 1.25, clean promo
-  calm, "remove the flashy transitions" removes every accent, dismissed = defaults, deterministic; AI brief and
-  `extraStyleTransitions`).
+  calm, "remove the flashy transitions" removes every accent, dismissed = defaults, a music fit alone = defaults in
+  every style and take with no `editingStyle` in the AI brief, deterministic; AI brief and `extraStyleTransitions`).
+- Planner step-down and plan notes: `packages/ai/test/rules-editing-style-sweep.test.ts` (design §4.3.1.6 "Never
+  worse than the defaults"): every N, cross-fades of 0.3–1 s alone and with the beat, the reveal and punch-ins, at
+  15/30/45/60 s × five styles × four music cases (70 s tracks at 60 s) × three takes, each judged by the worker's
+  window around the planned length, with the default plan judged the same way; pinned per-step counts at 60 s; every
+  keep-rest plan differs from the plan without the editing style and every other fallback plan is that plan; no
+  fallback plan mentions the transitions from the owner's videos; fake builds that write a note before failing never
+  leak it into a later step; the comparison build (kept on failure, cancellations passed on); and a revision (before &
+  after 30 s → "Make it 60 seconds.") with the revision wording, every kept join unchanged, and the wording for a new
+  edit when the earlier clips are gone.
+- Edit length and the chosen track (design §4.7 item 5): `packages/core/test/edit-length.test.ts` (`durationBoundsFor`
+  and `editLengthForTrack`: kept, trimmed to 39.8 s for 45 s with a 40 s track, the 88 % and 5 s limits, the refusal
+  message), `packages/ai/test/planned-length.test.ts` (the rules plan, the AI brief's `target` and the AI plan's
+  `targetDurationSec` all 39.8 s; music switched off by an instruction keeps 45 s; a revised length is trimmed too; a
+  30 s track is refused with the shared message), `apps/worker/test/plan-length.test.ts` (no database: the worker's
+  own `planWithFallback` + `planningContextFor` on the planner fixtures with 40 s tracks; 0 of 315 edits fail across
+  the default and six accepted styles × five styles × three tracks × three takes, where the window around the
+  requested 45 s refused 9 default-style plans; the step-down still runs; a revision asking for 45 s; a 30 s track
+  refused), `apps/web/test/music-curve.test.ts` (what the music start picker says when the edit is trimmed or the
+  track is too short).
 - Database + ffmpeg: `apps/worker/test/preferences-db.test.ts` ingests a SYNTHETIC R2 reference: a version 2 profile
   with flashes on the beat, no array longer than 8 numbers, no AI call, and only the thumbnail left under the asset's
   storage prefix. `apps/web/test/preferences-routes.integration.test.ts` covers `GET /api/references/summary` (staff
   read-only), `POST …/summary/decide` (owner-only, CSRF, stale `valueKey` → 409 with nothing written, accept writes
   `editingStyle` + `sources` + `summaryDecisions` and the audit rows), Settings refusing `sources`/`summaryDecisions`
-  and recording owner changes, and `…/summary/reset`.
+  and recording owner changes, `…/summary/reset`, a SYNTHETIC profile from another measuring version (listed with
+  `olderVersion`, rows exactly as without it) and `PUT /api/settings` refusing a reversed `musicFit` tempo range
+  (400 on `preferences.editingStyle.musicFit.bpmLow`, nothing stored). `apps/web/test/studio-access.integration.test.ts`
+  checks generation start with the music start on automatic: a 50 s edit with a 40 s track is refused with the
+  planners' message, a 45 s edit is accepted.
 - Only with the owner's real videos (design §4.3.1.10): 3–5 of their own posted videos, cuts and flashes counted by a
   person on a 15 s excerpt of each (cut count ± 10 %, flash count ± 1, tempo ± 2 BPM or an octave). Thresholds are
   starting values from synthetic clips until then.
