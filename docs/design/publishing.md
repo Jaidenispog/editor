@@ -623,19 +623,29 @@ documented").
 4. **Required TikTok fields.** `allow_comment`, `allow_duet` and `allow_stitch` are required and must not be
    defaulted, so the owner now chooses them on the review card, seeded from creator info. `privacy_level` must be one
    of the account's creator-info values (zernio-api §6). The approve body gains `tiktokInteractions` (§8.1).
-5. **Draft flag.** A TikTok inbox draft is `tiktokSettings.draft: true` **with** `publishNow: true`. It is not a
-   top-level `draft` and never `isDraft` (which saves a Zernio draft that never posts) (zernio-api §6, §8).
-6. **Draft status.** A delivered draft is entry `published` plus `platformSpecificData.isDraft: true` and no URL. The
-   poll checks `isDraft` before mapping to `published` (zernio-api §8).
+5. **Draft flag.** A TikTok inbox draft is `tiktokSettings.draft: true` (confirmed). It is not a top-level `draft`
+   and never `isDraft` (which saves a Zernio draft that never posts) (zernio-api §6, §8). ⚠ Still unconfirmed: whether
+   `publishNow: true` must accompany it. The general rule says yes; the only full video-draft example sends none
+   (zernio-api §8, "Not documented" 6). Fallback: send `publishNow: true`; the poll's bug guard catches a Zernio
+   draft. Draft delivery stays switched off until the draft verification passes.
+6. **Draft status.** A delivered draft is entry `published` with no URL. The TikTok page says the entry carries
+   `platformSpecificData.isDraft: true`; ⚠ still unconfirmed whether a read shows that key or the echoed
+   `tiktokSettings.draft` (zernio-api §8, "Not documented" 11). The poll treats the entry as a draft when either key
+   is true **or** the target's `delivery` is `draft`, before mapping to `published`.
 7. **Idempotency.** `Idempotency-Key` exists on `POST /v1/posts` (24 h). We always send it, and we store our target id
    in `metadata.studioTargetId`, which reads and webhooks return. Crash recovery now looks the post up by that
    metadata before asking the owner (§6.3 rule 4 updated) (zernio-api §3).
-8. **Duplicate refusal.** Zernio refuses the same video and caption to the same account within 24 h with 409 and
-   `details.existingPostId`. We adopt that post if its metadata is ours, otherwise fail with a plain message (zernio-api §3).
+8. **Duplicate refusal.** Zernio checks an `Idempotency-Key` match first (200 with the original post), then a
+   same-`x-request-id` retry (200), and only then refuses the same video and caption to the same account within 24 h
+   with 409 and `details.existingPostId`. We send a fresh `Idempotency-Key` per target and no `x-request-id`, so our
+   own retries get 200 and a 409 means a different request sent the same content. We adopt that post if its metadata
+   is ours, otherwise fail with a plain message (zernio-api §3).
 9. **207 is a 2xx.** A `publishNow` create (and `/retry`) may answer 207; the adapter reads `post.status` and never
    treats `res.ok` as published. A 207 with `scheduled` is Zernio retrying, not a failure (zernio-api §6).
 10. **Post id field.** `post._id` in API responses, `post.id` in webhooks; the URL is `platformPostUrl` in reads and
-    `platform.publishedUrl` in webhooks (zernio-api §9, §11).
+    `platform.publishedUrl` in webhooks (zernio-api §9, §11). ⚠ Still unconfirmed: that the webhook's `post.id` holds
+    the same value as `_id` (its description is "No description"). Webhooks are matched first by
+    `post.metadata.studioTargetId`, as the docs recommend (§7.2.5).
 11. **429 handling.** The rate-limit 429 has no `code`, and an account cooldown also returns 429. Before submitting,
     the adapter checks the account's `rateLimitedUntil` and defers instead of burning retries (zernio-api §2).
 12. **"Direct posting at capacity".** Affects developer-lane accounts only, is `failed`, and Zernio says to retry
@@ -648,6 +658,11 @@ documented").
 15. **Cover.** `video_cover_timestamp_ms` exists, so the chosen cover frame is now sent (§4.1 updated) (zernio-api §6).
 16. **Retry.** `/retry` is allowed only for `failed` and `partial` posts and re-runs only the failed platforms
     (zernio-api §10).
+17. **Second pass (15 Nov 2026).** An adversarial check against the pages corrected these: creator-info paths are
+    nested (`creator.canPostMore`, `postingLimits.*`); 402, 409 `ads_connection_required`, the expired-upload 400 and
+    422 are not documented for a TikTok create, so the adapter branches on HTTP status only (§7.2.4 step 5c); the
+    account `_id` may change on reconnect (§7.2.1); a webhook endpoint is disabled only after 3 days with no success
+    plus 20 consecutive terminal failures or continuous failure (§7.2.5).
 
 #### 7.2.1 Connect (owner only)
 
@@ -679,6 +694,15 @@ documented").
   - Upserts `social_accounts` (platform `tiktok`, provider `zernio`, `external_id` = Zernio `_id`, username).
   - Capabilities: `businessApiLane`, `canPost`, `rateLimitedUntil`, `tiktokAccountType`.
   - Writes audit `social_account.selected`.
+- **Account id after a reconnect.** ⚠ Still unconfirmed: the docs conflict on whether the Zernio `_id` survives a
+  reconnect ("an account id changes on reconnect" on webhooks.mdx; "Reconnecting the same account keeps it and its
+  history" on platforms/tiktok.mdx; create-post's 403 says "Reconnect it, then refresh account IDs from
+  `GET /v1/accounts`"; zernio-api §4). So `external_id` is never assumed stable. Each `social.check` looks for the
+  stored id in the account list. If it is missing, or a call on it returns 404 or 403 `ACCOUNT_DISCONNECTED`, the
+  `social_accounts` row becomes `needs_reauth` with "Choose your TikTok account again" and the owner picks it from
+  the fresh candidates (`POST /api/integrations/zernio/account` replaces `external_id` and writes audit
+  `social_account.selected`). Nothing is matched automatically by handle. Targets not yet submitted re-read the
+  account at claim time; posts already created keep working, because polls and `/retry` use the post id.
 - `DELETE /api/integrations/zernio`: clears the key, marks accounts `disconnected` and deletes the provider's
   `webhook_events` rows, as for Meta and Square (plan §10.3).
 - ⚠ Still unconfirmed: whether a personal (non-Business) TikTok account can publish on the Business lane. The docs
@@ -712,8 +736,10 @@ documented").
   in creator info's `privacyLevels`; if not, the target fails with "TikTok doesn't allow public posts from this
   account right now" and nothing is sent.
 - `allow_comment`, `allow_duet`, `allow_stitch`: required, no default allowed (zernio-api §6). The review card shows three
-  switches (Comments, Duets, Stitches), seeded from creator info `interactionSettings.*.default`. A switch whose
-  `enabled` is `false` is shown off and locked ("Turned off in your TikTok settings"). The owner's choice is part of
+  switches (Comments, Duets, Stitches), seeded from creator info
+  `postingLimits.interactionSettings.{allow_comment,allow_duet,allow_stitch}.default` (read with `mediaType=video`;
+  `allow_duet` and `allow_stitch` are `null` only for photos, zernio-api §4). A switch whose `enabled` is `false` is
+  shown off and locked ("Turned off in your TikTok settings"). The owner's choice is part of
   what approval binds (plan §10.3); if TikTok turns one off after approval, `false` is sent and the target message
   says so. Nothing is ever turned on that the owner did not see on.
 - `video_cover_timestamp_ms = round(coverTimeSec × 1000)`, the frame the owner chose (zernio-api §6).
@@ -762,9 +788,15 @@ documented").
         "publishNow": true,
         "metadata": { "studioTargetId": "<targetId>" } }
       ```
-      `delivery = 'draft'` adds `"draft": true` **inside** `tiktokSettings` and keeps `publishNow: true`. Never send
-      `isDraft`, `publish_type` or unknown fields (Zernio drops unknown fields silently, zernio-api §2), so the body is built
-      from a Zod schema and the fake asserts it.
+      `delivery = 'draft'` adds `"draft": true` **inside** `tiktokSettings` and keeps `publishNow: true`. ⚠ Still
+      unconfirmed: the full draft body. The only full video-draft example sends no `publishNow` and no privacy or
+      interaction fields, and TikTok ignores those fields on a draft (zernio-api §8, "Not documented" 6). The other
+      settings are still sent, because the fields page marks them required; if Zernio saves a Zernio draft instead,
+      step 6's bug guard fails the target. Draft delivery already has its own verification (§4.1, §4.2): **Send to
+      TikTok drafts via Zernio** is offered only as its verification post until `capabilities.verifiedDraftAt` is set,
+      and that post is where the body is confirmed.
+      Never send `isDraft`, `publish_type` or unknown fields (Zernio drops unknown body fields on create, zernio-api
+      §2), so the body is built from a Zod schema and the fake asserts it.
       ⚠ Still unconfirmed: how long the synchronous `publishNow` call takes. The call gets a 10-minute timeout (inside
       the 45-minute job).
    c. **Response.**
@@ -775,29 +807,41 @@ documented").
       - **409 with `details.existingPostId`** (content already sent to this account in 24 h): `GET {base}/v1/posts/
         {existingPostId}`. If `post.metadata.studioTargetId` is this target, adopt it. Otherwise `failed`, not
         retryable: "Zernio refused: this video and caption already went to @handle in the last 24 hours."
-      - **400 / 422** (validation): `failed` with Zernio's `error` text, not retryable, except the expired-upload
-        error, which clears `zernioMediaUrl` and is retryable. Zernio refused the request, so `submitted_at` is cleared in the same update; a
-        later owner **Retry** sends one create with the same `Idempotency-Key`, which returns the original post if one
-        somehow exists.
+      - **400, or any other 4xx not listed here** (validation): `failed` with Zernio's `error` text shown, not
+        retryable automatically. The same update clears `submitted_at` **and** `zernioMediaUrl`. Clearing the upload
+        is deliberate: an expired upload also answers 400, but no `code` for it is documented (zernio-api §5) and we
+        never branch on the `error` text, so every 400 discards the upload and an owner **Retry** re-uploads first.
+        That Retry sends one create with the same `Idempotency-Key`, which returns the original post if one somehow
+        exists. (No 422 is documented on create, zernio-api §6; one would land here.)
       - **401** → connection `needs_reauth`. **403 `ACCOUNT_DISCONNECTED`** → account `needs_reauth`, target
-        `reconnect_account`. **403 `insufficient_permissions`** → connection `error` (key). **402** → connection
-        `error` ("Zernio needs a payment method"). These are refusals too and clear `submitted_at` the same way.
+        `reconnect_account`. **403 `insufficient_permissions`** → connection `error` (key). These are refusals too and
+        clear `submitted_at` the same way.
+      - **Any 402** → connection `error`: "Zernio refused for a billing reason. Check your Zernio billing page." Branch
+        on the status only: create documents 402 only for X balance billing, and the code strings differ between
+        pages (`PAYMENT_REQUIRED`, `payment_required`, `insufficient_balance`; zernio-api §2). Clears `submitted_at`.
+      - **Any other 409** (not a duplicate with `details.existingPostId`, not `idempotency_conflict`): `failed`,
+        retryable by the owner, and enqueue `social.check`. The generic table lists 409 `ads_connection_required` for
+        "the account is inactive or needs reconnecting", but no posting page documents it (zernio-api §2), so the
+        account check decides whether to show a reconnect. Clears `submitted_at`; the owner's Retry reuses the same
+        `Idempotency-Key`.
    d. **Outcome unknown** (timeout, network error, 5xx/503, 429, or 409 `idempotency_conflict`): keep `submitted_at`
       and do **not** send another create. Wait `Retry-After` (or 60 s), then look the post up read-only:
       `GET {base}/v1/posts?accountId=<id>&updatedSince=<submitted_at − 2 min>&fields=metadata,status,platforms` and
-      match `metadata.studioTargetId`. Repeat at 1, 2, 5 and 10 min (as `publish.poll` jobs in lookup mode, so the
+      match `metadata.studioTargetId`. Only listed parameters and `fields` values are used, because `GET /v1/posts`
+      answers 400 to an unknown one (zernio-api §2). If the account's id has changed since submission (§7.2.1), the
+      lookup drops `accountId` and pages through `updatedSince` alone. Repeat at 1, 2, 5 and 10 min (as `publish.poll` jobs in lookup mode, so the
       `publish.target` job ends at once). Found → adopt `_id` and poll. Not found →
       `manual_step_required` / `check_before_retry` (§6.3 rule 4). When the owner chooses **It's not there, try
       again** within 24 h of `submitted_at`, the one new create carries the **same** `Idempotency-Key`, so Zernio
       returns the original post instead of making a second one if it did exist (zernio-api §3).
 6. **Poll** `GET {base}/v1/posts/{postId}` → `{ post }`. Read the TikTok entry in `post.platforms[]` (`status`,
-   `publishedAt`, `platformPostUrl`, `platformSpecificData.isDraft`, `errorMessage`, `errorCategory`, `errorSource`)
+   `publishedAt`, `platformPostUrl`, `platformSpecificData.isDraft` / `platformSpecificData.tiktokSettings.draft`, `errorMessage`, `errorCategory`, `errorSource`)
    and `post.status` (zernio-api §9):
 
    | Zernio | Target |
    | --- | --- |
-   | entry `published`, no `isDraft` | `published`, `published_at = publishedAt`. `published_url` only from `platformPostUrl`; until then "The TikTok link appears in a few minutes" |
-   | entry `published`, `platformSpecificData.isDraft: true` | `manual_step_required` / `finish_in_tiktok_app`. If `platformPostUrl` appears later (the owner posted it publicly), → `published` with that URL |
+   | entry `published`, not a draft (below) | `published`, `published_at = publishedAt`. `published_url` only from `platformPostUrl`; until then "The TikTok link appears in a few minutes" |
+   | entry `published` and a draft: `platformSpecificData.isDraft: true`, or `platformSpecificData.tiktokSettings.draft: true`, or our target's `delivery` is `draft` (⚠ which key a read shows is unconfirmed, zernio-api §8) | `manual_step_required` / `finish_in_tiktok_app`. If `platformPostUrl` appears later (the owner posted it publicly), → `published` with that URL |
    | post `scheduled`, entry `pending` | `queued`: "Waiting at Zernio. It retries temporary problems and holds posts over TikTok's daily limit." If our own 24 h count is ≥ 15: "TikTok's daily limit is reached; Zernio will post it when allowed" |
    | post `publishing`, entry `processing` / `uploading` | `processing` ("TikTok is processing the video"; this can take up to 48 h) |
    | entry `failed` (post `failed`) | `failed` with `errorMessage` shown as text. Retryable when `errorSource` is `platform` or `system`; `errorCategory: auth_expired` → `reconnect_account` |
@@ -814,7 +858,8 @@ documented").
 7. **Retry of a failed Zernio target.** Re-read the post first. Only when Zernio's `post.status` is `failed` or
    `partial`: `POST {base}/v1/posts/{postId}/retry` (no body), never a new post (zernio-api §10). 200 → poll; 207 → map
    `post.status` as above; 409 "Post is currently publishing" → poll; 422 (content no longer kept) → `failed`, "Post
-   it yourself"; 429 → wait `Retry-After`. The file is already in Zernio's permanent storage, so no re-upload.
+   it yourself"; 429 → wait `Retry-After`; 402 (documented on `/retry` as a failed team payment, with `error` alone;
+   zernio-api §2) → connection `error`, "Zernio says the last payment failed. Fix it in Zernio, then try again". The file is already in Zernio's permanent storage, so no re-upload.
 
 **Error mapping (`mapZernioError`).** Branch on HTTP status, `type` and `code`; never on the `error` text, which is
 only shown to the owner (zernio-api §2).
@@ -823,12 +868,14 @@ only shown to the owner (zernio-api §2).
 | --- | --- | --- |
 | 401 `missing_credentials` / `invalid_credentials` | reauth | Connection `needs_reauth` |
 | 403 `insufficient_permissions` (`required_group`) | permanent | Connection `error`: the key lacks a group |
-| 403 `ACCOUNT_DISCONNECTED`, 409 `ads_connection_required`, `errorCategory: auth_expired`, "Missing required TikTok permissions…" | reauth | Account `needs_reauth`; target `reconnect_account`: "Reconnect TikTok in Zernio and approve every permission" |
-| 403 `ACCOUNT_NOT_ENABLED_FOR_POSTING` / `PROFILE_OVER_LIMIT`, 402 `PAYMENT_REQUIRED` | permanent | Connection `error` with a plain message |
+| 403 `ACCOUNT_DISCONNECTED`, `errorCategory: auth_expired`, "Missing required TikTok permissions…" | reauth | Account `needs_reauth`; target `reconnect_account`: "Reconnect TikTok in Zernio and approve every permission" |
+| Any other 409 (for example `ads_connection_required`, which only the generic table lists; zernio-api §2) | permanent, retryable by the owner | `failed`; enqueue `social.check`, which decides whether the account needs a reconnect (step 5c) |
+| 403 `ACCOUNT_NOT_ENABLED_FOR_POSTING` / `PROFILE_OVER_LIMIT` | permanent | Connection `error` with a plain message |
+| Any 402 (status only; the code strings differ between pages) | permanent | Connection `error`: a billing problem at Zernio (step 5c, step 7) |
 | 429 (any) | transient / unknown | Before submitting: wait `Retry-After`. After a create: outcome unknown (step 5d) |
 | 409 `details.existingPostId` | adopt or permanent | Step 5c |
 | 409 `idempotency_conflict` | unknown | Step 5d |
-| 400 / 422 | permanent | `failed`, not retryable |
+| 400, or any other 4xx not listed | permanent | `failed`, not retried automatically; the upload is discarded so an owner Retry re-uploads (step 5c) |
 | 5xx, 503 `temporarily_unavailable`, network, timeout | transient / unknown | Reads: retry. After a create: step 5d |
 | 207 | — | Read `post.status`, never `res.ok` |
 | entry error "TikTok direct posting is at capacity…" (developer lane only) | permanent, retryable by the owner | `failed`: "TikTok is busy. Try again in a few hours, or send it to your drafts." Not re-queued automatically |
@@ -850,17 +897,21 @@ only shown to the owner (zernio-api §2).
   - No signed timestamp or replay protection is documented, and Zernio redelivers byte-identical bodies for 30 days.
     So a verified event is still only a hint.
 - **Storage.** Insert into `webhook_events` with provider `zernio` an **envelope only** (plan §10.3): event `id`,
-  `event`, `post.id`, `platform.name`, `account.accountId`. `external_event_id` = the payload's `id` (equal to the
+  `event`, `post.id`, `post.metadata.studioTargetId`, `platform.name`, `account.accountId`. `external_event_id` = the payload's `id` (equal to the
   `X-Zernio-Event-Id` header, stable across retries) **only when the signature was verified**; otherwise
   `unverified:` + `sha256(rawBody)`. This way an unsigned or forged delivery can never take the unique
   `(provider, external_event_id)` slot of a real event (Square design §7.3 avoids the same problem by not storing
   unverified events at all). On conflict, do nothing (a duplicate delivery); enqueue `webhook.process` only when a
   row was inserted.
-- **Processing.** The payload is **only a hint**. `webhook.process` reads `post.id` (webhook field name; API reads use
-  `_id`), finds the target by `external_post_id`, and enqueues `publish.poll`, which asks Zernio with our key. If no
-  target has that id yet and the payload carries `post.metadata.studioTargetId` for a target in the outcome-unknown
-  path, the poll first reads `GET /v1/posts/{post.id}` and adopts it only if the read-back metadata and account match.
-  A forged or replayed event can at most trigger an extra read.
+- **Processing.** The payload is **only a hint**. `webhook.process` finds the target first by
+  `post.metadata.studioTargetId` (echoed on every post event; the docs say "Put your own record id in it and no event
+  needs a lookup by `post._id`", zernio-api §11), and otherwise by `post.id` against `external_post_id`. ⚠ Still
+  unconfirmed: that the webhook's `post.id` holds the same value as the API's `_id` (its description is "No
+  description"); record it with the first verification webhook. Either way it only enqueues `publish.poll`, which
+  asks Zernio with our key: a target with `external_post_id` is read by that id (never by the webhook's), and a
+  target in the outcome-unknown path reads `GET /v1/posts/{post.id}` and adopts it only if the read-back
+  `metadata.studioTargetId` and account match. If that read fails, the normal metadata lookup (step 5d) runs. A
+  forged or replayed event can at most trigger an extra read.
 - **No authoritative mode.** `GET /v1/posts/{postId}` exists, so webhooks never set state.
 - **Events used:** `post.platform.published`, `post.platform.failed`, `post.published`, `post.partial`,
   `post.failed`, `post.tiktok.url_resolved` (all confirmed, zernio-api §11), plus `account.disconnected`, which enqueues
@@ -868,8 +919,10 @@ only shown to the owner (zernio-api §2).
 - **Registration.** The owner adds `{APP_URL}/api/webhooks/zernio` with those events and the secret in Zernio's
   webhooks dashboard (checklist). ⚠ Still unconfirmed: whether the dashboard has a secret field. Fallback: the person
   running the server registers it once with `POST /v1/webhooks/settings` `{ name, url, events, secret }` (needs the
-  `webhooks` group on that key). Polling works without any webhook; Zernio disables an endpoint after 3 days of
-  failures, which only slows updates.
+  `webhooks` group on that key). Polling works without any webhook. Zernio disables an endpoint only after 3 days
+  with no successful delivery, and only if it also had 20 consecutive terminal failures or failed continuously for
+  those 3 days; one success keeps it on, Zernio emails the owner, and `isActive: true` re-enables it (zernio-api §11).
+  A disabled endpoint only slows updates.
 
 ---
 
@@ -1076,10 +1129,10 @@ Follows `apps/web/src/components/ui`: `Card`, `Badge`/`StatusPill`, `Button`, `D
 5. **Quota reached** → requeued with `startAfter`, and no container is created.
 6. **Error 190** → account `needs_reauth`, target `reconnect_account`.
 7. **Two destinations.** Instagram fails permanently while Zernio TikTok is published. The post is `partial`, and the published target is unchanged after an Instagram retry.
-8. **Zernio happy path.** Health + creator info → presign → PUT (no `Authorization`, same `Content-Type`) → `POST /v1/posts` (fake asserts both consent flags, `PUBLIC_TO_EVERYONE`, the three interaction choices, `video_cover_timestamp_ms`, `mediaItems` type `video`, `metadata.studioTargetId`, the `Idempotency-Key` header and no `isDraft`) → poll processing → published without a URL → URL resolved → link shown. Variants: a 207 with `scheduled` stays `queued`; a draft entry `published` with `isDraft: true` becomes `finish_in_tiktok_app`; a 409 with `existingPostId` whose metadata is ours is adopted.
+8. **Zernio happy path.** Health + creator info → presign → PUT (no `Authorization`, same `Content-Type`) → `POST /v1/posts` (fake asserts both consent flags, `PUBLIC_TO_EVERYONE`, the three interaction choices, `video_cover_timestamp_ms`, `mediaItems` type `video`, `metadata.studioTargetId`, the `Idempotency-Key` header and no `isDraft`) → poll processing → published without a URL → URL resolved → link shown. Variants: a 207 with `scheduled` stays `queued`; a draft entry `published` becomes `finish_in_tiktok_app` whether the fake marks it with `platformSpecificData.isDraft: true`, with `platformSpecificData.tiktokSettings.draft: true`, or with neither (our `delivery` is `draft`); a 409 with `existingPostId` whose metadata is ours is adopted; any 402 (with `PAYMENT_REQUIRED`, `payment_required` or no code) gives connection `error`; a 409 with `ads_connection_required` gives `failed` plus a `social.check`; a 400 clears `submitted_at` and `zernioMediaUrl`, and the owner's Retry re-uploads before the create; the stored account id missing from the fake's account list makes the account `needs_reauth`.
 9. **Zernio crash between `POST /v1/posts` and saving the `postId`** → the metadata lookup adopts the post when the fake has it; otherwise `check_before_retry`, and no second POST until `retry_anyway` (which reuses the same `Idempotency-Key`).
 10. **Zernio failed** → **Retry** calls `/v1/posts/{id}/retry` and does not create a new post.
-11. **Webhooks.** The same event delivered twice gives one `webhook_events` row and one poll. A forged event for an unknown post changes nothing. An event never sets status by itself.
+11. **Webhooks.** The same event delivered twice gives one `webhook_events` row and one poll. An event is matched by `post.metadata.studioTargetId` even when its `post.id` differs from the stored `external_post_id`, and the poll still reads by the stored id. A forged event for an unknown post changes nothing. An event never sets status by itself.
 12. **Scheduling.** A scheduled post at now+2 min is dispatched by `publish.dispatch` only after it is due. Cancel before due → no external calls. Reschedule → only the time changes.
 13. **Licence changed after approval** (`permitted.tiktok` set to false) → `music_licence_changed`, no external calls.
 14. **`meta_only` track.** The API refuses a TikTok standard variant (`VALIDATION`), and TikTok gets a `no_music` export file with no music stream (ffprobe on the audio level / track count).
@@ -1110,7 +1163,10 @@ Follows `apps/web/src/components/ui`: `Card`, `Badge`/`StatusPill`, `Button`, `D
   - the items in `docs/research/zernio-api.md` "Not documented" (paths, field names and webhook signing are documented)
   - held-over-cap behaviour
   - URL resolution delay
-  - draft behaviour
+  - draft behaviour: whether the draft body needs `publishNow: true`, and which key (`isDraft` or the echoed
+    `tiktokSettings.draft`) marks a delivered draft on a read
+  - that a webhook's `post.id` equals the API's `_id`
+  - whether the account `_id` changes when the owner reconnects TikTok in Zernio
 - How the manual steps feel on the owner's phone, including Web Share with a 60 MB file on iOS.
 
 ---
@@ -1155,7 +1211,7 @@ Follows `apps/web/src/components/ui`: `Card`, `Badge`/`StatusPill`, `Button`, `D
 **Optional: automatic TikTok posting via Zernio.** This costs nothing for up to 2 connected accounts across your whole team, according to Zernio's pricing pages (read on 15 Nov 2026: 2 accounts included as a US$12 monthly credit, posts unlimited; `docs/research/zernio-api.md` §12).
 1. Create a **Zernio** account in the business's name. Connect **only TikTok** (a Business connection; approve every permission). Don't connect X unless you have added a card, because X is billed from the first post.
 2. Ask the person running the server to set `TIKTOK_PUBLISH_PROVIDER=zernio` and `ZERNIO_API_BASE_URL=https://zernio.com/api`, and to allow `zernio.com` and the upload host Zernio hands out (its example is an `r2.cloudflarestorage.com` address).
-3. Create an API key in Zernio (API keys page). Best: switch off every area except **Accounts** and **Publishing**. Paste it into Settings → Integrations → TikTok. Choose your TikTok account. If Studio Assistant says it is on the older connection, reconnect TikTok inside Zernio.
+3. Create an API key in Zernio (API keys page). Best: switch off every area except **Accounts** and **Publishing**. Paste it into Settings → Integrations → TikTok. Choose your TikTok account. If Studio Assistant says it is on the older connection, reconnect TikTok inside Zernio, then come back and choose your TikTok account again (Zernio may give it a new ID when you reconnect).
 4. Optional: add the webhook address `https://<your app address>/api/webhooks/zernio` in Zernio with the events listed in §7.2.5 and the secret the person running the server gives you, so updates arrive faster.
 5. Do the **first verification post**:
    - Posts via Zernio are **public immediately**.
@@ -1248,7 +1304,7 @@ Follows `apps/web/src/components/ui`: `Card`, `Badge`/`StatusPill`, `Button`, `D
 
 ## 14. Open questions
 
-1. **Zernio specifics.** Confirmed from docs.zernio.com on 15 Nov 2026 (`docs/research/zernio-api.md`, §7.2): base host, presign path, account list and lane, post read, field names, webhook signature and event id, idempotency and draft status. Still open (⚠ in §7.2, each with a fallback): the status of a held post, `Content-Length` on the upload PUT, how long a `publishNow` create takes, personal-account publishing, and the dashboard's webhook secret field. The first verification post records them.
+1. **Zernio specifics.** Confirmed from docs.zernio.com on 15 Nov 2026 (`docs/research/zernio-api.md`, §7.2): base host, presign path, account list and lane, post read, field names, webhook signature and event id, idempotency, the draft flag (`tiktokSettings.draft: true`) and that a delivered draft shows as entry `published`. Still open (⚠ in §7.2, each with a fallback): the status of a held post, `Content-Length` on the upload PUT, how long a `publishNow` create takes, personal-account publishing, whether Zernio's TikTok app is audited, the dashboard's webhook secret field, the full draft body (`publishNow` or not; the docs conflict), which key marks a delivered draft on a read, whether a webhook's `post.id` equals the API's `_id`, whether the account `_id` survives a reconnect (the docs conflict), and the TikTok-posting meaning of 402, 409 `ads_connection_required` and the expired-upload 400 (only generic or code-less descriptions exist). The first verification post (and, for drafts, the draft verification post) records them.
 2. **Meta Graph version.** v26.0 or v27.0, and whether the `/{ig-id}/media` listing (used only for crash recovery) and `appsecret_proof` behave as expected under a Unified Login system-user token. Confirm during the first verification post.
 3. **Resumable upload size limit (100 MB vs 300 MB).** Default to 100 MB and route larger files to manual posting. Should the export preset instead aim for a smaller file when a post is meant for direct Instagram publishing? The suggestion is no, unless real exports exceed 100 MB.
 4. **Manual-post reminders.** Should due manual posts also trigger a reminder email to the owner, through the email design's transactional stream? The design shows them in-app only.

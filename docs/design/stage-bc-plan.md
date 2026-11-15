@@ -748,14 +748,21 @@ inside a group does not matter for correctness, only for migration numbers.
     creator info, `POST /v1/media/presign` + `PUT uploadUrl`, the `POST /v1/posts` body (`content`, `mediaItems`,
     `platforms[{platform, accountId}]`, `tiktokSettings` with the required `allow_comment`/`allow_duet`/`allow_stitch`,
     `publishNow`, `metadata`), `Idempotency-Key`, the 409 duplicate refusal, 207 handling, `GET /v1/posts/{postId}`
-    and its statuses, `POST /v1/posts/{postId}/retry`, drafts (`tiktokSettings.draft: true`, delivered = `published`
-    + `isDraft`), the 15-per-24 h hold, error codes, and the webhook scheme (`X-Zernio-Signature`, hex HMAC-SHA256 of
-    the raw body, event `id`).
+    and its statuses, `POST /v1/posts/{postId}/retry`, the draft flag (`tiktokSettings.draft: true`; a delivered draft
+    is entry `published` with no URL), the 15-per-24 h hold, the documented error codes (401, 403 codes, 409 duplicate
+    and `idempotency_conflict`, 429, 503), and the webhook scheme (`X-Zernio-Signature`, hex HMAC-SHA256 of the raw
+    body, event `id`, `metadata` echoed on post events). Corrected in a second pass on 15 Nov 2026 (publishing §7.2
+    item 17): nested creator-info paths, the order of the duplicate checks, and the webhook disabling rule.
   - **Still open, with a safe fallback in §7.2 (they block only the live verification post's sign-off, not
     building):** the status a held post shows (maps to `queued`), `Content-Length` on the upload PUT (sent
     explicitly), how long a `publishNow` create takes (10-minute timeout, then the metadata lookup), whether a
-    personal TikTok account can publish (trust `canPost`), whether Zernio's TikTok app is audited, and whether the
-    webhook dashboard takes a secret (polling works without webhooks).
+    personal TikTok account can publish (trust `canPost`), whether Zernio's TikTok app is audited, whether the
+    webhook dashboard takes a secret (polling works without webhooks), the full draft body (`publishNow` or not; the
+    docs conflict; draft delivery is offered only as its own verification post until `verifiedDraftAt`), which key
+    marks a delivered draft on a read (either key, or our `delivery`), whether a webhook's `post.id` equals the API's
+    `_id` (match on `metadata.studioTargetId` first), whether the account `_id` survives a reconnect (the docs
+    conflict; a missing id makes the owner choose the account again), and the TikTok-posting meaning of 402, 409
+    `ads_connection_required` and the expired-upload 400 (branch on HTTP status only; every 400 discards the upload).
   - The adapter still ships behind `TIKTOK_PUBLISH_PROVIDER=zernio`, and stays unverified until the first verification
     post; only the manual path shows until then.
 - **Acceptance tests.** Publishing §11.2 cases 7–11 against the Zernio fake:
@@ -766,10 +773,14 @@ inside a group does not matter for correctness, only for migration numbers.
   - Partial post keeps the published Instagram target.
   - From the docs read (publishing §7.2): the request body matches the Zod contract (three interaction choices,
     `metadata.studioTargetId`, `Idempotency-Key`, no `isDraft`); 207 `scheduled` stays `queued`; a draft entry
-    `published` + `isDraft` becomes `finish_in_tiktok_app`; a 409 with our `existingPostId` is adopted; a correctly
-    signed webhook (`X-Zernio-Signature`) is stored under its event `id`, a badly signed one under `unverified:`.
+    `published` becomes `finish_in_tiktok_app` with `isDraft`, with the echoed `tiktokSettings.draft`, or with neither;
+    a 409 with our `existingPostId` is adopted; any 402 and any other 409 are handled by status alone; a 400 discards
+    the upload; a stored account id missing from the list makes the account `needs_reauth`; a correctly signed
+    webhook (`X-Zernio-Signature`) is stored under its event `id`, a badly signed one under `unverified:`, and events
+    are matched by `metadata.studioTargetId` first.
 - **Verify with the owner's real accounts.**
-  - The audited lane end to end, held-over-cap behaviour, URL resolution delay, draft behaviour, and whether
+  - The audited lane end to end, held-over-cap behaviour, URL resolution delay, draft behaviour (body and the key
+    that marks a delivered draft), webhook `post.id` = `_id`, the account id after a reconnect, and whether
     "first 2 accounts free" still holds.
   - The first verification post is a real public TikTok.
 
@@ -1195,9 +1206,14 @@ Three independent review rounds fixed G4 before G5 started. Binding on WP6b, WP9
   for review requests everywhere (WP9's Google reviews tab must not reuse them for Google's own reviews).
 - **WP10 can start (docs read 2026-11-15):** docs.zernio.com was read as data on 2026-11-15
   (`docs/research/zernio-api.md`) and publishing §7.2 now carries the confirmed paths, fields, headers and webhook
-  signature. Build to §7.2 exactly, including its "Changed after reading the docs" list: Business lane from
-  `integrationLane`, owner-chosen `allow_comment`/`allow_duet`/`allow_stitch`, `tiktokSettings.draft: true` with
-  `publishNow`, `isDraft` checked before `published`, `Idempotency-Key` + `metadata.studioTargetId`, 207 read by
-  `post.status`, polls to 50 h, and webhooks as hints only even when signed. The remaining ⚠ items each have a
-  fallback and are recorded at the first verification post; they do not block building. Nothing in WP10 may call the
+  signature. A second, adversarial pass the same day corrected six statements and downgraded seven to "still to
+  confirm" (publishing §7.2 item 17, zernio-api "Corrections"). Build to §7.2 exactly, including its "Changed after
+  reading the docs" list: Business lane from `integrationLane`, owner-chosen `allow_comment`/`allow_duet`/
+  `allow_stitch` seeded from `postingLimits.interactionSettings`, `tiktokSettings.draft: true` (with `publishNow`, ⚠)
+  offered only as its verification post until `verifiedDraftAt`, the draft check (either key or our `delivery`)
+  before `published`, `Idempotency-Key` + `metadata.studioTargetId`, 207 read by `post.status`, 402 and unknown 409
+  by status alone, every 400 discarding the upload, a changed account id handled by re-choosing, polls to 50 h, and
+  webhooks as hints only even when signed (matched by metadata first). The remaining ⚠ items each have a fallback
+  that needs no guess in code and are recorded at the first verification post (drafts: the draft verification
+  post); they do not block building. Nothing in WP10 may call the
   real Zernio API in tests: the fake serves every path.
