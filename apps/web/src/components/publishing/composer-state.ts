@@ -21,6 +21,8 @@ import type { EligibilityItemDto, MethodOption } from '@/lib/shared/publishing-d
 export interface DestinationDraft {
   enabled: boolean;
   method: PublishMethod;
+  /** Zernio only: publish, or send to the TikTok drafts inbox. Always `publish` for the other methods. */
+  delivery: 'publish' | 'draft';
   variant: MediaVariant;
 }
 
@@ -63,8 +65,8 @@ export function initialDraft(item: EligibilityItemDto, captionFooter: string, no
     mode: 'now',
     schedule: suggestedSchedule(now),
     destinations: {
-      instagram: { enabled: false, method: defaultMethod(item, 'instagram'), variant: defaultVariant(item, 'instagram') },
-      tiktok: { enabled: false, method: 'manual', variant: defaultVariant(item, 'tiktok') },
+      instagram: { enabled: false, method: defaultMethod(item, 'instagram'), delivery: 'publish', variant: defaultVariant(item, 'instagram') },
+      tiktok: { enabled: false, method: 'manual', delivery: 'publish', variant: defaultVariant(item, 'tiktok') },
     },
     allowRepeat: false,
   };
@@ -76,9 +78,9 @@ export function addVideo(list: string[], versionId: string): string[] {
   return [...list, versionId];
 }
 
-/** The chosen method option, if it exists. */
-export function methodOption(item: EligibilityItemDto, platform: TargetPlatform, method: PublishMethod): MethodOption | undefined {
-  return item.methods[platform].find((o) => o.method === method);
+/** The chosen method option, if it exists (Zernio has two: publish and drafts). */
+export function methodOption(item: EligibilityItemDto, platform: TargetPlatform, method: PublishMethod, delivery: 'publish' | 'draft' = 'publish'): MethodOption | undefined {
+  return item.methods[platform].find((o) => o.method === method && (method !== 'zernio' || (o.delivery ?? 'publish') === delivery));
 }
 
 /** Problems that stop a row from going to review (plain sentences). */
@@ -90,7 +92,7 @@ export function draftProblems(item: EligibilityItemDto, d: VideoDraft, now: Date
   out.push(...caption.errors);
   for (const p of enabled) {
     const dest = d.destinations[p];
-    const option = methodOption(item, p, dest.method);
+    const option = methodOption(item, p, dest.method, dest.delivery ?? 'publish');
     if (!option?.available) out.push(option?.reason ?? 'That way of posting is not available.');
     const e = item.eligibility.find((x) => x.platform === p);
     if (e && !e.allowedVariants.includes(dest.variant)) out.push(e.reasons[0] ?? 'That file is not allowed here.');
@@ -117,7 +119,7 @@ export function buildCreateRequest(drafts: VideoDraft[]): { items: Array<Record<
       ...(d.mode === 'scheduled' ? { schedule: d.schedule } : {}),
       targets: (Object.keys(d.destinations) as TargetPlatform[])
         .filter((p) => d.destinations[p].enabled)
-        .map((p) => ({ platform: p, method: d.destinations[p].method, delivery: 'publish', variant: d.destinations[p].variant })),
+        .map((p) => ({ platform: p, method: d.destinations[p].method, delivery: d.destinations[p].method === 'zernio' ? (d.destinations[p].delivery ?? 'publish') : 'publish', variant: d.destinations[p].variant })),
     })),
   };
 }

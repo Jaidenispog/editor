@@ -4,7 +4,7 @@ import { TARGET_PLATFORM_NAMES, formatDateTime, type TargetPlatform } from '@stu
 import { Switch } from '@/components/ui/switch';
 import type { EligibilityDto, EligibilityItemDto } from '@/lib/shared/publishing-dto';
 import type { DestinationDraft } from './composer-state';
-import { METHOD_LABELS } from './labels';
+import { methodLabel } from './labels';
 
 /**
  * One platform's switch (off by default), its method choice with the reason any option is greyed out, and the file
@@ -42,15 +42,22 @@ export function DestinationPicker({
           <fieldset className="space-y-2">
             <legend className="text-xs font-medium text-charcoal-600">How</legend>
             {options.map((o) => {
-              const label = o.isVerification ? 'First verification post (publish from Studio Assistant)' : METHOD_LABELS[o.method];
+              const label = methodLabel(o.method, o.delivery, o.isVerification);
+              const delivery = o.delivery ?? 'publish';
+              const checked = value.method === o.method && (o.method !== 'zernio' || (value.delivery ?? 'publish') === delivery);
               return (
-                <label key={o.method} className={`flex min-h-11 items-start gap-2 rounded-lg px-2 py-1.5 ${o.available ? 'cursor-pointer hover:bg-charcoal-50' : 'opacity-60'}`}>
-                  <input type="radio" className="mt-1 size-4 accent-[var(--accent)]" name={`${item.versionId}-${platform}-method`} checked={value.method === o.method} disabled={!o.available} onChange={() => onChange({ ...value, method: o.method })} />
+                <label key={`${o.method}:${delivery}`} className={`flex min-h-11 items-start gap-2 rounded-lg px-2 py-1.5 ${o.available ? 'cursor-pointer hover:bg-charcoal-50' : 'opacity-60'}`}>
+                  <input type="radio" className="mt-1 size-4 accent-[var(--accent)]" name={`${item.versionId}-${platform}-method`} checked={checked} disabled={!o.available} onChange={() => onChange({ ...value, method: o.method, delivery })} />
                   <span className="min-w-0 text-sm">
                     <span className="font-medium text-charcoal-900">{label}</span>
                     {o.method !== 'manual' ? <span className="block text-xs text-charcoal-600">as {o.handle}</span> : null}
                     {!o.available && o.reason ? <span className="block text-xs text-charcoal-600">{o.reason}</span> : null}
-                    {o.isVerification && o.available ? <span className="block text-xs text-amber-800">This is a real, public post on {o.handle}. Choose an edit you&apos;re happy to share.</span> : null}
+                    {o.isVerification && o.available ? (
+                      <span className="block text-xs text-amber-800">
+                        {o.method === 'zernio' && o.delivery === 'draft' ? `This sends a real draft to the TikTok inbox of ${o.handle}.` : `This is a real, public post on ${o.handle}.`} Choose an edit you&apos;re happy to share.
+                      </span>
+                    ) : null}
+                    {o.method === 'zernio' && o.delivery === 'draft' ? <span className="block text-xs text-charcoal-600">Choose the cover, sound and caption in the TikTok app.</span> : null}
                   </span>
                 </label>
               );
@@ -80,6 +87,12 @@ export function DestinationPicker({
             <p className="text-xs text-charcoal-500">
               {quota.instagram.usage} of {quota.instagram.total ?? '?'} posts used in the last 24 h
               {quota.instagram.checkedAt ? ` (checked ${formatDateTime(quota.instagram.checkedAt, { dateStyle: undefined, timeStyle: 'short' })})` : ''}
+            </p>
+          ) : null}
+          {platform === 'tiktok' && value.method === 'zernio' && quota.zernio ? (
+            <p className={quota.zernio.last24h >= quota.zernio.cap ? 'text-xs font-medium text-amber-800' : 'text-xs text-charcoal-500'}>
+              {quota.zernio.last24h} of {quota.zernio.cap} TikTok videos in the last 24 h
+              {quota.zernio.last24h >= quota.zernio.cap ? ': Zernio will hold this one until TikTok allows more.' : ''}
             </p>
           ) : null}
           {platform === 'instagram' ? <p className="text-xs text-charcoal-500">Instagram&apos;s library music can&apos;t be added from here. Add it in the Instagram app if you want it.</p> : <p className="text-xs text-charcoal-500">Add a Commercial Sound in the TikTok app if you want music.</p>}

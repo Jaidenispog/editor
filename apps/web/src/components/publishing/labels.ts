@@ -26,6 +26,15 @@ export const METHOD_LABELS: Record<PublishMethod, string> = {
   zernio: 'Publish via Zernio',
 };
 
+/** The composer's and cards' words for one way of posting (Zernio drafts and first verification posts included). */
+export function methodLabel(method: PublishMethod, delivery: 'publish' | 'draft' | undefined, isVerification: boolean): string {
+  if (method === 'zernio') {
+    const base = delivery === 'draft' ? 'Send to TikTok drafts via Zernio' : 'Publish via Zernio';
+    return isVerification ? `First verification post (${base.charAt(0).toLowerCase()}${base.slice(1)})` : base;
+  }
+  return isVerification ? 'First verification post (publish from Studio Assistant)' : METHOD_LABELS[method];
+}
+
 /** Numbered manual steps per platform (design §4.4). */
 export const MANUAL_STEPS_TEXT = {
   instagram: ['Open Instagram and tap +', 'Choose Reel, then the video you downloaded', "Cover: pick the frame, or 'Add from camera roll' with the cover image", 'Paste the caption', 'Tap Share'],

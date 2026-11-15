@@ -247,6 +247,26 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   resumable upload, Sound Collection copyright matching, Web Share on iOS. The first verification post is a real public
   reel the owner chooses.
 
+### TikTok through Zernio (Stage C, WP10)
+
+- Unit: `packages/core/test/zernio.test.ts` (strict create body, consent binding, interaction seeds, poll and lookup
+  schedules, webhook envelope); `apps/worker/test/zernio.test.ts` (`mapZernioError`, `mapZernioPost` incl. the three
+  draft markers, the upload transport refusing http, odd ports, credentials and private addresses, the test-only
+  origin rule); `apps/web/test/zernio.test.ts` (TikTok card states, composer choices, webhook signature).
+- Database + ffmpeg + a local fake of Zernio (`apps/worker/test/fakes/zernio-server.ts`, which checks every create
+  body against the strict contract) and of Meta: `apps/worker/test/zernio-db.test.ts` (read-only check, lane, refused
+  key, missing group, vanished account id; publishing design §11.2 cases 7–11: happy path with the exact body and
+  upload headers, no consent, 207 `scheduled`, the three draft markers, 409 adopted or refused, any 402, 409
+  `ads_connection_required`, 400 then Retry re-uploading, a changed account id, a cooldown, a crash after the create
+  adopted by the metadata lookup, "check before retry" then one create with the same key, `/retry`, a partial post with
+  Instagram, webhooks as hints, a reversal, flag off).
+- Database-backed routes: `apps/web/test/zernio-routes.integration.test.ts` (key connect and hint, account choice,
+  composer options, consent-tick approval and binding, drafts switch and draft verification, the webhook route's
+  signed, unsigned and repeated deliveries, disconnect). No test ever contacts Zernio.
+- Only verifiable with the owner's accounts: the audited lane end to end, held-over-cap behaviour, URL resolution
+  delay, the draft body and the key that marks a delivered draft, webhook `post.id` = `_id`, the account id after a
+  reconnect, and whether the first two accounts are still free. The first verification post is a real public TikTok.
+
 ## Stage B browser test
 
 `apps/web/e2e/stage-b.e2e.mjs` is the Stage B acceptance check from `docs/design/stage-bc-plan.md` ("music licence →

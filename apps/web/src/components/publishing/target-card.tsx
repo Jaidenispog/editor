@@ -10,7 +10,7 @@ import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
 import type { PublishPostDto, TargetDto } from '@/lib/shared/publishing-dto';
 import { ConfirmPostedDialog } from './confirm-posted-dialog';
-import { METHOD_LABELS, TARGET_LABELS } from './labels';
+import { TARGET_LABELS, methodLabel } from './labels';
 import { ManualSteps } from './manual-steps';
 
 /**
@@ -61,7 +61,7 @@ export function TargetCard({ post, target, isOwner, onChanged }: { post: Publish
             {name} · {target.handle}
           </p>
           <p className="text-xs text-charcoal-500">
-            {METHOD_LABELS[target.method]} · {target.variant === 'no_music' ? '1080×1920 MP4, without music' : '1080×1920 MP4, with the edit’s sound'}
+            {methodLabel(target.method, target.delivery, false)} · {target.variant === 'no_music' ? '1080×1920 MP4, without music' : '1080×1920 MP4, with the edit’s sound'}
             {target.isVerification ? ' · First verification post' : ''}
           </p>
         </div>
@@ -87,7 +87,9 @@ export function TargetCard({ post, target, isOwner, onChanged }: { post: Publish
       ) : null}
       {target.awaitingVerificationAnswer && isOwner && target.accountId ? (
         <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50 p-3">
-          <p className="text-sm font-medium text-sky-900">Can you see the reel on {target.handle}?</p>
+          <p className="text-sm font-medium text-sky-900">
+            {target.method === 'zernio' ? (target.delivery === 'draft' ? `Can you see the draft in the TikTok inbox of ${target.handle}?` : `Can you see the video on ${target.handle}?`) : `Can you see the reel on ${target.handle}?`}
+          </p>
           <div className="mt-2 flex flex-wrap gap-2">
             <Button className="min-h-11" loading={busy === 'seen'} onClick={() => void verify('seen')}>
               Yes, it&apos;s there

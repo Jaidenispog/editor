@@ -33,7 +33,7 @@ Australian English, AUD, `Australia/Melbourne`.
 | Email and review requests: Postmark, consent ledger, send gate, review link and requests, Google rating (WP7) | Yes | Yes, against a fake email provider and a fake Google API (unit, database and route tests); no real email sent | A domain with DNS access, a Postmark account and its approval, the review link; optionally a Google Maps key and Place ID |
 | Website check, prepared changes, WordPress apply, Search Console (WP8) | Yes | Yes, against a local fixture site, a fake WordPress REST API and a fake Google (unit, database and route tests); no real site, WordPress or Google contacted | The owner's site builder and an Application Password if it is WordPress; Search Console verification and connection; the owner's first check |
 | Google Business Profile reviews and performance, read-only (WP9) | Yes | Yes, against a fake of the Business Profile APIs (unit, database and route tests); no real Google call made | A Google Cloud project with the Business Profile APIs, the consent screen in Production and Google's Basic API Access approval |
-| TikTok direct (Stage C, WP10) | Not built: Zernio's documentation could not be reached from the build environment, and the plan forbids building on unconfirmed API details. TikTok posting is manual (export, copy the caption, post in the app) | — | Network access to docs.zernio.com; a Zernio account (optional) |
+| TikTok automatic posting via Zernio (Stage C, WP10; optional, off unless `TIKTOK_PUBLISH_PROVIDER=zernio`) | Yes, built from docs.zernio.com as read on 15 Nov 2026 | Yes, against a local fake of Zernio (unit, database and route tests); no real Zernio call or TikTok post made | A Zernio account with TikTok connected (Business), an API key and the first real verification post |
 | Stage C end to end (bookings, email, reviews, website, search) | Yes | Yes: two browser tests against local fakes of Square, Postmark, Google and WordPress plus a fixture website (`run-stage-c-bookings.sh`, 124 checks; `run-stage-c-website.sh`, 114 checks) | The owner's real accounts (see the rows above) |
 
 **Not yet done:**
@@ -44,8 +44,9 @@ Australian English, AUD, `Australia/Melbourne`.
   call, Square read or write, email, Google call or website change has been made. Stage B and Stage C pass their
   browser tests on synthetic data with local fakes only (`docs/testing.md`, "Stage B browser test" and the two
   "Stage C browser test" sections).
-- TikTok via Zernio (WP10): blocked until docs.zernio.com can be read. Square booking changes (WP6b) are built but
-  stay switched off until the sandbox write checks are recorded.
+- TikTok via Zernio (WP10): built and tested against a fake only; it stays unverified until the first real post
+  through Zernio. Square booking changes (WP6b) are built but stay switched off until the sandbox write checks are
+  recorded.
 
 ## Quick start (local, no Docker)
 
@@ -131,7 +132,19 @@ against a fake (it needs the Anthropic key).
 - **Verified on synthetic footage with fakes**: the whole Instagram flow against a local fake of Meta's API (no real
   post was made), the music rule, duplicate protection and restart recovery.
 - **Waiting on account access**: a Meta business app, configuration and the first real verification post (see the
-  owner checklist in `docs/design/stage-bc-plan.md` §7). TikTok stays manual until the optional Zernio route (WP10).
+  owner checklist in `docs/design/stage-bc-plan.md` §7). TikTok is manual unless the optional Zernio route is on (below).
+
+### TikTok through Zernio (Stage C, WP10)
+
+- **Built** (off unless the server sets `TIKTOK_PUBLISH_PROVIDER=zernio`): paste a Zernio API key and choose the TikTok
+  account in Settings → Integrations; "Publish via Zernio" and "Send to TikTok drafts via Zernio" in the composer, each
+  starting with its own first verification post; the review step's consent tick and Comments / Duets / Stitches
+  switches; status, polling, retry and webhooks (hints only).
+- **Verified on synthetic footage with fakes**: the whole flow against a local fake of Zernio, including crash
+  recovery without a second post, drafts, refusals and a partial post with Instagram. No real Zernio call was made.
+- **Waiting on account access**: a Zernio account with TikTok connected through the Business connection, an API key,
+  and the first real verification post (it is public immediately). Open questions are listed in
+  `docs/research/zernio-api.md` ("Not documented").
 
 ## Instagram hashtag watch (Stage B, WP5)
 

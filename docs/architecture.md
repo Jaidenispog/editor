@@ -260,6 +260,30 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   `publish.prepare` again. `publish.dispatch` hands due scheduled targets on, turns due manual ones into "Your turn",
   and settles a processing target untouched for an hour (failed with Retry, or `check_before_retry` once submitted).
 
+### TikTok through Zernio (Stage C, WP10)
+
+- **Switch**: only with `TIKTOK_PUBLISH_PROVIDER=zernio` and `ZERNIO_API_BASE_URL`; otherwise TikTok is manual and no
+  Zernio request is ever made. Contracts in `packages/core/src/zernio.ts` (strict Zod create body, consent and
+  approval binding, interaction seeds, poll and lookup schedules, webhook envelope); adapter in
+  `apps/worker/src/publishing/zernio.ts`; errors in `publishing/errors.ts` (`mapZernioError`, branching on HTTP
+  status, `type` and `code`, never on Zernio's free text).
+- **Connect**: the owner pastes a key (encrypted on the `zernio` connection row) and chooses one TikTok account
+  Zernio lists (`social_accounts`, provider `zernio`); the read-only `social.check` verifies the key, lists accounts
+  with their health (Business lane required) and stores creator-info seeds for the review card's Comments, Duets and
+  Stitches switches. A stored account id missing from Zernio's list makes the owner choose again (never matched by
+  handle).
+- **Approval binding**: approval stores `provider_state.consent` (the tick, the three choices, and the caption, cover,
+  file, delivery and account shown). Just before the create the worker re-reads the target and refuses on any change.
+- **State machine**: pre-flight reads (lane, permission, token, cooldown, creator info) → presign and a streamed `PUT`
+  through a pinned, redirect-free, private-address-refusing transport → `submitted_at` → `POST /v1/posts`. 201/200/207
+  save `post._id` and are read by `post.status` (207 `scheduled` stays queued); a 409 duplicate is adopted only when its
+  metadata is ours; refusals (400, 401, 402, 403, other 409) clear `submitted_at` (a 400 also the upload); unclear
+  outcomes keep `submitted_at` and look the post up by `metadata.studioTargetId`, then "check before retry". A failed
+  post is retried in place (`/retry`). A delivered draft (entry `published` with `isDraft`, the echoed
+  `tiktokSettings.draft`, or our `delivery = draft`) becomes "finish in the TikTok app". Reversals follow Zernio and
+  are audited `publish.target.reconciled`; effects (feedback, ledger) still happen once, when first published.
+- **Webhooks**: hints only; the stored envelope finds the target by metadata first and queues a read with our key.
+
 ## Square appointments (Stage C, WP6 and WP6b)
 
 - **Tier 0 (read-only).** Square stays the source of truth. The worker copies bookings, customers and the

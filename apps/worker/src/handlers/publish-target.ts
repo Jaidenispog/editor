@@ -4,6 +4,7 @@ import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { runInstagramTarget } from '../publishing/instagram.js';
+import { runZernioTarget } from '../publishing/zernio.js';
 import { refreshPostStatus, updateTarget, type TargetRow } from '../publishing/post-status.js';
 
 /**
@@ -44,8 +45,8 @@ export function postIsLive(post: { approvedAt: Date | null; status: string }): b
 
 /**
  * `publish.target`: one destination's adapter state machine. Permanent failures are written to the row and the job
- * completes (no pg-boss retry); transient ones are rethrown. Manual targets never come here; Zernio (TikTok) is added
- * by WP10 and, until then, a Zernio target fails with a plain message instead of posting.
+ * completes (no pg-boss retry); transient ones are rethrown. Manual targets never come here. Zernio (TikTok) targets
+ * run the Zernio adapter (design §7.2.4), which fails with a plain message while the server flag is off.
  */
 export async function handlePublishTarget(ctx: WorkerContext, run: TrackedRun, payload: JobPayload<'publish.target'>): Promise<void> {
   const post = await ctx.db.query.publishPosts.findFirst({ where: eq(schema.publishPosts.id, payload.postId) });
@@ -64,12 +65,7 @@ export async function handlePublishTarget(ctx: WorkerContext, run: TrackedRun, p
       await runInstagramTarget(ctx, run, target, post);
       return;
     case 'zernio':
-      await updateTarget(ctx.db, target.id, ['processing'], {
-        status: 'failed',
-        statusMessage: "Automatic TikTok posting isn't switched on yet. Post it yourself.",
-        providerState: { retryable: false },
-      });
-      await refreshPostStatus(ctx.db, post.id);
+      await runZernioTarget(ctx, run, target, post);
       return;
     default:
       // A manual target is never sent anywhere: put it back to the owner's turn.
