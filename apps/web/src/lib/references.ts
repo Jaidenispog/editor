@@ -6,6 +6,7 @@ import {
   SUMMARY_MAX_PROFILES,
   applySummaryDecisions,
   describeStyleSignals,
+  isOlderMeasuringVersion,
   readReferenceProfile,
   resetEditingStyle,
   summariseReferenceStyle,
@@ -100,13 +101,15 @@ export interface SummaryVideoDto {
   /** The per-video line (estimates), or null for an older measurement. */
   line: string | null;
   olderMeasurement: boolean;
+  /** Measured with an older version of the measuring: listed, but not combined into "your style". */
+  olderVersion: boolean;
 }
 
 /** GET /api/references/summary. */
 export interface ReferenceSummaryDto {
   summary: ReferenceStyleSummary;
   suggestions: ReferenceStyleSummary['suggestions'];
-  videos: { total: number; measured: number; olderMeasurement: number; measuring: number; failed: number };
+  videos: { total: number; measured: number; olderMeasurement: number; olderVersion: number; measuring: number; failed: number };
   list: SummaryVideoDto[];
 }
 
@@ -139,6 +142,7 @@ async function summaryInputs(): Promise<{ profiles: ReferenceStyleProfileV2[]; l
       measuredAt: profile.measuredAt,
       line: profile.style ? describeStyleSignals(profile.style, profile.colourLook) : null,
       olderMeasurement: profile.style === null,
+      olderVersion: isOlderMeasuringVersion(profile),
     })),
   );
   return { profiles: latest.map((m) => m.profile), list, measuring, failed, total: rows.length };
@@ -155,7 +159,7 @@ export async function getReferenceSummary(): Promise<ReferenceSummaryDto> {
   return {
     summary,
     suggestions: summary.suggestions,
-    videos: { total: inputs.total, measured: summary.measured, olderMeasurement: summary.olderMeasurement, measuring: inputs.measuring, failed: inputs.failed },
+    videos: { total: inputs.total, measured: summary.measured, olderMeasurement: summary.olderMeasurement, olderVersion: summary.olderVersion, measuring: inputs.measuring, failed: inputs.failed },
     list: inputs.list,
   };
 }

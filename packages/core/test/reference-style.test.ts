@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SETTINGS,
   FORBIDDEN_STYLE_WORDS,
+  OLDER_VERSION_NOTE,
+  REFERENCE_STYLE_ANALYSIS_VERSION,
   ReferenceStyleProfileSchema,
   alignCutsToBeats,
   applySummaryDecisions,
@@ -13,7 +15,9 @@ import {
   energyShape,
   findDrop,
   foldTempo,
+  isOlderMeasuringVersion,
   measureBeatSignal,
+  olderVersionNotice,
   paletteFromCounts,
   profileReference,
   readReferenceProfile,
@@ -248,6 +252,43 @@ describe('summariseReferenceStyle', () => {
     const t = s.suggestions.find((r) => r.field === 'transitionPalette')!;
     expect(t.state).toBe('not_measured');
     expect(t.evidence.notMeasured).toEqual([{ reason: 'older_measurement', count: 1 }]);
+  });
+
+  it('combines only profiles measured with the current version of the measuring and counts the others', () => {
+    // As if the measuring were tuned and its version raised to 2: two videos measured with version 1 (cross-fades)
+    // are left out of every row; the two measured with version 2 (white flashes) and a v1-only profile are combined.
+    const at = (style: ReferenceStyleSignals, analysisVersion: number) => ({ ...style, analysisVersion });
+    const cross = assembleReferenceSignals(rawStyle({ joins: Array.from({ length: 6 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })) }));
+    const profiles = [profileWith(at(r2(), 2), 'new-a'), profileWith(at(r2(), 2), 'new-b'), profileWith(at(cross, 1), 'old-a'), profileWith(at(cross, 1), 'old-b'), profileWith(null, 'v1')];
+    const s = summariseReferenceStyle(profiles, prefs(), { analysisVersion: 2 });
+    expect(s).toMatchObject({ total: 3, measured: 2, olderMeasurement: 1, olderVersion: 2 });
+    expect(s.referenceAssetIds).toEqual(['new-a', 'new-b', 'v1']);
+    const t = s.suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(t.state).toBe('open');
+    expect(t.evidence).toMatchObject({ measured: 2, agreeing: 2, total: 3 });
+    expect(t.value).toMatchObject({ accent: { type: 'fadewhite' } });
+    // Not the pace either: its shot lengths came from the older measuring too.
+    expect(s.suggestions.find((r) => r.field === 'pacing')!.evidence.total).toBe(3);
+    // Measured with one version, the same videos all count, and then the transitions differ.
+    const today = summariseReferenceStyle(profiles.map((p) => (p.style ? { ...p, style: { ...p.style, analysisVersion: 2 } } : p)), prefs(), { analysisVersion: 2 });
+    expect(today).toMatchObject({ total: 5, measured: 4, olderVersion: 0 });
+    expect(today.suggestions.find((r) => r.field === 'transitionPalette')!.state).toBe('differs');
+    // Only older versions: nothing is combined, and nothing is suggested.
+    const only = summariseReferenceStyle([profileWith(at(cross, 1), 'old-a')], prefs(), { analysisVersion: 2 });
+    expect(only).toMatchObject({ total: 0, measured: 0, olderMeasurement: 0, olderVersion: 1, updatedAt: null, referenceAssetIds: [] });
+    expect(only.suggestions.every((r) => r.state === 'not_measured' && r.action === null)).toBe(true);
+  });
+
+  it('tells the owner about videos measured with an older version of the measuring', () => {
+    // A profile is measured with the current version; once the version is raised it is an older one.
+    const current = profileWith(assembleReferenceSignals(rawStyle()), 'a');
+    expect(current.style!.analysisVersion).toBe(REFERENCE_STYLE_ANALYSIS_VERSION);
+    expect(isOlderMeasuringVersion(current)).toBe(false);
+    expect(isOlderMeasuringVersion(current, REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toBe(true);
+    expect(isOlderMeasuringVersion(profileWith(null, 'v1'), REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toBe(false);
+    expect(olderVersionNotice(2)).toBe('2 videos were measured with an older version of the measuring. Upload them again to include them.');
+    expect(olderVersionNotice(1)).toBe('1 video was measured with an older version of the measuring. Upload it again to include it.');
+    for (const text of [olderVersionNotice(3), OLDER_VERSION_NOTE]) expect(text).not.toMatch(FORBIDDEN_STYLE_WORDS);
   });
 
   it('accepts with side effects visible, records the valueKey and detects a changed summary', () => {

@@ -54,12 +54,17 @@ export const ZoomUseSchema = z.discriminatedUnion('mode', [
 ]);
 export type ZoomUse = z.infer<typeof ZoomUseSchema>;
 
-export const MusicFitSchema = z.object({
-  bpmLow: z.number().min(40).max(220),
-  bpmHigh: z.number().min(40).max(220),
-  prefersClearDrop: z.boolean(),
-  dynamicRangeDb: z.number().nullable(),
-});
+export const MusicFitSchema = z
+  .object({
+    bpmLow: z.number().min(40).max(220),
+    bpmHigh: z.number().min(40).max(220),
+    prefersClearDrop: z.boolean(),
+    dynamicRangeDb: z.number().nullable(),
+  })
+  .refine((fit) => fit.bpmLow <= fit.bpmHigh, {
+    path: ['bpmLow'],
+    message: 'The music tempo range is the wrong way round: the lower BPM (bpmLow) must not be above the higher BPM (bpmHigh).',
+  });
 export type MusicFit = z.infer<typeof MusicFitSchema>;
 
 export const EditingStyleSourceSchema = z.object({

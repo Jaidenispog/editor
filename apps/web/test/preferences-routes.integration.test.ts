@@ -5,7 +5,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { assembleReferenceSignals, profileReference, type EditPlan, type RawJoin } from '@studio/core';
+import { REFERENCE_STYLE_ANALYSIS_VERSION, assembleReferenceSignals, profileReference, type EditPlan, type RawJoin } from '@studio/core';
 import { runMigrations } from '@studio/db';
 import { dropTestDatabase } from './helpers/test-database';
 
@@ -378,5 +378,55 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     expect(back.editingStyle.beatSync).toBe('auto');
     expect(back.pacing).toBe(before.pacing);
     expect(back.defaultDurationSec).toBe(before.defaultDurationSec);
+  });
+
+  it('lists a video measured with another version of the measuring but leaves it out of "your style"', async () => {
+    as(owner);
+    const summaryRoute = await import('../src/app/api/references/summary/route');
+    const before = await call(summaryRoute.GET, 'GET', '/api/references/summary', {});
+    expect(before.json.summary.olderVersion).toBe(0);
+    // A SYNTHETIC reference with cross-fades, stored as a different measuring version would store it (after tuning).
+    const style = assembleReferenceSignals({
+      fps: 30,
+      measuredSec: 16,
+      endScreenTrimmedSec: 0,
+      joins: Array.from({ length: 6 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })),
+      zoomShots: { checked: 16, pushScales: [], pullScales: [] },
+      audio: { bpm: 96, confidence: 0.9, beatTimesSec: Array.from({ length: 26 }, (_, i) => i * 0.625), energy: Array.from({ length: 64 }, () => 0.5), energyStepSec: 0.25, speechLikely: false },
+    });
+    const id = randomUUID();
+    const profile = profileReference(
+      { assetId: id, sourceFilename: 'synthetic-other-version.mp4', durationSec: 16, shotDurationsSec: [], look: { meanLuma: 0.5, meanSaturation: 0.4, contrast: 0.3 }, text: null, measuredAt: new Date(Date.now() + 60_000), style: { ...style, analysisVersion: REFERENCE_STYLE_ANALYSIS_VERSION + 1 } },
+      { defaultDurationSec: 30, pacing: 'balanced', colour: 'natural', textDensity: 'light' },
+    );
+    await db.insert(schema.mediaAssets).values({ id, projectId: ids.project, kind: 'reference_video', originalFilename: 'synthetic-other-version.mp4', mimeType: 'video/mp4', byteSize: 1, originalKey: `projects/${ids.project}/assets/${id}/original.mp4`, status: 'ready', referenceProfile: { ...profile, originalsDeletedAt: new Date().toISOString() } });
+
+    const after = await call(summaryRoute.GET, 'GET', '/api/references/summary', {});
+    expect(after.status).toBe(200);
+    expect(after.json.summary).toMatchObject({ total: before.json.summary.total, measured: before.json.summary.measured, olderVersion: 1 });
+    expect(after.json.videos).toMatchObject({ measured: before.json.videos.measured, olderVersion: 1 });
+    expect(after.json.summary.referenceAssetIds).not.toContain(id);
+    expect(after.json.list.find((v: { id: string }) => v.id === id)).toMatchObject({ olderVersion: true, olderMeasurement: false });
+    // The rows are exactly what they were without it.
+    const rows = (r: { json: { suggestions: Array<{ field: string; valueKey: string | null; evidence: unknown; state: string }> } }) => r.json.suggestions.map((x) => [x.field, x.valueKey, x.evidence, x.state]);
+    expect(rows(after)).toEqual(rows(before));
+  });
+
+  it('refuses a music tempo range the wrong way round at PUT /api/settings and keeps the stored one', async () => {
+    as(owner);
+    const settingsRoute = await import('../src/app/api/settings/route');
+    const fit = (bpmLow: number, bpmHigh: number) => ({ bpmLow, bpmHigh, prefersClearDrop: true, dynamicRangeDb: 8 });
+    const ordered = await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { musicFit: fit(110, 130) } } });
+    expect(ordered.status).toBe(200);
+    expect((await settingsRow()).preferences.editingStyle.musicFit).toEqual(fit(110, 130));
+    const single = await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { musicFit: fit(124, 124) } } });
+    expect(single.status).toBe(200);
+    expect((await settingsRow()).preferences.editingStyle.musicFit).toEqual(fit(124, 124));
+    const reversed = await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { musicFit: fit(130, 110) } } });
+    expect(reversed.status).toBe(400);
+    expect(reversed.json.error.details).toEqual([
+      { path: 'preferences.editingStyle.musicFit.bpmLow', message: 'The music tempo range is the wrong way round: the lower BPM (bpmLow) must not be above the higher BPM (bpmHigh).' },
+    ]);
+    expect((await settingsRow()).preferences.editingStyle.musicFit).toEqual(fit(124, 124));
   });
 });

@@ -25,7 +25,7 @@ import {
   type TransitionSignal,
   type ZoomSignal,
 } from './reference-signals.js';
-import { classifyPacing, suggestedDuration, type ColourLook, type ReferenceStyleProfileV2, type ReferenceSuggestionField } from './reference.js';
+import { classifyPacing, isOlderMeasuringVersion, suggestedDuration, type ColourLook, type ReferenceStyleProfileV2, type ReferenceSuggestionField } from './reference.js';
 import type { EditingPreferences } from './settings.js';
 import type { TransitionType } from './styles.js';
 
@@ -656,13 +656,15 @@ export interface SummarySuggestion {
 }
 
 export interface ReferenceStyleSummary {
-  /** Profiles considered (latest 12 ready ones). */
+  /** Profiles combined into the rows (of the latest 12 ready ones, those not from an older version of the measuring). */
   total: number;
-  /** Profiles with v2 signals. */
+  /** Profiles with v2 signals measured by the current version of the measuring. */
   measured: number;
-  /** Profiles measured before transitions and beat were added. */
+  /** Profiles measured before transitions and beat were added (they count for length, pace, colour and text only). */
   olderMeasurement: number;
-  /** Latest measurement time considered (ISO), or null. */
+  /** Profiles measured by an older version of the measuring: not combined into any row (upload them again). */
+  olderVersion: number;
+  /** Latest measurement time combined (ISO), or null. */
   updatedAt: string | null;
   referenceAssetIds: string[];
   suggestions: SummarySuggestion[];
@@ -793,10 +795,14 @@ function zoomWords(z: ZoomUse, checked: number): { seen: string; action: string 
 /**
  * Combines the latest reference profiles (all projects) into "your style" (design §4.3.1.4). Each video counts once;
  * a row is offered only when at least 60 % of the measured videos agree and at least two were measured (or exactly
- * one video was uploaded). Older v1-only profiles count for the length, pace, colour and text rows only. Pure.
+ * one video was uploaded). Older v1-only profiles count for the length, pace, colour and text rows only. Profiles
+ * measured by another version of the measuring (`style.analysisVersion` is not `opts.analysisVersion`, by default
+ * REFERENCE_STYLE_ANALYSIS_VERSION) are not combined into any row: every number in them, the shot lengths behind the
+ * pace included, came from that measuring. They are counted in `olderVersion` so the owner can be told. Pure.
  */
-export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceStyleProfileV2[], prefs: EditingPreferences): ReferenceStyleSummary {
-  const profiles = profilesNewestFirst.slice(0, SUMMARY_MAX_PROFILES);
+export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceStyleProfileV2[], prefs: EditingPreferences, opts: { analysisVersion?: number } = {}): ReferenceStyleSummary {
+  const latest = profilesNewestFirst.slice(0, SUMMARY_MAX_PROFILES);
+  const profiles = latest.filter((p) => !isOlderMeasuringVersion(p, opts.analysisVersion));
   const effective = effectivePreferences(prefs);
   const style: EditingStyle = prefs.editingStyle ?? DEFAULT_EDITING_STYLE;
   const v2 = profiles.filter((p) => p.style !== null);
@@ -1070,6 +1076,7 @@ export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceS
     total: profiles.length,
     measured: v2.length,
     olderMeasurement: profiles.length - v2.length,
+    olderVersion: latest.length - profiles.length,
     updatedAt: times[times.length - 1] ?? null,
     referenceAssetIds: profiles.map((p) => p.assetId),
     suggestions,
@@ -1193,6 +1200,16 @@ export function describeEndScreen(style: ReferenceStyleSignals): string | null {
 
 /** Shown on a reference measured before v2. */
 export const OLDER_MEASUREMENT_NOTE = 'Measured before transitions and beat were added. Upload it again to include it.';
+
+/** Shown on a reference measured by an older version of the measuring (see {@link isOlderMeasuringVersion}). */
+export const OLDER_VERSION_NOTE = 'Measured with an older version of the measuring. Upload it again to include it.';
+
+/** The summary's line for videos measured by an older version of the measuring, e.g. "2 videos were measured …". */
+export function olderVersionNotice(count: number): string {
+  return count === 1
+    ? '1 video was measured with an older version of the measuring. Upload it again to include it.'
+    : `${count} videos were measured with an older version of the measuring. Upload them again to include them.`;
+}
 
 /** Words the reference-style wording never uses. */
 export const FORBIDDEN_STYLE_WORDS = /\b(exact|exactly|precise|precisely|detected|trending|viral|your tiktok)\b/i;

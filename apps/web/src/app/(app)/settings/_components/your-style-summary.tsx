@@ -3,7 +3,7 @@
 import { Film, RotateCcw, Sparkles } from 'lucide-react';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { DEFAULT_EDITING_STYLE, OLDER_MEASUREMENT_NOTE, formatTrendDate, formatTrendDateTime, type EditingStyleField, type ReferenceSummaryField, type SummarySuggestion } from '@studio/core';
+import { DEFAULT_EDITING_STYLE, OLDER_MEASUREMENT_NOTE, OLDER_VERSION_NOTE, formatTrendDate, formatTrendDateTime, olderVersionNotice, type EditingStyleField, type ReferenceSummaryField, type SummarySuggestion } from '@studio/core';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -179,10 +179,12 @@ export function YourStyleSummary({ canEdit }: { canEdit: boolean }) {
   const anyFromVideos = data?.suggestions.some((r) => r.inUse && EDITING_STYLE_ROW_FIELDS.includes(r.field)) ?? false;
   const v = data?.videos;
   const header =
-    data && data.summary.measured + data.summary.olderMeasurement > 0
+    data && data.summary.total > 0
       ? `Estimated from ${data.summary.total} of your videos${data.summary.updatedAt ? ` · updated ${formatTrendDateTime(data.summary.updatedAt)}` : ''}`
       : 'Estimated from your own posted videos';
   const nothingReportable = data && data.summary.total > 0 && data.suggestions.every((r) => r.state === 'not_measured' || r.state === 'differs');
+  // Videos measured with an older version of the measuring are listed but not combined into the rows.
+  const olderVersion = data?.summary.olderVersion ?? 0;
 
   return (
     <Card>
@@ -210,11 +212,12 @@ export function YourStyleSummary({ canEdit }: { canEdit: boolean }) {
               {v.measuring} video{v.measuring === 1 ? ' is' : 's are'} still being measured.
             </Alert>
           ) : null}
-          {data && data.summary.total === 0 ? (
+          {data && data.summary.total === 0 && olderVersion === 0 ? (
             <p className="text-sm text-charcoal-600">
               Upload a few of your own posted videos with <strong>Add a reference video</strong> in any project and the editor will estimate your style. Nothing has been measured yet.
             </p>
           ) : null}
+          {olderVersion > 0 ? <Alert tone="info">{olderVersionNotice(olderVersion)}</Alert> : null}
           {data && data.summary.total > 0 && data.summary.measured === 0 ? (
             <Alert tone="info">Your videos were measured before transitions and beat were added. Upload them again to include them in these rows.</Alert>
           ) : null}
@@ -240,44 +243,50 @@ export function YourStyleSummary({ canEdit }: { canEdit: boolean }) {
                   <Row key={row.field} row={row} canEdit={canEdit} busy={busy} onDecide={decide} onStop={stop} />
                 ))}
               </ul>
-              {data.list.length ? (
-                <div>
-                  <h3 className="text-sm font-semibold text-charcoal-900">Videos</h3>
-                  <ul className="mt-2 divide-y divide-charcoal-100">
-                    {data.list.map((video) => (
-                      <li key={video.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-start sm:justify-between">
-                        <div className="flex min-w-0 gap-3">
-                          <div className="h-16 w-10 shrink-0 overflow-hidden rounded-md bg-charcoal-100">
-                            {/* eslint-disable-next-line @next/next/no-img-element -- short-lived signed link */}
-                            {video.thumbnailUrl ? (
-                              <img src={video.thumbnailUrl} alt="" className="size-full object-cover" />
-                            ) : (
-                              <Film className="m-auto mt-5 size-5 text-charcoal-400" aria-hidden="true" />
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-medium text-charcoal-900">
-                              {video.filename} <span className="font-normal text-charcoal-500">· {video.projectTitle}</span>
-                            </p>
-                            <p className="text-xs text-charcoal-500">Measured {formatTrendDate(video.measuredAt)}</p>
-                            {video.line ? <p className="text-xs text-charcoal-700 [overflow-wrap:anywhere]">{video.line}</p> : null}
-                            {video.olderMeasurement ? (
-                              <Badge tone="neutral" className="mt-1">
-                                Older measurement
-                              </Badge>
-                            ) : null}
-                            {video.olderMeasurement ? <p className="mt-1 text-xs text-charcoal-500">{OLDER_MEASUREMENT_NOTE}</p> : null}
-                          </div>
-                        </div>
-                        <Link href={`/studio/${video.projectId}`} className="inline-flex min-h-11 shrink-0 items-center text-sm font-medium text-charcoal-800 underline underline-offset-4">
-                          Open project
-                        </Link>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
             </>
+          ) : null}
+          {data && data.list.length ? (
+            <div>
+              <h3 className="text-sm font-semibold text-charcoal-900">Videos</h3>
+              <ul className="mt-2 divide-y divide-charcoal-100">
+                {data.list.map((video) => (
+                  <li key={video.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex min-w-0 gap-3">
+                      <div className="h-16 w-10 shrink-0 overflow-hidden rounded-md bg-charcoal-100">
+                        {/* eslint-disable-next-line @next/next/no-img-element -- short-lived signed link */}
+                        {video.thumbnailUrl ? (
+                          <img src={video.thumbnailUrl} alt="" className="size-full object-cover" />
+                        ) : (
+                          <Film className="m-auto mt-5 size-5 text-charcoal-400" aria-hidden="true" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-charcoal-900">
+                          {video.filename} <span className="font-normal text-charcoal-500">· {video.projectTitle}</span>
+                        </p>
+                        <p className="text-xs text-charcoal-500">Measured {formatTrendDate(video.measuredAt)}</p>
+                        {video.line ? <p className="text-xs text-charcoal-700 [overflow-wrap:anywhere]">{video.line}</p> : null}
+                        {video.olderMeasurement ? (
+                          <Badge tone="neutral" className="mt-1">
+                            Older measurement
+                          </Badge>
+                        ) : null}
+                        {video.olderMeasurement ? <p className="mt-1 text-xs text-charcoal-500">{OLDER_MEASUREMENT_NOTE}</p> : null}
+                        {video.olderVersion ? (
+                          <Badge tone="neutral" className="mt-1">
+                            Older version of the measuring
+                          </Badge>
+                        ) : null}
+                        {video.olderVersion ? <p className="mt-1 text-xs text-charcoal-500">{OLDER_VERSION_NOTE}</p> : null}
+                      </div>
+                    </div>
+                    <Link href={`/studio/${video.projectId}`} className="inline-flex min-h-11 shrink-0 items-center text-sm font-medium text-charcoal-800 underline underline-offset-4">
+                      Open project
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ) : null}
         </div>
       </CardBody>

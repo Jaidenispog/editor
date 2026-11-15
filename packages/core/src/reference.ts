@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ReferenceStyleSignalsSchema, type ReferenceStyleSignals } from './reference-signals.js';
+import { REFERENCE_STYLE_ANALYSIS_VERSION, ReferenceStyleSignalsSchema, type ReferenceStyleSignals } from './reference-signals.js';
 import type { EditingPreferences } from './settings.js';
 
 /**
@@ -79,6 +79,15 @@ export function readReferenceProfile(raw: unknown): ReferenceStyleProfileV2 | nu
 /** True for a profile measured before transitions and beat were added (its originals are gone, so it cannot be re-measured). */
 export function isOlderReferenceMeasurement(profile: Pick<ReferenceStyleProfileV2, 'style'>): boolean {
   return profile.style === null;
+}
+
+/**
+ * True for a v2 profile measured by another version of the measuring code than `current` (the stored
+ * `style.analysisVersion`): "your style" does not pool it, because every number in it came from that measuring. Its
+ * originals are gone, so only uploading the video again measures it with the current version.
+ */
+export function isOlderMeasuringVersion(profile: Pick<ReferenceStyleProfileV2, 'style'>, current: number = REFERENCE_STYLE_ANALYSIS_VERSION): boolean {
+  return profile.style !== null && profile.style.analysisVersion !== current;
 }
 
 /** Average picture measurements (0–1) from `measureLook` in @studio/media. */
