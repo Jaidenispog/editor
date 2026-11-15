@@ -18,6 +18,9 @@ describe('the TikTok card (design §5.3)', () => {
     const c = tiktokCard({});
     expect(c).toMatchObject({ state: 'unavailable', configured: false, connected: false, missingEnv: [] });
     expect(c.message).toMatch(/^Post it yourself works now/);
+    // Design §4.5: without the flag, Zernio is named only in the Publishing page's setup checklist, never on this card.
+    expect(c.message).not.toMatch(/zernio/i);
+    expect(JSON.stringify(c)).not.toMatch(/zernio/i);
   });
 
   it('walks through not configured, not connected, choose account, connected (live), verified, reconnect and error', () => {

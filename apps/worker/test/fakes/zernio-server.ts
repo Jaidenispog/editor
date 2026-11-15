@@ -51,6 +51,8 @@ export interface ZernioScenario {
   retryStatus: number;
   retryPostStatus: string;
   retryEntry: Record<string, unknown>;
+  /** Posts per page of `GET /v1/posts` (the rest follow `pagination.nextCursor`). */
+  listPageSize: number;
 }
 
 export interface FakeZernioServer {
@@ -100,6 +102,7 @@ function defaultScenario(): ZernioScenario {
     retryStatus: 200,
     retryPostStatus: 'publishing',
     retryEntry: { status: 'processing', errorMessage: null },
+    listPageSize: 50,
   };
 }
 
@@ -215,12 +218,26 @@ export async function startFakeZernioServer(): Promise<FakeZernioServer> {
           return post ? send(res, 200, { post }) : send(res, 404, { error: 'Post not found', type: 'invalid_request_error', code: 'not_found' });
         }
         case 'list_posts': {
-          const allowed = new Set(['updatedSince', 'accountId', 'fields']);
+          // docs.zernio.com/posts/list-posts.mdx: an unlisted parameter or `fields` value is a 400; the 200 body is
+          // `{ posts, pagination }`; with `fields` each post carries `_id` plus only those fields; `cursor` comes from
+          // `pagination.nextCursor`. (This fake's cursor is a plain offset; Zernio's is opaque.)
+          const allowed = new Set(['updatedSince', 'accountId', 'fields', 'cursor', 'limit']);
           const bad = [...u.searchParams.keys()].find((k) => !allowed.has(k));
           if (bad) return send(res, 400, { error: `Unknown query parameter ${bad}`, type: 'invalid_request_error', code: 'invalid_parameter' });
+          const accepted = new Set(['userId', 'title', 'content', 'mediaItems', 'platforms', 'scheduledFor', 'timezone', 'status', 'tags', 'hashtags', 'mentions', 'visibility', 'metadata', 'recycling', 'recycledFromPostId', 'queuedFromProfile', 'queueId', 'createdAt', 'updatedAt']);
+          const fields = (u.searchParams.get('fields') ?? '').split(',').filter(Boolean);
+          const badField = fields.find((f) => !accepted.has(f) && f !== '_id');
+          if (badField) return send(res, 400, { error: `Unknown field ${badField}`, type: 'invalid_request_error', code: 'invalid_parameter' });
           const accountId = u.searchParams.get('accountId');
-          const list = [...posts.values()].filter((p) => !accountId || tiktokEntryOf(p)?.['accountId'] === accountId);
-          return send(res, 200, { posts: list });
+          const since = u.searchParams.get('updatedSince');
+          const list = [...posts.values()]
+            .filter((p) => !accountId || tiktokEntryOf(p)?.['accountId'] === accountId)
+            .filter((p) => !since || !p['updatedAt'] || Date.parse(String(p['updatedAt'])) >= Date.parse(since));
+          const offset = Number(u.searchParams.get('cursor') ?? 0) || 0;
+          const pageItems = list.slice(offset, offset + scenario.listPageSize);
+          const projected = fields.length ? pageItems.map((p) => Object.fromEntries(Object.entries(p).filter(([k]) => k === '_id' || fields.includes(k)))) : pageItems;
+          const nextOffset = offset + scenario.listPageSize;
+          return send(res, 200, { posts: projected, pagination: nextOffset < list.length ? { nextCursor: String(nextOffset) } : { nextCursor: null } });
         }
         case 'retry': {
           const id = decodeURIComponent(path.split('/')[4] ?? '');

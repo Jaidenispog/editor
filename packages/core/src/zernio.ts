@@ -21,10 +21,10 @@ export const ZERNIO_UPLOAD_REUSE_MAX_SEC = 6 * 86_400;
 export const ZERNIO_POLL_WINDOW_SEC = 50 * 3600;
 
 /**
- * Between 6 h and 50 h the design polls "hourly". The worker's dispatcher treats a `processing` target untouched for
- * 60 minutes as stalled, so the long-phase interval stays under that: every 50 minutes.
+ * Between 6 h and 50 h the post is read hourly (design §7.2.4 step 6). The dispatcher's stall safety net leaves a
+ * Zernio target with a post id alone while its next read is queued, so the interval does not need to stay under it.
  */
-export const ZERNIO_LONG_POLL_INTERVAL_SEC = 50 * 60;
+export const ZERNIO_LONG_POLL_INTERVAL_SEC = 60 * 60;
 
 /** The only privacy level a Business-lane video direct post may use (zernio-api §4, §6). */
 export const ZERNIO_PUBLIC_PRIVACY = 'PUBLIC_TO_EVERYONE';
@@ -192,17 +192,18 @@ const EARLY_POLL_OFFSETS_SEC = [60, 120, 300, 600];
 
 /**
  * Seconds until the next read of a Zernio post, given the seconds since it was submitted: at 1, 2, 5 and 10 minutes,
- * then every 15 minutes up to 6 hours, then every 50 minutes up to 50 hours ({@link ZERNIO_LONG_POLL_INTERVAL_SEC}).
- * Null once the 50-hour window is over.
+ * then every 15 minutes up to 6 hours, then hourly ({@link ZERNIO_LONG_POLL_INTERVAL_SEC}). The last read is always at
+ * the end of the 50-hour window itself, whatever the grid. Null once the window is over: the caller then moves a
+ * target that is still waiting to `check_before_retry`.
  */
 export function zernioPollDelaySeconds(elapsedSec: number): number | null {
   const e = Math.max(0, elapsedSec);
+  if (e + 5 >= ZERNIO_POLL_WINDOW_SEC) return null;
   for (const o of EARLY_POLL_OFFSETS_SEC) if (o > e + 5) return o - e;
   let next: number;
   if (e + 5 < 6 * 3600) next = 600 + Math.ceil((e + 5 - 600) / 900) * 900;
   else next = 6 * 3600 + Math.ceil((e + 5 - 6 * 3600) / ZERNIO_LONG_POLL_INTERVAL_SEC) * ZERNIO_LONG_POLL_INTERVAL_SEC;
-  if (next > ZERNIO_POLL_WINDOW_SEC) return null;
-  return Math.max(30, Math.round(next - e));
+  return Math.max(30, Math.round(Math.min(next, ZERNIO_POLL_WINDOW_SEC) - e));
 }
 
 /**

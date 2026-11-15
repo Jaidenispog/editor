@@ -25,6 +25,7 @@ import { encryptCredential } from '../src/lib/credentials.js';
 import { handlePublishPrepare } from '../src/handlers/publish-prepare.js';
 import { handlePublishTarget } from '../src/handlers/publish-target.js';
 import { handlePublishPoll } from '../src/handlers/publish-poll.js';
+import { handlePublishDispatch } from '../src/handlers/publish-dispatch.js';
 import { handleSocialCheck } from '../src/handlers/social-check.js';
 import { handleWebhookProcess, webhookLookupFor } from '../src/handlers/webhook-process.js';
 import { publishingModule } from '../src/modules/publishing/index.js';
@@ -306,6 +307,23 @@ describe.skipIf(skip)('TikTok via Zernio with a fake Zernio API (WP10)', () => {
       await handleSocialCheck(ctx, makeRun(newId()), { connectionId: zernioConnId, reason: 'manual' });
       expect(await account()).toMatchObject({ status: 'connected', lastError: null });
       expect(await conn()).toMatchObject({ status: 'connected', lastError: null });
+      expect(zernio.count('create')).toBe(0);
+    });
+
+    it('a 429 on an account\'s health is rate limiting, not a reconnect: the check stops to run again and records no problem', async () => {
+      expect(await account()).toMatchObject({ status: 'connected', lastError: null });
+      zernio.scenario.failOnce.health = { status: 429, body: { error: 'Rate limit exceeded. Please retry after 12 seconds.', details: { currentCount: 61, limit: 60, retryAfterSeconds: 12 } }, headers: { 'retry-after': '12' } };
+      await expect(handleSocialCheck(ctx, makeRun(newId()), { connectionId: zernioConnId, reason: 'manual' })).rejects.toMatchObject({ httpStatus: 429 });
+      expect(await account()).toMatchObject({ status: 'connected', lastError: null });
+      expect(await conn()).toMatchObject({ status: 'connected', lastError: null });
+      const candidates = (await conn()).config['candidates'] as Array<Record<string, unknown>>;
+      expect(candidates.every((c) => c['problem'] === null)).toBe(true);
+      // A 404 on the stored id is about the account itself, so it is still reported plainly.
+      zernio.scenario.failOnce.health = { status: 404, body: { error: 'Account not found', type: 'invalid_request_error', code: 'not_found' } };
+      await handleSocialCheck(ctx, makeRun(newId()), { connectionId: zernioConnId, reason: 'manual' });
+      expect((await account()).status).toBe('needs_reauth');
+      await handleSocialCheck(ctx, makeRun(newId()), { connectionId: zernioConnId, reason: 'manual' });
+      expect(await account()).toMatchObject({ status: 'connected', lastError: null });
       expect(zernio.count('create')).toBe(0);
     });
   });
@@ -644,6 +662,146 @@ describe.skipIf(skip)('TikTok via Zernio with a fake Zernio API (WP10)', () => {
       expect(t.statusMessage).toMatch(/switched off on this server/);
       await handleSocialCheck(off, makeRun(newId()), { connectionId: zernioConnId, reason: 'manual' });
       expect(zernio.calls).toHaveLength(0);
+    }, 60_000);
+
+    it('the end of the 50-hour window: a processing or held (queued) target gets a last read at 50 h, then "check before retry"', async () => {
+      const setSubmitted = async (id: string, hoursAgo: number) => {
+        await handle.db.update(schema.publishTargets).set({ submittedAt: new Date(Date.now() - hoursAgo * 3600_000) }).where(eq(schema.publishTargets.id, id));
+      };
+      const polls = () => queue.filter((j) => j.type === 'publish.poll');
+      for (const held of [false, true]) {
+        zernio.reset();
+        queue.length = 0;
+        if (held) {
+          zernio.scenario.createStatus = 207;
+          zernio.scenario.createPostStatus = 'scheduled';
+          zernio.scenario.createEntry = { status: 'pending' };
+        }
+        const { targetIds } = await createPost({ targets: [{ platform: 'tiktok', method: 'zernio', isVerification: true }] });
+        const tid = targetIds[0]!;
+        await drain(['publish.prepare', 'publish.target']);
+        expect(await target(tid)).toMatchObject({ status: held ? 'queued' : 'processing', externalPostId: expect.any(String) });
+        // Part-way through the last hour (49.5 h): one more read is scheduled, at the window's end itself.
+        await setSubmitted(tid, 49.5);
+        const before = Date.now();
+        await runNext('publish.poll');
+        expect((await target(tid)).status).toBe(held ? 'queued' : 'processing');
+        const last = polls();
+        expect(last).toHaveLength(1);
+        const wait = last[0]!.options.startAfter!.getTime() - before;
+        expect(wait).toBeGreaterThan(29 * 60_000);
+        expect(wait).toBeLessThan(31 * 60_000);
+        // That read, at (just past) 50 h: Zernio still has not finished, so the owner checks TikTok.
+        await setSubmitted(tid, 50 + 1 / 60);
+        await runNext('publish.poll');
+        expect(await target(tid)).toMatchObject({ status: 'manual_step_required', manualStep: 'check_before_retry' });
+        expect(polls()).toHaveLength(0);
+        expect(creates()).toHaveLength(1);
+      }
+    }, 90_000);
+
+    it('the crash-recovery lookup follows pagination.nextCursor with the same filters until it finds the post', async () => {
+      zernio.posts.clear();
+      zernio.scenario.listPageSize = 1;
+      for (let i = 0; i < 3; i++) zernio.addPost({ status: 'published', metadata: { studioTargetId: `someone-else-${i}` }, platforms: [{ platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID, status: 'published' }], updatedAt: new Date().toISOString() });
+      zernio.scenario.dropAfterCreate = true;
+      const { targetIds } = await createPost({ targets: [{ platform: 'tiktok', method: 'zernio', isVerification: true }] });
+      const tid = targetIds[0]!;
+      await drain(['publish.prepare', 'publish.target']);
+      expect(await target(tid)).toMatchObject({ status: 'processing', externalPostId: null });
+      await runNext('publish.poll');
+      const created = [...zernio.posts.values()].find((p) => (p['metadata'] as Record<string, unknown>)['studioTargetId'] === tid)!;
+      expect((await target(tid)).externalPostId).toBe(created['_id']);
+      const lists = zernio.calls.filter((c) => c.endpoint === 'list_posts');
+      expect(lists).toHaveLength(4);
+      expect(lists[0]!.query['cursor']).toBeUndefined();
+      for (const l of lists.slice(1)) {
+        expect(l.query['cursor']).toBeTruthy();
+        expect({ ...l.query, cursor: undefined }).toEqual({ ...lists[0]!.query, cursor: undefined });
+      }
+      expect(creates()).toHaveLength(1);
+    }, 60_000);
+
+    it('webhook hints never use up a lookup, and a genuine late event still adopts the post at "check before retry" (account must match)', async () => {
+      zernio.scenario.dropAfterCreate = true;
+      const { targetIds } = await createPost({ targets: [{ platform: 'tiktok', method: 'zernio', isVerification: true }] });
+      const tid = targetIds[0]!;
+      await drain(['publish.prepare', 'publish.target']);
+      const [zid, created] = [...zernio.posts.entries()].find(([, p]) => (p['metadata'] as Record<string, unknown>)['studioTargetId'] === tid)!;
+      zernio.posts.delete(zid);
+      const lookup = webhookLookupFor([publishingModule]);
+      const deliver = async (payload: Record<string, unknown>) => {
+        const id = newId();
+        await handle.db.insert(schema.webhookEvents).values({ id, provider: 'zernio', externalEventId: `unverified:${id}`, eventType: String(payload['event']), payload, signatureValid: false });
+        await handleWebhookProcess(ctx, makeRun(newId()), { webhookEventId: id }, lookup);
+      };
+      const hintPolls = () => queue.filter((j) => j.type === 'publish.poll' && j.payload['hint'] === true);
+      const runHint = async () => {
+        const idx = queue.findIndex((j) => j.type === 'publish.poll' && j.payload['hint'] === true);
+        const [job] = queue.splice(idx, 1);
+        await runJob(job!);
+      };
+      // Unverified hints while the post cannot be found: each reads, none uses up a lookup or schedules one.
+      for (let i = 0; i < 3; i++) {
+        await deliver({ id: `evt_h${i}`, event: 'post.platform.published', postId: null, studioTargetId: tid, platform: 'tiktok', accountId: null });
+        expect(hintPolls()).toHaveLength(1);
+        await runHint();
+        expect(hintPolls()).toHaveLength(0);
+      }
+      let t = await target(tid);
+      expect(t).toMatchObject({ status: 'processing', externalPostId: null });
+      expect(Number(t.providerState['zernioLookupAttempt'] ?? 0)).toBe(0);
+      expect(queue.filter((j) => j.type === 'publish.poll')).toHaveLength(1);
+      // The four scheduled lookups still run in full before the owner is asked to check.
+      for (let i = 0; i < 4; i++) await runNext('publish.poll');
+      t = await target(tid);
+      expect(t).toMatchObject({ status: 'manual_step_required', manualStep: 'check_before_retry', externalPostId: null });
+      // A late event naming the post, whose TikTok entry carries no account: read back, but not adopted.
+      const platforms = created['platforms'] as Array<Record<string, unknown>>;
+      zernio.posts.set(zid, { ...created, platforms: platforms.map((p) => ({ ...p, accountId: undefined })) });
+      await deliver({ id: 'evt_noacct', event: 'post.platform.published', postId: zid, studioTargetId: tid, platform: 'tiktok', accountId: null });
+      await runHint();
+      expect(await target(tid)).toMatchObject({ status: 'manual_step_required', manualStep: 'check_before_retry', externalPostId: null });
+      // The genuine event: metadata and account match, so the post is adopted and read again; nothing is sent twice.
+      zernio.posts.set(zid, created);
+      zernio.setPost(zid, { status: 'published', entry: { status: 'published', platformPostUrl: 'https://www.tiktok.com/@ivanhoe_studio_test/video/7366666666666666666' } });
+      await deliver({ id: 'evt_late', event: 'post.platform.published', postId: zid, studioTargetId: tid, platform: 'tiktok', accountId: FAKE_TIKTOK_ACCOUNT_ID });
+      await runHint();
+      expect(await target(tid)).toMatchObject({ status: 'published', manualStep: null, externalPostId: zid, publishedUrl: 'https://www.tiktok.com/@ivanhoe_studio_test/video/7366666666666666666' });
+      expect(creates()).toHaveLength(1);
+    }, 60_000);
+  });
+
+  describe('publish.dispatch safety net (only for targets with no live read)', () => {
+    const stale = () => new Date(Date.now() - 70 * 60_000);
+    const queuePollRow = async (targetId: string, postId: string) => {
+      await handle.db.insert(schema.jobs).values({ id: newId(), type: 'publish.poll', projectId, refId: targetId, payload: { targetId, postId, projectId, pollNo: 9 }, status: 'queued' });
+    };
+
+    it('leaves a Zernio target with a post id alone while its next hourly read is queued; catches it when no read is left', async () => {
+      const a = await createPost({ targets: [{ platform: 'tiktok', method: 'zernio', isVerification: true }] });
+      const b = await createPost({ targets: [{ platform: 'tiktok', method: 'zernio', isVerification: true }] });
+      const [postId, live, lost] = [a.postId, a.targetIds[0]!, b.targetIds[0]!];
+      for (const [i, id] of [live, lost].entries()) {
+        await handle.db.update(schema.publishTargets).set({ status: 'processing', submittedAt: new Date(Date.now() - 8 * 3600_000), externalPostId: `zp-${i}-${id.slice(-6)}`, updatedAt: stale() }).where(eq(schema.publishTargets.id, id));
+      }
+      await queuePollRow(live, postId);
+      await handlePublishDispatch(ctx, makeRun(newId()), {}, new Date());
+      expect(await target(live)).toMatchObject({ status: 'processing' });
+      expect(await target(lost)).toMatchObject({ status: 'failed' });
+      expect((await target(lost)).statusMessage).toMatch(/Publishing stopped part-way/);
+    }, 60_000);
+
+    it('keeps the plain net for Instagram and for a Zernio target without a post id, even with a read queued', async () => {
+      const { postId, targetIds } = await createPost({ targets: [{ platform: 'instagram', method: 'instagram_api' }, { platform: 'tiktok', method: 'zernio', isVerification: true }] });
+      const [ig, unknown] = targetIds as [string, string];
+      await handle.db.update(schema.publishTargets).set({ status: 'processing', externalContainerId: 'c-1', updatedAt: stale() }).where(eq(schema.publishTargets.id, ig));
+      await handle.db.update(schema.publishTargets).set({ status: 'processing', submittedAt: new Date(Date.now() - 2 * 3600_000), updatedAt: stale() }).where(eq(schema.publishTargets.id, unknown));
+      await queuePollRow(ig, postId);
+      await queuePollRow(unknown, postId);
+      await handlePublishDispatch(ctx, makeRun(newId()), {}, new Date());
+      expect(await target(ig)).toMatchObject({ status: 'failed' });
+      expect(await target(unknown)).toMatchObject({ status: 'manual_step_required', manualStep: 'check_before_retry' });
     }, 60_000);
   });
 });

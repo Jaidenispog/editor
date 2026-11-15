@@ -58,6 +58,13 @@ describe('mapZernioPost (design §7.2.4 step 6)', () => {
     expect(mapZernioPost(post('published', { status: 'published', platformSpecificData: { isDraft: true }, platformPostUrl: 'https://www.tiktok.com/@shop/video/7311111111111111111' }), 'draft').kind).toBe('published');
   });
 
+  it('a draft with an address that is not a TikTok post link stays a draft, never "published"', () => {
+    for (const platformPostUrl of ['https://www.tiktok.com/@shop', 'https://evil.example/@shop/video/7311111111111111111', 'not a link']) {
+      expect(mapZernioPost(post('published', { status: 'published', platformSpecificData: { isDraft: true }, platformPostUrl }), 'publish').kind).toBe('draft_delivered');
+      expect(mapZernioPost(post('published', { status: 'published', platformSpecificData: {}, platformPostUrl }), 'draft').kind).toBe('draft_delivered');
+    }
+  });
+
   it('held, processing, failed, cancelled and the bug guard', () => {
     expect(mapZernioPost(post('scheduled', { status: 'pending' }), 'publish').kind).toBe('queued');
     expect(mapZernioPost(post('scheduled', { status: 'pending' }), 'publish', { dailyCapReached: true })).toMatchObject({ kind: 'queued', message: "TikTok's daily limit is reached; Zernio will post it when allowed." });

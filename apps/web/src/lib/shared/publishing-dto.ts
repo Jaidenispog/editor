@@ -217,6 +217,6 @@ export interface ZernioConnectionDto {
   account: ZernioAccountDto | null;
   /** ZERNIO_WEBHOOK_SECRET is set, so signed webhook deliveries can be verified. */
   webhookSigning: boolean;
-  /** The address to register in Zernio's webhooks dashboard. */
-  webhookUrl: string;
+  /** The address to register in Zernio's webhooks dashboard (null while the server flag is off). */
+  webhookUrl: string | null;
 }

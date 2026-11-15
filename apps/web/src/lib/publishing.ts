@@ -827,6 +827,9 @@ export async function resolveTarget(targetId: string, action: ResolveAction, use
   let method = target.method;
   if (action === 'post_without_music') {
     if (target.manualStep !== 'review_copyright_match' && target.manualStep !== 'music_licence_changed') throw new AppError('CONFLICT', 'Posting without music is offered only after a music problem.');
+    // The consent for a Zernio target binds the exact file (plan §10.3): a swapped file could only be refused at send
+    // time, and clearing the stored consent would leave nothing to send. The owner approves a music-free post instead.
+    if (target.method === 'zernio') throw new AppError('CONFLICT', 'Make the post again without music and approve it, or post it yourself.');
     variant = 'no_music';
   } else {
     method = 'manual';
@@ -1282,11 +1285,31 @@ function zernioCandidates(config: Record<string, unknown> | undefined): ZernioCa
     .map((c) => ({ id: String(c['id']), username: String(c['username'] ?? ''), displayName: String(c['displayName'] ?? ''), problem: typeof c['problem'] === 'string' ? c['problem'] : null }));
 }
 
-/** GET /api/integrations/zernio: the TikTok-through-Zernio state for Settings (never the key). */
+/**
+ * GET /api/integrations/zernio: the TikTok-through-Zernio state for Settings (never the key). With the server flag off
+ * nothing about Zernio leaves the server (design §4.5): no key hint, candidates, account, error or webhook address,
+ * even when a connection row is left over from an earlier setup.
+ */
 export async function getZernioConnection(user: SessionUser): Promise<ZernioConnectionDto> {
   const env = getEnv();
   const db = getDb();
   const enabled = env.TIKTOK_PUBLISH_PROVIDER === 'zernio';
+  if (!enabled) {
+    return {
+      enabled: false,
+      configured: false,
+      missingEnv: [],
+      canManage: user.role === 'owner',
+      connectionStatus: 'none',
+      keyHint: null,
+      lastError: null,
+      lastCheckedAt: null,
+      candidates: [],
+      account: null,
+      webhookSigning: false,
+      webhookUrl: null,
+    };
+  }
   const conn = await db.query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'zernio') });
   const setup = await zernioSetup(db);
   const a = setup.account;

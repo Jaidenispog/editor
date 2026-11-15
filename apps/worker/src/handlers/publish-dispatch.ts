@@ -55,12 +55,15 @@ export async function handlePublishDispatch(ctx: WorkerContext, run: TrackedRun,
     handed++;
   }
 
-  // Safety net: a processing target nobody has touched for an hour lost its job.
+  // Safety net: a processing target nobody has touched for an hour lost its job. A Zernio target that already has its
+  // post id is read on its own schedule (hourly between 6 h and 50 h, design §7.2.4 step 6), so it is only caught here
+  // when no read of it is queued or running; Instagram targets and Zernio targets without a post id keep the plain net.
   const stalled = await ctx.db
     .select()
     .from(t)
     .where(and(eq(t.status, 'processing'), lt(t.updatedAt, new Date(now.getTime() - STALLED_TARGET_MINUTES * 60_000)), ne(t.method, 'manual')));
   for (const s of stalled) {
+    if (s.method === 'zernio' && s.externalPostId && (await hasActiveJob(ctx, 'publish.poll', s.id))) continue;
     if (s.submittedAt && !s.externalPostId) {
       await toManualStep(ctx.db, s.id, ['processing'], 'check_before_retry', manualStepMessage('check_before_retry', s.platform as TargetPlatform));
     } else {

@@ -10,7 +10,6 @@ import {
   PREFERENCES_RECOMPUTE_KEY,
   TIKTOK_INTERACTION_LABELS,
   ZERNIO_DAILY_VIDEO_CAP,
-  ZERNIO_POLL_WINDOW_SEC,
   ZERNIO_PUBLIC_PRIVACY,
   ZERNIO_UPLOAD_REUSE_MAX_SEC,
   ZernioConsentSchema,
@@ -60,6 +59,11 @@ export const CREATE_TIMEOUT_MS = 10 * 60_000;
 export const UPLOAD_TIMEOUT_MS = 15 * 60_000;
 /** "TikTok says this account can't post more right now": try again after this long. */
 export const CAN_POST_MORE_RETRY_MINUTES = 30;
+/**
+ * Pages of `GET /v1/posts` one lookup reads (design §7.2.4 step 5d). The window is a few minutes of one studio's
+ * posts, so one page is normal; past this bound the lookup counts as "not found" and the owner checks TikTok.
+ */
+export const ZERNIO_LOOKUP_MAX_PAGES = 10;
 
 const ACTIVE: readonly TargetStatus[] = ['processing'];
 const WAITING: readonly TargetStatus[] = ['processing', 'queued'];
@@ -350,12 +354,26 @@ export class ZernioClient {
     return rec((await this.ok('GET', `/posts/${encodeURIComponent(postId)}`, 'zernio.get_post'))['post']);
   }
 
-  /** `GET /v1/posts?updatedSince=…[&accountId=…]&fields=metadata,status,platforms` (only listed parameters: an unknown one is a 400). */
-  async listRecentPosts(input: { accountId: string | null; updatedSince: Date }): Promise<Array<Record<string, unknown>>> {
+  /**
+   * `GET /v1/posts?updatedSince=…[&accountId=…]&fields=metadata,status,platforms[&cursor=…]`, following
+   * `pagination.nextCursor` with the same filters (zernio-api §3: the 200 body is `{ posts, pagination }`, and with
+   * `fields` "each post then carries `_id` plus only these fields"). Only listed parameters are sent (an unknown one is
+   * a 400). Stops at the first item `match` accepts, at the last page, or after `maxPages` pages; null when not found.
+   */
+  async findRecentPost(input: { accountId: string | null; updatedSince: Date; maxPages?: number }, match: (post: Record<string, unknown>) => boolean): Promise<Record<string, unknown> | null> {
     const query: Record<string, string> = { updatedSince: input.updatedSince.toISOString(), fields: 'metadata,status,platforms' };
     if (input.accountId) query['accountId'] = input.accountId;
-    const b = await this.ok('GET', '/posts', 'zernio.list_posts', { query });
-    return (Array.isArray(b['posts']) ? b['posts'] : []).map(rec);
+    const seen = new Set<string>();
+    for (let page = 0; page < (input.maxPages ?? ZERNIO_LOOKUP_MAX_PAGES); page++) {
+      const b = await this.ok('GET', '/posts', 'zernio.list_posts', { query });
+      const found = (Array.isArray(b['posts']) ? b['posts'] : []).map(rec).find(match);
+      if (found) return found;
+      const next = str(rec(b['pagination'])['nextCursor']);
+      if (!next || seen.has(next)) return null;
+      seen.add(next);
+      query['cursor'] = next;
+    }
+    return null;
   }
 
   /** `POST /v1/posts/{id}/retry` (no body): re-runs only the failed platforms of a failed or partial post. */
@@ -398,7 +416,8 @@ function entryFailure(entry: Record<string, unknown>): { message: string; retrya
 /**
  * Maps a post read (or a create answer's `post`) to the target's next state. A delivered draft is entry `published`
  * with no URL; which key marks it on a read is unconfirmed (zernio-api §8), so either key counts, and so does our own
- * `delivery = draft`. A URL is used only from `platformPostUrl` and only when it is a real TikTok post link.
+ * `delivery = draft`. A URL is used only from `platformPostUrl` and only when it is a real TikTok post link; a draft
+ * counts as published only once it has such a link (any other address, a profile link say, keeps it a draft).
  */
 export function mapZernioPost(post: Record<string, unknown>, delivery: 'publish' | 'draft', options: { dailyCapReached?: boolean } = {}): ZernioReadOutcome {
   const status = str(post['status']);
@@ -410,8 +429,9 @@ export function mapZernioPost(post: Record<string, unknown>, delivery: 'publish'
     const psd = rec(entry['platformSpecificData']);
     const isDraft = psd['isDraft'] === true || rec(psd['tiktokSettings'])['draft'] === true || delivery === 'draft';
     const rawUrl = str(entry['platformPostUrl']);
+    // Decided on the validated link, never the raw field: an inbox draft must never show as published.
     const url = rawUrl ? validatePostLink('tiktok', rawUrl) : null;
-    if (isDraft && !rawUrl) return { kind: 'draft_delivered' };
+    if (isDraft && !url) return { kind: 'draft_delivered' };
     const at = str(entry['publishedAt']);
     return { kind: 'published', url, publishedAt: at && Number.isFinite(Date.parse(at)) ? new Date(at) : null, removed: Boolean(entry['removedFromPlatformAt']) };
   }
@@ -601,11 +621,14 @@ async function savePostId(ctx: WorkerContext, target: TargetRow, postId: string)
   return saved ?? { ...target, externalPostId: postId };
 }
 
-/** Next scheduled read, or the end of the 50-hour window. */
+/**
+ * Next scheduled read, or the end of the 50-hour window (design §7.2.4 step 6). The schedule's last read is at the
+ * window's end itself, so "no next read" always means the window is over: a target still `processing` or `queued`
+ * (held at Zernio) then becomes the owner's check, and nothing is left waiting with no read scheduled.
+ */
 async function scheduleNextRead(ctx: WorkerContext, target: TargetRow, pollNo: number): Promise<void> {
   const since = (target.submittedAt ?? target.updatedAt).getTime();
-  const elapsed = (Date.now() - since) / 1000;
-  const delay = zernioPollDelaySeconds(elapsed);
+  const delay = zernioPollDelaySeconds((Date.now() - since) / 1000);
   if (delay !== null) {
     await updateTarget(ctx.db, target.id, ['processing', 'queued', 'published'], { providerState: { lastPollNo: pollNo } });
     return schedulePoll(ctx, target, pollNo + 1, delay);
@@ -615,7 +638,7 @@ async function scheduleNextRead(ctx: WorkerContext, target: TargetRow, pollNo: n
     await updateTarget(ctx.db, target.id, ['published'], { statusMessage: 'Published. Open TikTok to see it, or paste the link.' });
     return;
   }
-  if (elapsed >= ZERNIO_POLL_WINDOW_SEC) {
+  if (fresh.status === 'processing' || fresh.status === 'queued') {
     await toManualStep(ctx.db, target.id, WAITING, 'check_before_retry', "TikTok still hasn't confirmed this after two days. Check your TikTok profile first.");
     await refreshPostStatus(ctx.db, target.postId);
   }
@@ -939,9 +962,12 @@ async function continueExistingPost(ctx: WorkerContext, run: TrackedRun, client:
 
 /**
  * `publish.poll` for a Zernio target: reads the post (or, after an unclear create, looks it up by its metadata) and
- * schedules the next read until the target settles. Only reads.
+ * schedules the next read until the target settles. Only reads. `hint` marks a read a webhook asked for (design
+ * §7.2.5): in lookup mode it tries the hinted post and the list once, but never uses up or reschedules one of the
+ * 1/2/5/10-minute lookups, and it is the only read a target waiting for the owner's check (`check_before_retry`,
+ * no post id) still takes, so a genuine late event can still adopt the post before the owner sends it again.
  */
-export async function runZernioPoll(ctx: WorkerContext, run: TrackedRun, target: TargetRow, pollNo: number): Promise<void> {
+export async function runZernioPoll(ctx: WorkerContext, run: TrackedRun, target: TargetRow, pollNo: number, options: { hint?: boolean } = {}): Promise<void> {
   if (target.confirmedAt || target.status === 'cancelled') return;
   if (!target.externalPostId && !target.submittedAt) return;
   if (target.status === 'manual_step_required' && target.manualStep !== 'check_before_retry' && target.manualStep !== 'finish_in_tiktok_app') return;
@@ -961,8 +987,12 @@ export async function runZernioPoll(ctx: WorkerContext, run: TrackedRun, target:
       }
       return;
     }
-    if (target.status !== 'processing') return;
-    // Lookup mode (step 5d): first the webhook's hint, read back by id, then the account's recent posts.
+    const hintMode = options.hint === true;
+    const awaitingCheck = target.status === 'manual_step_required' && target.manualStep === 'check_before_retry';
+    if (target.status !== 'processing' && !(hintMode && awaitingCheck)) return;
+    const submittedAccount = str(target.providerState['submittedAccountId']);
+    // Lookup mode (step 5d): first the webhook's hint, read back by id and adopted only when both our metadata and
+    // the account match (§7.2.5), then the account's recent posts.
     const hint = str(target.providerState['zernioHintPostId']);
     if (hint) {
       let hinted: Record<string, unknown> | null = null;
@@ -972,17 +1002,23 @@ export async function runZernioPoll(ctx: WorkerContext, run: TrackedRun, target:
         hinted = null;
       }
       const entry = hinted ? tiktokEntry(hinted) : null;
-      const entryAccount = entry ? str(entry['accountId']) ?? str(rec(entry['accountId'])['_id']) : null;
-      if (hinted && rec(hinted['metadata'])['studioTargetId'] === target.id && (!entryAccount || entryAccount === account.externalId || entryAccount === str(target.providerState['submittedAccountId']))) {
+      const entryAccount = entry ? (str(entry['accountId']) ?? str(rec(entry['accountId'])['_id'])) : null;
+      const accountMatches = entryAccount !== null && (entryAccount === account.externalId || entryAccount === submittedAccount);
+      if (hinted && rec(hinted['metadata'])['studioTargetId'] === target.id && accountMatches) {
         return await adoptFound(ctx, target, hint, hinted);
       }
-      await updateTarget(ctx.db, target.id, ACTIVE, { providerState: { zernioHintPostId: null } });
+      await updateTarget(ctx.db, target.id, [target.status], { providerState: { zernioHintPostId: null } });
     }
-    const submittedAccount = str(target.providerState['submittedAccountId']);
+    // The scheduled lookups are over for a target waiting for the owner's check: only a hint's read-back reaches it.
+    if (awaitingCheck) return;
     const since = new Date((target.submittedAt?.getTime() ?? Date.now()) - 2 * 60_000);
-    const posts = await client.listRecentPosts({ accountId: submittedAccount && submittedAccount === account.externalId ? submittedAccount : null, updatedSince: since });
-    const found = posts.find((p) => rec(p['metadata'])['studioTargetId'] === target.id && str(p['_id']));
+    const found = await client.findRecentPost(
+      { accountId: submittedAccount && submittedAccount === account.externalId ? submittedAccount : null, updatedSince: since },
+      (p) => rec(p['metadata'])['studioTargetId'] === target.id && Boolean(str(p['_id'])),
+    );
     if (found) return await adoptFound(ctx, target, str(found['_id']) ?? '', found);
+    // A webhook-triggered read never uses up a lookup or schedules one: the scheduled lookup poll is still queued.
+    if (hintMode) return;
     const attempt = Number(target.providerState['zernioLookupAttempt'] ?? 0) + 1;
     const delay = zernioLookupDelaySeconds(attempt);
     if (delay === null) {
@@ -1009,6 +1045,19 @@ export async function runZernioPoll(ctx: WorkerContext, run: TrackedRun, target:
 }
 
 async function adoptFound(ctx: WorkerContext, target: TargetRow, postId: string, post: Record<string, unknown>): Promise<void> {
+  // Found while waiting for the owner's check: Zernio has the post, so it is read again from here, never sent again.
+  if (target.status === 'manual_step_required') {
+    const resumed = await updateTarget(ctx.db, target.id, ['manual_step_required'], {
+      status: 'processing',
+      manualStep: null,
+      externalPostId: postId,
+      statusMessage: 'Zernio has this post. Checking its status with TikTok…',
+      providerState: { zernioLookupAttempt: null, zernioHintPostId: null },
+    });
+    if (!resumed) return;
+    await writeWorkerAudit(ctx.db, { userId: null, action: 'publish.target.reconciled', entityType: 'publish_target', entityId: target.id, data: { platform: 'tiktok', from: 'check_before_retry', to: 'processing' } }, ctx.logger);
+    target = resumed;
+  }
   const saved = await savePostId(ctx, target, postId);
   const full = Array.isArray(post['platforms']) ? post : null;
   const final = full ? await applyRead(ctx, saved, full) : false;
@@ -1066,7 +1115,11 @@ export async function checkZernio(ctx: WorkerContext, run: TrackedRun, conn: Con
       try {
         h = await client.health(a.id);
       } catch (err) {
-        if (!(err instanceof ZernioApiError) || err.httpStatus >= 500 || err.httpStatus === 401 || err.code === 'insufficient_permissions') throw err;
+        // Only an answer about the account itself (404, or a 403 other than the key's missing group) makes it a
+        // candidate with a problem. Anything else, a 429 rate limit included, says nothing about the account: the
+        // check stops and runs again, so nobody is told to reconnect because of rate limiting.
+        const aboutAccount = err instanceof ZernioApiError && (err.httpStatus === 404 || (err.httpStatus === 403 && err.code !== 'insufficient_permissions'));
+        if (!aboutAccount) throw err;
       }
       candidates.push({ ...a, integrationLane: h?.integrationLane ?? null, canPost: h?.canPost ?? null, tokenValid: h?.tokenValid ?? null, problem: candidateProblem(a, h) });
     }
@@ -1158,11 +1211,14 @@ export async function handleZernioWebhook(ctx: WorkerContext, _run: TrackedRun, 
   if (!target && postId) target = await ctx.db.query.publishTargets.findFirst({ where: and(eq(t.platform, 'tiktok'), eq(t.method, 'zernio'), eq(t.externalPostId, postId)) });
   if (!target || target.confirmedAt || target.status === 'cancelled') return;
   if (!target.externalPostId && !target.submittedAt) return;
-  if (!target.externalPostId && postId) await updateTarget(ctx.db, target.id, ['processing'], { providerState: { zernioHintPostId: postId.slice(0, 64) } });
+  // Outcome unknown (no post id yet): the hinted id is kept for a read-back, also once the target waits for the owner's
+  // check, so a genuine late event can still prevent a second send. It is adopted only if the read-back matches.
+  const lookingUp = target.status === 'processing' || (target.status === 'manual_step_required' && target.manualStep === 'check_before_retry');
+  if (!target.externalPostId && postId && lookingUp) await updateTarget(ctx.db, target.id, [target.status], { providerState: { zernioHintPostId: postId.slice(0, 64) } });
   await enqueueTracked(
     ctx,
     'publish.poll',
-    { targetId: target.id, postId: target.postId, projectId: await projectOf(ctx, target.postId), pollNo: Number(target.providerState['lastPollNo'] ?? 0) },
+    { targetId: target.id, postId: target.postId, projectId: await projectOf(ctx, target.postId), pollNo: Number(target.providerState['lastPollNo'] ?? 0), hint: true },
     { singletonKey: `publish-poll-hint:${target.id}` },
   );
 }
