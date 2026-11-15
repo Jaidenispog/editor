@@ -2,7 +2,7 @@ import { STYLES, STYLE_IDS, computeTimeline, paletteTransitionTypes, type StyleI
 import type { LabelShotsContext, PlannerInput } from '../types.js';
 import { planReveal } from '../rules/editing-style.js';
 import { beatGrid } from '../rules/music.js';
-import { CALM_TRANSITIONS, beatSyncFor, effectiveSettings, revisionHintsFor } from '../rules/settings.js';
+import { CALM_TRANSITIONS, beatSyncFor, effectiveSettings, plannedSettings, revisionHintsFor } from '../rules/settings.js';
 
 /** Most shots described to the planner per project (the best-labelled and best-quality ones). */
 export const MAX_PLANNER_SHOTS = 60;
@@ -116,7 +116,7 @@ export function allowedTransitionsFor(input: PlannerInput): string[] {
  * time is computed here with the same function as the rules planner, so the model never has to find the drop.
  */
 export function editingStyleBriefFor(input: PlannerInput): Record<string, unknown> | null {
-  const s = effectiveSettings(input);
+  const s = plannedSettings(input);
   const es = s.styleFromVideos;
   if (!es) return null;
   const fixed = fixedMusicStartFor(input);
@@ -164,7 +164,7 @@ function selectShots(input: PlannerInput) {
  * owner left it on automatic or no music plays.
  */
 export function fixedMusicStartFor(input: PlannerInput): number | null {
-  const s = effectiveSettings(input);
+  const s = plannedSettings(input);
   if (!input.music || !s.musicOn || typeof input.musicStartSec !== 'number') return null;
   return beatGrid(input.music, s.target, 0, undefined, input.musicStartSec).startOffsetSec;
 }
@@ -176,7 +176,8 @@ export function fixedMusicStartFor(input: PlannerInput): number | null {
  */
 export function buildPlannerUserContent(input: PlannerInput): Array<{ type: 'text'; text: string }> {
   const style = STYLES[input.styleId];
-  const s = effectiveSettings(input);
+  // The same length the rules planner aims for (trimmed to a chosen track that is a little shorter than the edit).
+  const s = plannedSettings(input);
   const hints = revisionHintsFor(input);
   const target = s.target;
   const durations = new Map(input.assets.map((a) => [a.id, a.durationSec]));

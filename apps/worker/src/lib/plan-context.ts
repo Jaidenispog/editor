@@ -70,12 +70,6 @@ export async function loadSettings(ctx: WorkerContext): Promise<AppSettings> {
   return parsed.success ? parsed.data : DEFAULT_SETTINGS;
 }
 
-/** Allowed total-length window around the target: ±12 % but never tighter than ±2 s. */
-export function durationBoundsFor(targetSec: number): { min: number; max: number } {
-  const slack = Math.max(2, targetSec * 0.12);
-  return { min: Math.max(3, targetSec - slack), max: targetSec + slack };
-}
-
 /** Records one AI call's tokens and estimated cost for the usage page (nothing is written without usage). */
 export async function recordAiUsage(ctx: WorkerContext, projectId: string | null, purpose: string, usage: AiUsage | null): Promise<void> {
   if (!usage) return;

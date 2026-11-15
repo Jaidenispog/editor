@@ -3,7 +3,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { AppError, CancelledError, EDIT_PLAN_VERSION, VERTICAL_1080 } from '@studio/core';
 import type { Logger } from 'pino';
 import { DEFAULT_MODEL_RATES, type RateTable } from '../pricing.js';
-import { effectiveSettings } from '../rules/settings.js';
+import { plannedSettings } from '../rules/settings.js';
 import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '../types.js';
 import { mapAnthropicError, usageFrom, type AnthropicMessagesClient, type StructuredResponse } from './client.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerUserContent, fixedMusicStartFor } from './prompts.js';
@@ -103,7 +103,7 @@ function cut(text: string, max: number): string {
  * for validateEditPlan to judge, so a mistake becomes a repairable validation error rather than a silent fix.
  */
 export function toPlanCandidate(wire: PlannerWire, input: PlannerInput): unknown {
-  const s = effectiveSettings(input);
+  const s = plannedSettings(input);
   const fixedStart = fixedMusicStartFor(input);
   const music =
     input.music && s.musicOn && wire.audio.music

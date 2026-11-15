@@ -13,6 +13,9 @@ export const EDITING_STYLE_FIELDS = ['transitionPalette', 'beatSync', 'beatsPerC
 export const EditingStyleFieldSchema = z.enum(EDITING_STYLE_FIELDS);
 export type EditingStyleField = (typeof EDITING_STYLE_FIELDS)[number];
 
+/** The `editingStyle` fields the planners use. `musicFit` is not one: it only ranks the owner's own licensed tracks. */
+export const EDITING_STYLE_PLANNING_FIELDS = ['transitionPalette', 'beatSync', 'beatsPerCut', 'reveal', 'zoom'] as const satisfies readonly EditingStyleField[];
+
 /** Every field the "Your style from your videos" summary can suggest (v1 reference fields first). */
 export const REFERENCE_SUMMARY_FIELDS = [...REFERENCE_SUGGESTION_FIELDS, ...EDITING_STYLE_FIELDS] as const;
 export const ReferenceSummaryFieldSchema = z.enum(REFERENCE_SUMMARY_FIELDS);
@@ -113,10 +116,13 @@ export function stableJson(value: unknown): string {
   return JSON.stringify(norm(value) ?? null);
 }
 
-/** True when no editing-style value differs from its default (plans are then identical to before). */
-export function isDefaultEditingStyle(style: EditingStyle | undefined | null): boolean {
+/**
+ * True when no editing-style value the planners use differs from its default, so plans are identical to the defaults.
+ * An accepted music fit alone (`musicFit` only ranks the owner's tracks) still counts as the default here.
+ */
+export function isDefaultPlanningStyle(style: EditingStyle | undefined | null): boolean {
   if (!style) return true;
-  return EDITING_STYLE_FIELDS.every((f) => stableJson(style[f]) === stableJson(DEFAULT_EDITING_STYLE[f]));
+  return EDITING_STYLE_PLANNING_FIELDS.every((f) => stableJson(style[f]) === stableJson(DEFAULT_EDITING_STYLE[f]));
 }
 
 /** The palette's non-accent types that are not restrained (anything that also needs "bolder transitions"). */

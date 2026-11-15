@@ -15,7 +15,7 @@ import {
 } from '@studio/core';
 import { RulesPlanner } from '../src/rules/planner.js';
 import { strongestBeat } from '../src/rules/music.js';
-import { allowedTransitionsFor, buildPlannerUserContent } from '../src/anthropic/prompts.js';
+import { allowedTransitionsFor, buildPlannerUserContent, editingStyleBriefFor } from '../src/anthropic/prompts.js';
 import type { PlannerInput } from '../src/types.js';
 import { clickTrack, labelledProject, plannerInput } from './fixtures.js';
 
@@ -201,6 +201,20 @@ describe('editing style from your videos in the rules planner', () => {
       expect(planner.plan(inputFor(styleId, dismissed))).toEqual(defaults.get(styleId));
       expect(planner.plan(inputFor(styleId, ACCEPTED))).toEqual(accepted.get(styleId));
     }
+  });
+
+  it('an accepted music fit alone leaves every plan as the defaults and adds nothing to the AI brief (it only ranks tracks)', () => {
+    const fitOnly: EditingStyle = {
+      ...DEFAULT_EDITING_STYLE,
+      musicFit: { bpmLow: 110, bpmHigh: 130, prefersClearDrop: true, dynamicRangeDb: 8 },
+      sources: { musicFit: { by: 'reference', at: '2026-11-15T00:00:00Z', referenceAssetIds: ['ref-1'], referenceName: 'Your videos (1)' } },
+    };
+    // Even takes of the cinematic reveal dip to black into the final shot: the place an editing style would move.
+    for (const styleId of STYLE_IDS)
+      for (const attempt of [0, 1, 2]) expect(planner.plan(inputFor(styleId, fitOnly, { attempt })), `${styleId} take ${attempt + 1}`).toEqual(planner.plan(inputFor(styleId, DEFAULT_EDITING_STYLE, { attempt })));
+    const job = JSON.parse(buildPlannerUserContent(inputFor('cinematic_reveal', fitOnly))[0]!.text.replace(/^Job description \(JSON\):\n/, '')) as Record<string, unknown>;
+    expect(job['editingStyle']).toBeUndefined();
+    expect(editingStyleBriefFor(inputFor('cinematic_reveal', fitOnly))).toBeNull();
   });
 
   it('a style without a beat still gets its palette (cross-fades) and push-ins', () => {

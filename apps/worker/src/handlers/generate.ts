@@ -13,6 +13,7 @@ import {
   STYLES,
   evaluateStyleSupport,
   computeTimeline,
+  durationBoundsFor,
   parseRevisionInstruction,
   type EditPlan,
   type GenerationSettings,
@@ -21,11 +22,11 @@ import {
   type StyleId,
 } from '@studio/core';
 import { schema, type EditVersion } from '@studio/db';
-import type { PlannerInput } from '@studio/ai';
+import { plannedTargetSec, type PlannerInput } from '@studio/ai';
 import type { WorkerContext } from '../context.js';
 import type { TrackedRun } from '../lib/job-tracker.js';
 import { enqueueTracked } from '../lib/jobs.js';
-import { durationBoundsFor, loadMusic, loadProjectFootage, loadSettings, recordAiUsage, type LoadedFootage, type LoadedMusic } from '../lib/plan-context.js';
+import { loadMusic, loadProjectFootage, loadSettings, recordAiUsage, type LoadedFootage, type LoadedMusic } from '../lib/plan-context.js';
 import { planWithFallback } from '../lib/planning.js';
 import { INTERRUPTED_MESSAGE, friendlyFailure, stopOutcome } from '../lib/job-tracker.js';
 
@@ -71,7 +72,7 @@ export async function handleGenerateEdits(ctx: WorkerContext, run: TrackedRun, p
         run.checkCancelled();
         if (sup && !sup.supported) throw new AppError('UNSUPPORTED', `${STYLES[styleId].name}: ${sup.reason}`);
         const input = buildPlannerInput({ styleId, settings: generation.settings, footage, music, appSettings: settings, attempt: 0 });
-        const vctx = validationContextFor(footage, music, generation.settings.durationSec, false, paletteTransitionTypes(settings.preferences.editingStyle?.transitionPalette));
+        const vctx = planningContextFor(footage, music, input, false, paletteTransitionTypes(settings.preferences.editingStyle?.transitionPalette));
         const outcome = await planWithFallback(ctx.ai.planner, ctx.ai.rulesPlanner, input, vctx, ctx.logger, run.signal);
         for (const u of outcome.usages) await recordAiUsage(ctx, payload.projectId, `planning:${styleId}`, u);
         await ctx.db
@@ -243,7 +244,7 @@ export async function handleReviseEdit(
       ...(payload.mode === 'revise' ? { revisionInstruction: version.instruction, revisionHints: hints } : {}),
       ...(recut ? { beatSync: recut.beatSync === 'keep' ? ('auto' as const) : recut.beatSync, revealOnBeat: recut.revealOnBeat === 'on' } : {}),
     });
-    const vctx = validationContextFor(footage, music, targetDurationSec, hints?.transitions === 'restrained' || hints?.transitions === 'none', paletteTransitionTypes(settings.preferences.editingStyle?.transitionPalette));
+    const vctx = planningContextFor(footage, music, input, hints?.transitions === 'restrained' || hints?.transitions === 'none', paletteTransitionTypes(settings.preferences.editingStyle?.transitionPalette));
     const outcome = await planWithFallback(ctx.ai.planner, ctx.ai.rulesPlanner, input, vctx, ctx.logger, run.signal);
     for (const u of outcome.usages) await recordAiUsage(ctx, payload.projectId, `${payload.mode}:${styleId}`, u);
     let plan = outcome.plan;
@@ -287,6 +288,22 @@ export async function handleReviseEdit(
     }
     throw err;
   }
+}
+
+/**
+ * The validation context for one planning call. Its length window is the one around the length both planners aim for
+ * (`plannedTargetSec`): the requested or revised length, trimmed by the shared rule (`editLengthForTrack` in
+ * @studio/core) when the chosen track is a little shorter, so an edit trimmed to its music is judged by the length it
+ * was planned to (a 45 s edit with a 40 s track by 39.8 s), never refused for being shorter than the music allows.
+ */
+export function planningContextFor(
+  footage: LoadedFootage,
+  music: LoadedMusic | null,
+  input: PlannerInput,
+  restrainedTransitionsOnly: boolean,
+  extraStyleTransitions: readonly TransitionType[],
+): PlanValidationContext {
+  return validationContextFor(footage, music, plannedTargetSec(input), restrainedTransitionsOnly, extraStyleTransitions);
 }
 
 /** The facts a plan is validated against: real clip lengths and audio, the music length, transcripts and the length window. */

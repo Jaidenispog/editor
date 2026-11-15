@@ -6,6 +6,7 @@ import {
   STYLES,
   VERTICAL_1080,
   computeTimeline,
+  durationBoundsFor,
   paletteTransitionTypes,
   validateEditPlan,
   type AudioPlan,
@@ -22,7 +23,7 @@ import { collectFootage, type Candidate, type Footage } from './footage.js';
 import { alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
 import { ACCENT_PEAK_FRACTION, alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, isAccent, notePalette, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
 import { clamp, hashString, round, seededRandom } from './random.js';
-import { beatSyncFor, effectiveSettings, tameTransition, type EffectiveSettings, type ResolvedEditingStyle } from './settings.js';
+import { beatSyncFor, effectiveSettings, plannedLength, tameTransition, type EffectiveSettings, type ResolvedEditingStyle, type StyleFallbackStep } from './settings.js';
 import { STYLE_BUILDERS, applyOpening, type BuildContext, type Recipe } from './styles.js';
 import { buildCaptions, resolveText } from './text.js';
 
@@ -93,20 +94,42 @@ export class RulesPlanner implements EditPlanner {
   }
 }
 
-/** Plan notes for the editing-style fallback (owner-facing). */
+/** Plan notes for the editing-style fallback (owner-facing), for an edit built from scratch. */
 export const STYLE_FALLBACK_NOTES = {
   transitionsOnly: "The transitions from your videos could not be fitted to this footage at this length, so this version uses the style's own transitions.",
   transitionsKeepRest: "The transitions from your videos could not be fitted to this footage at this length, so this version uses the style's own transitions and keeps the rest of your editing style.",
   wholeStyle: "Your editing style could not be fitted to this footage at this length, so this version uses the style's own timing and transitions.",
-} as const;
+} as const satisfies Record<StyleFallbackStep, string>;
+
+/**
+ * The same notes for a revision that kept shots from the earlier version (owner-facing). A revision keeps the joins of
+ * the shots it keeps ("keep everything the request does not mention"), so only the shots it adds get the style's own
+ * transitions, and the earlier version's joins (the transitions from your videos included) stay.
+ */
+export const STYLE_FALLBACK_REVISION_NOTES = {
+  transitionsOnly:
+    "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this version use the style's own transitions and the joins kept from the earlier version are unchanged.",
+  transitionsKeepRest:
+    "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this version use the style's own transitions, the joins kept from the earlier version are unchanged, and the rest of your editing style is kept.",
+  wholeStyle:
+    "Your editing style could not be fitted to this footage at this length, so the shots added in this version use the style's own timing and transitions, and the joins kept from the earlier version are unchanged.",
+} as const satisfies Record<StyleFallbackStep, string>;
+
+/** The plan note for a fallback step: the revision wording when the build kept joins from the earlier version. */
+export function styleFallbackNote(step: StyleFallbackStep, keptEarlierJoins: boolean): string {
+  return (keptEarlierJoins ? STYLE_FALLBACK_REVISION_NOTES : STYLE_FALLBACK_NOTES)[step];
+}
 
 /**
  * Last resort for the owner's accepted editing style, one step at a time. When the edit cannot be built with it, it is
  * built again without the transitions from the owner's videos (long cross-fades use up length the footage may not
- * have) but with the rest of the style: cutting to the beat, beats per cut, the reveal and zooms. Only when that also
- * fails is it built with each style's own timing and transitions. The plan says which part was left out; the owner's
- * settings stay as they are. Errors that also happen without the editing style (and cancellations) are passed on
- * unchanged.
+ * have) but with the rest of the style: cutting to the beat, beats per cut, the reveal and zooms. When that build is no
+ * different from the one without the editing style (the rest needs music, or its beat steps place no cut here), that
+ * plan is used instead, with the note that the editing style could not be fitted: a plan never says it keeps what it
+ * does not apply. Only when leaving out the transitions fails too is the edit built with each style's own timing and
+ * transitions. Each step's note is added by the build itself (`styleFallback`), in the revision wording when it kept
+ * the earlier version's joins. The owner's settings stay as they are. Errors that also happen without the editing style
+ * (and cancellations) are passed on unchanged; the comparison build never fails an edit that already has a plan.
  */
 export function buildWithStyleFallback(
   input: PlannerInput,
@@ -116,9 +139,11 @@ export function buildWithStyleFallback(
 ): EditPlan {
   const es = s.styleFromVideos;
   if (!es) return build(input, s, footage);
+  // A build writes its notes into the settings it is given, even when it then fails: every later step starts from
+  // this copy, so no note from a failed attempt reaches the plan.
   const before = { notes: [...s.notes], emphasise: [...s.emphasise], deemphasise: [...s.deemphasise] };
-  const again = (styleFromVideos: ResolvedEditingStyle | null, note: string) =>
-    build(input, { ...s, styleFromVideos, notes: [...before.notes, note], emphasise: [...before.emphasise], deemphasise: [...before.deemphasise] }, footage);
+  const again = (styleFromVideos: ResolvedEditingStyle | null, styleFallback: StyleFallbackStep) =>
+    build(input, { ...s, styleFromVideos, styleFallback, notes: [...before.notes], emphasise: [...before.emphasise], deemphasise: [...before.deemphasise] }, footage);
   try {
     return build(input, s, footage);
   } catch (err) {
@@ -127,39 +152,54 @@ export function buildWithStyleFallback(
   if (es.palette) {
     const rest: ResolvedEditingStyle = { ...es, palette: null, accent: null };
     // With nothing else accepted, leaving out the transitions is leaving out the whole editing style.
-    if (!hasPlanningValues(rest)) return again(null, STYLE_FALLBACK_NOTES.transitionsOnly);
+    if (!hasPlanningValues(rest)) return again(null, 'transitionsOnly');
+    let keepRest: EditPlan | null = null;
     try {
-      return again(rest, STYLE_FALLBACK_NOTES.transitionsKeepRest);
+      keepRest = again(rest, 'transitionsKeepRest');
     } catch (err) {
       if (!couldNotBuild(err)) throw err;
     }
+    if (keepRest) {
+      let plain: EditPlan;
+      try {
+        plain = again(null, 'wholeStyle');
+      } catch (err) {
+        if (err instanceof CancelledError) throw err;
+        return keepRest;
+      }
+      return sameApartFromRationale(keepRest, plain) ? plain : keepRest;
+    }
   }
-  return again(null, STYLE_FALLBACK_NOTES.wholeStyle);
+  return again(null, 'wholeStyle');
 }
 
 function couldNotBuild(err: unknown): boolean {
   return err instanceof AppError && err.code === 'PROCESSING_FAILED';
 }
 
-/** True when the editing style (without its transitions) still changes how the rules planner builds an edit. */
+/** True when two plans differ only in their notes. */
+function sameApartFromRationale(a: EditPlan, b: EditPlan): boolean {
+  return JSON.stringify({ ...a, rationale: '' }) === JSON.stringify({ ...b, rationale: '' });
+}
+
+/**
+ * True when the accepted editing style has a planning value besides its transitions: beat sync, beats per cut, the
+ * reveal or zooms. Whether they change a particular edit is only known once it is built (see buildWithStyleFallback).
+ */
 function hasPlanningValues(es: ResolvedEditingStyle): boolean {
   return es.beatSync !== DEFAULT_EDITING_STYLE.beatSync || es.beatsPerCut !== DEFAULT_EDITING_STYLE.beatsPerCut || es.reveal !== DEFAULT_EDITING_STYLE.reveal || es.zoom.mode !== DEFAULT_EDITING_STYLE.zoom.mode;
 }
 
-/** Shortens the target to the music when the chosen track is a little shorter than the edit. */
+/**
+ * Shortens the target to the music when the chosen track is a little shorter than the edit, by the shared rule
+ * (`plannedLength`, the same length the AI brief and the worker's check use); refuses a track too short for that.
+ */
 function capTargetToMusic(input: PlannerInput, s: EffectiveSettings): void {
-  const music = input.music;
-  if (!music || !s.musicOn) return;
-  const room = Math.floor((music.durationSec - 0.15) * 10) / 10;
-  if (room >= s.target) return;
-  if (room < Math.max(5, s.target * 0.88)) {
-    throw new AppError(
-      'PROCESSING_FAILED',
-      `The chosen track is ${Math.round(music.durationSec)} seconds long, which is shorter than the ${Math.round(s.target)}-second edit. Choose a longer track or a shorter length.`,
-    );
-  }
-  s.target = room;
-  s.notes.push(`The edit was trimmed to ${room} s so it ends before the music does.`);
+  const length = plannedLength(input, s);
+  if (!length.ok) throw new AppError('PROCESSING_FAILED', length.message);
+  if (!length.trimmed) return;
+  s.target = length.targetSec;
+  s.notes.push(`The edit was trimmed to ${length.targetSec} s so it ends before the music does.`);
 }
 
 /** Order of source ranges, used to tell whether a regenerated take differs from the previous one. */
@@ -168,8 +208,11 @@ function signature(plan: Pick<EditPlan, 'segments'>): string {
 }
 
 function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage): EditPlan {
+  // An editing-style fallback note goes right after the notes this build was given (see buildWithStyleFallback).
+  const leadNotes = s.notes.length;
   const previous = s.revising ? (input.previousPlan ?? null) : null;
-  const taken = new Set(previous?.segments.map((seg) => seg.id) ?? []);
+  const earlierIds = new Set(previous?.segments.map((seg) => seg.id) ?? []);
+  const taken = new Set(earlierIds);
   let counter = 0;
   const nextId = () => {
     let id: string;
@@ -299,6 +342,13 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     ...(es?.palette ? { extraStyleTransitions: paletteTransitionTypes(es.palette) } : {}),
   };
 
+  if (s.styleFallback) {
+    // A revision keeps the shots it can from the earlier version, each with its join; only shots it adds get new ones.
+    // Kept shots keep their earlier ids (new ones never reuse them), so this reports what the build actually did.
+    const keptEarlierJoins = drafts.some((d, i) => i > 0 && earlierIds.has(d.id));
+    ctx.notes.splice(leadNotes, 0, styleFallbackNote(s.styleFallback, keptEarlierJoins));
+  }
+
   let lastErrors: PlanIssue[] = [];
   // The plan only says the finished look lands on the biggest lift while it still does.
   const recheckReveal = () => {
@@ -312,11 +362,11 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     lastErrors = res.errors;
     if (!repair(ctx, drafts, plan, res.errors, state, fit, retransition)) break;
   }
-  // Last chance: accept a plan that is a little off the ±5 % aim but inside the window the worker allows.
+  // Last chance: accept a plan that is a little off the ±5 % aim but inside the window the worker allows (the same
+  // `durationBoundsFor` around the same target, trimmed to the music when it was).
   recheckReveal();
   const plan = compose(ctx, drafts, textFor, state, previous, grid);
-  const slack = Math.max(2, s.target * 0.12);
-  const loose = validateEditPlan(plan, { ...vctx, durationBounds: { min: s.target - slack, max: s.target + slack } });
+  const loose = validateEditPlan(plan, { ...vctx, durationBounds: durationBoundsFor(s.target) });
   if (loose.ok && loose.plan) return loose.plan;
   const durationOnly = (loose.errors.length ? loose.errors : lastErrors).every((e) => e.code === 'DURATION_OUT_OF_RANGE');
   const name = STYLES[input.styleId].name.toLowerCase();
