@@ -741,15 +741,33 @@ inside a group does not matter for correctness, only for migration numbers.
   of `settings/_components/integrations/publishing.tsx`, and the Zernio method options in `src/lib/publishing.ts`.
 - **Migration.** None (the `publish_targets` columns exist from WP4).
 - **Depends on.** WP4.
-- **Blocked until.** `docs.zernio.com` is reachable and the ⚠ items in publishing §7.2 (base host, presign path,
-  account list, post read, field names, webhook signing, idempotency, draft status) are confirmed and written into
-  the design. Until then the adapter stays disabled and only the manual path shows.
+- **Docs status (15 Nov 2026, `docs/research/zernio-api.md`).** docs.zernio.com was read on 15 Nov 2026 and
+  publishing §7.2 was rewritten from it. The design changes are listed at the top of §7.2.
+  - **Confirmed:** base URL `https://zernio.com/api` + `/v1/...`, `Authorization: Bearer` (keys `sk_` or `zrk_`),
+    `GET /v1/auth/verify`, `GET /v1/accounts?platform=tiktok`, `integrationLane` on `GET /v1/accounts/{id}/health`,
+    creator info, `POST /v1/media/presign` + `PUT uploadUrl`, the `POST /v1/posts` body (`content`, `mediaItems`,
+    `platforms[{platform, accountId}]`, `tiktokSettings` with the required `allow_comment`/`allow_duet`/`allow_stitch`,
+    `publishNow`, `metadata`), `Idempotency-Key`, the 409 duplicate refusal, 207 handling, `GET /v1/posts/{postId}`
+    and its statuses, `POST /v1/posts/{postId}/retry`, drafts (`tiktokSettings.draft: true`, delivered = `published`
+    + `isDraft`), the 15-per-24 h hold, error codes, and the webhook scheme (`X-Zernio-Signature`, hex HMAC-SHA256 of
+    the raw body, event `id`).
+  - **Still open, with a safe fallback in §7.2 (they block only the live verification post's sign-off, not
+    building):** the status a held post shows (maps to `queued`), `Content-Length` on the upload PUT (sent
+    explicitly), how long a `publishNow` create takes (10-minute timeout, then the metadata lookup), whether a
+    personal TikTok account can publish (trust `canPost`), whether Zernio's TikTok app is audited, and whether the
+    webhook dashboard takes a secret (polling works without webhooks).
+  - The adapter still ships behind `TIKTOK_PUBLISH_PROVIDER=zernio`, and stays unverified until the first verification
+    post; only the manual path shows until then.
 - **Acceptance tests.** Publishing §11.2 cases 7–11 against the Zernio fake:
   - Both consent flags and `PUBLIC_TO_EVERYONE` are sent only after the consent tick.
   - Crash between POST and saving `postId` → `check_before_retry` and no second POST.
   - Retry uses `/v1/posts/{id}/retry`.
   - A webhook only triggers a poll; a forged event cannot block the real one.
   - Partial post keeps the published Instagram target.
+  - From the docs read (publishing §7.2): the request body matches the Zod contract (three interaction choices,
+    `metadata.studioTargetId`, `Idempotency-Key`, no `isDraft`); 207 `scheduled` stays `queued`; a draft entry
+    `published` + `isDraft` becomes `finish_in_tiktok_app`; a 409 with our `existingPostId` is adopted; a correctly
+    signed webhook (`X-Zernio-Signature`) is stored under its event `id`, a badly signed one under `unverified:`.
 - **Verify with the owner's real accounts.**
   - The audited lane end to end, held-over-cap behaviour, URL resolution delay, draft behaviour, and whether
     "first 2 accounts free" still holds.
@@ -791,7 +809,7 @@ G3                             └── WP5 Hashtag watch ──┘   → Stage
       │
 G4  WP6 Square Tier 0   ∥   WP7 Email & review requests   ∥   WP8 Website & Search Console
       │                      │                                  │
-G5  WP6b Square Tier 1   ∥   WP9 Business Profile (needs WP7+WP8)   ∥   WP10 Zernio (needs WP4; blocked on docs)
+G5  WP6b Square Tier 1   ∥   WP9 Business Profile (needs WP7+WP8)   ∥   WP10 Zernio (needs WP4; docs read 15 Nov)
 ```
 
 ---
@@ -960,7 +978,7 @@ fees not included, and no paid service is created without the owner's approval. 
 | --- | --- | --- | --- |
 | Postmark | Any email | Free developer plan: 100 emails/month. Basic US$15/month for 10,000 emails, overage US$1.80 per 1,000 (memo §8, search summary) | **US$15 (≈ A$22.50)** once live. *Assumption:* follow-ups + review requests + one campaign stay under 10,000/month (for example 200 + 200 + 300 = 700) |
 | Resend (fallback only, not built) | — | Free 3,000/month capped at 100/day; Pro US$20/month for 50,000 (memo §8) | US$0 (not used) |
-| Zernio | TikTok automatic posting (optional) | "First 2 accounts free"; US$6/month each for accounts 3–10 (memo §3; unverified, undated pricing page) | **US$0** for one TikTok account, if the free tier still holds |
+| Zernio | TikTok automatic posting (optional) | First 2 connected accounts included (a $12 monthly credit), then $6/month each for accounts 3–10; posts unlimited (official pricing pages read 15 Nov 2026, `docs/research/zernio-api.md` §12) | **US$0** for one TikTok account, if the free tier still holds |
 | Instagram Graph API | Instagram direct posting, hashtag watch | No fee mentioned in the memo; Development mode, no App Review | No figure; *assumed* US$0 |
 | Square Appointments | Tier 0 reads | Works on the Free plan, A$0 (memo §6) | A$0 |
 | Square Appointments Plus / Premium | Tier 1 booking changes (optional) | A$40 / A$90 per location per month, from a page the search engine flagged as possibly stale (memo §6 and Follow-up 8: **unverified**) | Not shown in the app; the owner checks Square Dashboard before upgrading |
@@ -1175,5 +1193,11 @@ Three independent review rounds fixed G4 before G5 started. Binding on WP6b, WP9
 - **Email:** commercial sends need `webhooksReadyForCommercial`; unsubscribe and review-click links stay valid across
   resends (`email_link_tokens`); `REVIEW_REQUEST_STATUS_WORDS` (`packages/core/src/reviews.ts`) are the status words
   for review requests everywhere (WP9's Google reviews tab must not reuse them for Google's own reviews).
-- **WP10 is still blocked:** this build environment cannot reach docs.zernio.com or zernio.com (proxy refusal and
-  DNS failure on 2026-11-15), so the ⚠ items in publishing §7.2 remain unconfirmed and WP10 must not start.
+- **WP10 can start (docs read 2026-11-15):** docs.zernio.com was read as data on 2026-11-15
+  (`docs/research/zernio-api.md`) and publishing §7.2 now carries the confirmed paths, fields, headers and webhook
+  signature. Build to §7.2 exactly, including its "Changed after reading the docs" list: Business lane from
+  `integrationLane`, owner-chosen `allow_comment`/`allow_duet`/`allow_stitch`, `tiktokSettings.draft: true` with
+  `publishNow`, `isDraft` checked before `published`, `Idempotency-Key` + `metadata.studioTargetId`, 207 read by
+  `post.status`, polls to 50 h, and webhooks as hints only even when signed. The remaining ⚠ items each have a
+  fallback and are recorded at the first verification post; they do not block building. Nothing in WP10 may call the
+  real Zernio API in tests: the fake serves every path.
