@@ -109,8 +109,13 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-/** Starts the fake on a free port of 127.0.0.1. */
-export async function startFakeZernioServer(): Promise<FakeZernioServer> {
+/** Where the fake listens (default: a free port of 127.0.0.1). The browser test runs it on a fixed port. */
+export interface FakeZernioListenOptions {
+  port?: number;
+}
+
+/** Starts the fake on 127.0.0.1 (a free port unless one is given). */
+export async function startFakeZernioServer(listen: FakeZernioListenOptions = {}): Promise<FakeZernioServer> {
   let scenario = defaultScenario();
   const calls: ZernioCall[] = [];
   const posts = new Map<string, Record<string, unknown>>();
@@ -240,7 +245,7 @@ export async function startFakeZernioServer(): Promise<FakeZernioServer> {
       res.end(String(err));
     });
   });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  await new Promise<void>((r) => server.listen(listen.port ?? 0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   return {
     url: base,

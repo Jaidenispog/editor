@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { buildPublishingIntegrations } from '../src/lib/integrations/publishing';
 import { verifyZernioSignature } from '../src/lib/publishing';
 import { buildCreateRequest, draftProblems, initialDraft, methodOption } from '../src/components/publishing/composer-state';
-import { methodLabel } from '../src/components/publishing/labels';
+import { methodLabel, verificationNotice } from '../src/components/publishing/labels';
 import type { EligibilityItemDto } from '../src/lib/shared/publishing-dto';
 
 /** TikTok through Zernio, web pieces without a database (design §5.3 states, composer choices, webhook signature). */
@@ -94,6 +94,17 @@ describe('composer choices for Zernio', () => {
     expect(methodLabel('zernio', 'publish', true)).toBe('First verification post (publish via Zernio)');
     expect(methodLabel('instagram_api', undefined, true)).toBe('First verification post (publish from Studio Assistant)');
     expect(methodLabel('manual', undefined, false)).toBe('Post it yourself');
+  });
+});
+
+describe('the first-verification warning (composer, review step and destination card)', () => {
+  it('never calls a Zernio draft a public post', () => {
+    // Found while building the Stage C TikTok browser test: the destination card of a draft verification said "real, public post".
+    expect(verificationNotice('zernio', 'draft', '@ivanhoe_cuts')).toBe('This sends a real draft to the TikTok inbox of @ivanhoe_cuts.');
+    expect(verificationNotice('zernio', 'draft', '@ivanhoe_cuts')).not.toMatch(/public/);
+    expect(verificationNotice('zernio', 'publish', '@ivanhoe_cuts')).toBe('This is a real, public post on @ivanhoe_cuts.');
+    expect(verificationNotice('instagram_api', 'publish', '@ivanhoe_cuts')).toBe('This is a real, public post on @ivanhoe_cuts.');
+    expect(verificationNotice('instagram_api', undefined, '@ivanhoe_cuts')).toBe('This is a real, public post on @ivanhoe_cuts.');
   });
 });
 

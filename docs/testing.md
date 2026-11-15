@@ -802,3 +802,90 @@ warning, Testing vs Production), the Search Console property type and the share 
 API Access approval for Business Profile (not guaranteed), real review shapes and the page-2 issue, and the Performance
 request parameters, response nesting and retention (website design §12.3, email design §11). See the WP8 and WP9
 smoke tests above.
+
+## Stage C browser test: TikTok via Zernio
+
+`apps/web/e2e/stage-c-tiktok.e2e.mjs` drives automatic TikTok posting through Zernio (WP10, publishing design §7.2) in
+Chromium the way the owner would, with the flag on, against WP10's own fake of Zernio only, and prints
+`N checks passed, 0 failed`. Like the other browser tests it is plain Node + Playwright. Nothing is ever sent to the
+real Zernio.
+
+```bash
+bash apps/web/e2e/run-stage-c-tiktok.sh                         # fresh database studio_e2e_c3, build, port 4300
+E2E_SKIP_BUILD=1 bash apps/web/e2e/run-stage-c-tiktok.sh        # reuse the last build
+```
+
+The runner creates and migrates a throwaway database, builds the web app (with `NODE_ENV=production`), and starts
+WP10's fake (`apps/worker/test/fakes/zernio-server.ts`) as its own process through `apps/web/e2e/fake-zernio.ts`: the
+API and the presigned upload storage on one free port, and a control port the test uses to read what the fake received
+(every call with its headers, each upload PUT, each create body, retries, invalid bodies) and to change a stored post
+the way Zernio would (`POST /posts/:id`), change the scenario (`POST /scenario`) or forget the recorded calls. Then
+`next start` (port 4300) and the worker run with `NODE_ENV=test`, no AI, email, Square, Meta or Google settings, in
+three phases with a restart of both between them (the fake keeps running):
+
+1. **setup** — `TIKTOK_PUBLISH_PROVIDER=zernio` without `ZERNIO_API_BASE_URL`.
+2. **on** — `ZERNIO_API_BASE_URL=<fake>/api` and a random `ZERNIO_WEBHOOK_SECRET`.
+3. **off** — `TIKTOK_PUBLISH_PROVIDER=none`, with `ZERNIO_API_BASE_URL` and the secret still set; the fake's call log is
+   cleared just before the restart.
+
+Each phase hands its results to the next through a state file; the last prints the total. Everything is stopped and
+the database dropped afterwards (logs kept on failure or with `E2E_KEEP=1`). Other settings: `E2E_PG_URL`, `E2E_DB`,
+`E2E_PORT`, `E2E_WORK_DIR`. A passing run prints `105 checks passed, 0 failed` after about two minutes plus the build
+(137, 133 and 125 s of test time, 229, 222 and 210 s in all, in three consecutive runs on 2026-11-15). Every wait is on a
+real state (a target, job, webhook row or fake counter, a button enabled), never a fixed delay. Under `NODE_ENV=test` the worker may upload over plain http to exactly the fake's
+origin, because `ZERNIO_API_BASE_URL` is itself on 127.0.0.1 (`uploadTestOrigin`); in production the upload address must
+be https and public.
+
+**What it covers** (database rows are read only where the UI cannot show them: the encrypted key, the bound consent,
+webhook rows, job runs):
+
+- *Needs setup*: the Zernio box says "Needs setup on the server: ZERNIO_API_BASE_URL" with no key field, the checklist
+  line says manual posting works and names the missing setting, a key sent to the API anyway is refused (409), nothing
+  is stored, and the fake hears nothing.
+- *The key*: a key the fake refuses gives "Zernio didn't accept this key" and the checklist line "Zernio needs a new
+  key"; "Replace key" with the right one lists the fake's TikTok account. Only "Key saved (ends …6789)" is shown; the
+  key is stored encrypted (only the last four characters in plain text) and appears in no response the app sent to the
+  browser (every finished page, server component and API response of the phase, about 800), no audit entry and no job.
+- *The account*: the owner chooses the account the fake lists; it is stored on the Business lane with creator info
+  read; "Not verified", both switches locked, the checklist line "Connected … Not verified". Connecting posts nothing.
+- *Post A, the first verification post*: the composer offers "First verification post (publish via Zernio)" and the
+  drafts one next to "Post it yourself", warns it is a real, public post and shows 0 of 15 videos. The review step's
+  switches start from creator info (Comments on, Duets off, Stitches off and locked) and "Post now" stays disabled until
+  the consent tick. The approve API refuses (400) no consent, the tick false, no interaction choices, and Stitches on
+  although TikTok turned it off; nothing is approved or stored. With Comments off, Duets on and the tick, the approval
+  stores the consent bound to those choices. The worker presigns once (the target id and exact size), uploads once to
+  the presigned address only (no `Authorization`, the key nowhere, `video/mp4`, an explicit `Content-Length`, not
+  chunked) and creates exactly one post: `Idempotency-Key` and `metadata.studioTargetId` = the target id, both consent
+  flags, `PUBLIC_TO_EVERYONE`, the owner's three choices, no draft flag, and nothing the strict contract does not allow.
+- *Webhooks*: a forged (wrong secret) and an unsigned delivery claiming "published" with a link are answered 200, stored
+  as `unverified:` with the envelope only, and leave the post "Processing" with no link. The fake then says published
+  without a link; a signed delivery with the forged ones' event id is still new, is stored under that id as verified,
+  and its read makes the post "Posted" with "The TikTok link appears in a few minutes" and no link. Only after the fake
+  resolves the URL and a signed `post.tiktok.url_resolved` arrives does "View on TikTok" appear, with exactly that
+  link. A duplicate `publish.target` run (`apps/web/e2e/requeue-job.ts`) creates and uploads nothing more.
+- *Post B, a draft*: the drafts option, the review step and the destination card say it is a real draft for the
+  TikTok inbox (never "public post"); only the drafts tick is asked; the create has `draft: true` inside
+  `tiktokSettings`. When the fake reports the entry published without a link, the destination becomes "Your turn" with
+  "Sent to your TikTok drafts. Open TikTok, add a sound if you like, and post.", is never shown as posted or published,
+  has no link, and the post is not complete. Drafts are not counted in the 15-a-day figure.
+- *Post C, a failure and Retry*: after the verification answer and the switch, "Publish via Zernio" is a plain option.
+  When the fake fails the post, the card shows "Failed" with TikTok's message and Retry; Retry calls
+  `/v1/posts/{id}/retry` once with no body, with no second create and no new upload; when the fake then publishes it,
+  the card shows the link. Settings counts 2 of 15 videos.
+- *Flag off*: the TikTok section says only "Post it yourself", there is no key field, and the checklist line ("the
+  optional route through Zernio is off on this server") is the only mention of Zernio on the page; the composer offers
+  only "Post it yourself" for TikTok. The webhook route answers 404, a key is refused (409), a `social.check` and a
+  `publish.poll` for a Zernio post (`apps/web/e2e/enqueue-job.ts`) finish without calling, and the fake records zero
+  requests for the whole phase.
+- No page or console errors in any phase (none are caused on purpose: the refusals are checked through the API).
+
+**Product bug found while building it** (fixed with a unit test in `apps/web/test/zernio.test.ts`): the destination
+card of a Zernio draft verification said "This is a real, public post"; the warning now comes from
+`verificationNotice` in `apps/web/src/components/publishing/labels.ts`, shared by the composer, the review step and the
+card, and says "This sends a real draft to the TikTok inbox of @handle" for a draft.
+
+**Not verified without the owner's real Zernio account.** The fake answers at once and only as WP10 modelled it from
+the docs (docs/research/zernio-api.md). Unproven until the first real verification post: the audited lane end to end,
+how long `publishNow` and URL resolution take, held-over-cap behaviour, the real draft body and which key marks a
+delivered draft, whether a webhook's `post.id` equals the API's `_id`, the account id after a reconnect, and whether
+Zernio's dashboard takes our webhook secret (see "TikTok through Zernio" above).
