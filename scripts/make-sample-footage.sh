@@ -7,9 +7,9 @@
 # each file's size. A complete folder is left as it is unless --force is given. Safe to run many times at once
 # (parallel test files, checkouts sharing one data/ folder): a lock directory in out_dir lets one run generate while
 # the others wait and then find the footage complete. The lock records its owner (pid, computer, start time); a lock
-# whose owner has exited, or that is older than SAMPLES_LOCK_STALE_SECONDS (default 600), is taken over. Each run
-# writes into its own temporary folder inside the lock and moves every finished file into place, so a file in out_dir
-# is never half-written. Works with macOS's bash 3.2; needs no flock.
+# whose owner has exited, or that is older than SAMPLES_LOCK_STALE_SECONDS (default 600), is taken over, by exactly one
+# of the runs that find it so. Each run writes into its own temporary folder inside the lock and moves every finished
+# file into place, so a file in out_dir is never half-written. Works with macOS's bash 3.2; needs no flock.
 set -euo pipefail
 
 FORCE=0
@@ -26,13 +26,16 @@ SAMPLE_FILES=(sample_a_portrait_sdr.mp4 sample_b_rotated_hevc_hlg.mov sample_c_n
 MARKER_HEADER='studio-assistant synthetic samples v1'
 MARKER="$OUT/.samples-complete"
 LOCK="$OUT/.generating.lock"
+CLAIM="$LOCK/owner.claimed.$$" # this run's name for a lock's owner record while it removes that lock
 STALE_AFTER="${SAMPLES_LOCK_STALE_SECONDS:-600}"
 case "$STALE_AFTER" in ''|0*|*[!0-9]*) printf 'SAMPLES_LOCK_STALE_SECONDS must be a whole number of seconds\n' >&2; exit 2 ;; esac
 HOST="$(uname -n)"
 
-HAVE_LOCK=0     # 1 once this run created the lock
-OWNER_LINE=''   # what this run wrote as the lock's owner: "pid computer start-epoch"
-OWNER_SEEN=''   # the owner line of another run's lock, as last read
+CREATED=0       # 1 while the lock directory there is one this run made
+HAVE_LOCK=0     # 1 once this run owns the lock: its owner record is in place
+OWNER_LINE=''   # this run's owner record: "pid computer start-epoch"
+RECORD_SEEN=''  # the record of another run's lock, as last judged: owner, a leftover owner.* file, or '' for none
+OWNER_SEEN=''   # what that lock's owner file held
 STALE_REASON='' # why that lock may be taken over
 MKDIR_ERROR=''  # why the lock could not be created
 WORK=''         # this run's temporary folder (inside the lock)
@@ -60,15 +63,37 @@ is_complete() {
   [ "$(cat "$MARKER" 2>/dev/null)" = "$want" ]
 }
 
+# The lock is the directory $LOCK. A run owns it once it has written its owner record, $LOCK/owner, with an exclusive
+# create, which exactly one of several runs that try at once gets: right after making the directory with mkdir, or to
+# take over a lock found empty and unchanged for over a minute (its maker was killed before recording itself). A lock
+# is removed only by the run that holds its record, which it gets by renaming the record to its claim name ($CLAIM):
+# a rename is atomic, so again exactly one run succeeds. The owner claims its own record to release the lock. A run
+# that judged the owner stale claims the record to take the lock over, and gives back a record that is not the one it
+# judged (the lock changed hands meanwhile); the runs that did not get it wait. Removal takes the record last, so a
+# lock without an owner record is being made or removed and has just changed. One left like that for over a minute
+# (its maker or remover was killed) is taken over: by claiming its leftover record (an owner.* file), or when empty,
+# by recording itself in it.
+
+# Records this run as the owner of the lock directory there now. The exclusive create (noclobber) fails when another
+# run has recorded itself first. Once it succeeds the lock is this run's: the record is not read back, as a run that
+# judged an earlier owner stale may be holding it for a moment before giving it back.
+record_owner() {
+  local line
+  line="$$ $HOST $(date +%s)"
+  (set -C; printf '%s\n' "$line" > "$LOCK/owner") 2>/dev/null || return 1
+  OWNER_LINE="$line"
+  HAVE_LOCK=1
+}
+
 # Tries to create the lock. 0: it is ours; 1: another run holds it; 2: it cannot be created (MKDIR_ERROR says why).
 # Only "it already exists" means held: any other mkdir failure is an error, not a reason to wait.
 try_lock() {
   if MKDIR_ERROR="$(mkdir "$LOCK" 2>&1)"; then
-    HAVE_LOCK=1
-    OWNER_LINE="$$ $HOST $(date +%s)"
-    # Written beside the lock's final name and renamed, so a waiter never reads half a line.
-    if printf '%s\n' "$OWNER_LINE" > "$LOCK/owner.$$" && mv -f "$LOCK/owner.$$" "$LOCK/owner"; then return 0; fi
+    CREATED=1
+    if record_owner; then return 0; fi
+    # Nobody else records itself in a lock that has just been made, so this is an error (disk full, permissions).
     MKDIR_ERROR="could not record the lock's owner in $LOCK"
+    release_lock
     return 2
   fi
   if [ -d "$LOCK" ]; then return 1; fi
@@ -84,17 +109,22 @@ pid_alive() {
 }
 
 # True when the lock can be taken over: its owner process has exited (checked on this computer only), or it has been
-# held for longer than a generation can take. Sets OWNER_SEEN (the owner line judged) and STALE_REASON.
-# A lock without an owner record is still being set up, unless it is more than a minute old.
+# held for longer than a generation can take. Sets RECORD_SEEN and OWNER_SEEN (the record judged) and STALE_REASON.
+# A lock without an owner record is being made or removed, unless it has not changed for more than a minute.
 lock_is_stale() {
-  local pid host start rest now age
+  local pid host start rest now age f
+  RECORD_SEEN=''
   OWNER_SEEN="$(cat "$LOCK/owner" 2>/dev/null || true)"
   if [ -z "$OWNER_SEEN" ]; then
     [ -d "$LOCK" ] || return 1
-    STALE_REASON='it has no owner record and is more than a minute old'
+    for f in "$LOCK/owner" "$LOCK"/owner.*; do
+      if [ -e "$f" ]; then RECORD_SEEN="${f##*/}"; break; fi
+    done
+    STALE_REASON="it has no owner record${RECORD_SEEN:+ (only $RECORD_SEEN)} and has not changed for more than a minute"
     [ -n "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]
     return
   fi
+  RECORD_SEEN=owner
   read -r pid host start rest <<< "$OWNER_SEEN" || true
   # Plain decimal numbers only (a leading 0 would be read as octal by $((...))).
   case "$pid" in ''|0*|*[!0-9]*) STALE_REASON="its owner record is unreadable ($OWNER_SEEN)"; return 0 ;; esac
@@ -120,15 +150,56 @@ describe_owner() {
   printf 'pid %s on %s, started %ss ago' "$pid" "$host" "$(( $(date +%s) - start ))"
 }
 
-# Removes a stale lock, but only if it still has the owner that was judged stale (another waiter may have replaced it).
+# Claims the lock by renaming its record file $1 (owner, or a leftover owner.*) to $CLAIM. A rename is atomic, so of
+# several runs that try at once exactly one succeeds. An owner file must still hold $2, the line that was judged: any
+# other (the lock changed hands in the meantime) is given back. 0 when this run now holds the lock's record.
+claim_record() {
+  mv -f "$LOCK/$1" "$CLAIM" 2>/dev/null || return 1
+  if [ "$1" != owner ] || [ "$(cat "$CLAIM" 2>/dev/null || true)" = "$2" ]; then return 0; fi
+  mv -f "$CLAIM" "$LOCK/owner" 2>/dev/null || true
+  return 1
+}
+
+# Removes the lock whose record this run holds: everything else first, then the record, then the lock, so a run killed
+# meanwhile leaves its claim (for another run to take over) or an empty lock. While the claim is there the lock is
+# this run's alone, so emptying it is tried again after a failure (the ffmpeg of a killed owner may still be creating
+# its output); once the record is gone it is not, so the lock itself is removed only if it is still empty.
+remove_lock() {
+  local attempt
+  for attempt in 1 2 3; do
+    [ -e "$CLAIM" ] || return 0
+    if find "$LOCK" -mindepth 1 -maxdepth 1 ! -name "${CLAIM##*/}" -exec rm -rf {} +; then
+      rm -rf "$CLAIM"
+      rmdir "$LOCK" 2>/dev/null || true
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# Takes over the stale lock judged by lock_is_stale: removes it, or owns it (HAVE_LOCK) when it was empty. 1 when it
+# did neither: another run got to it first, or it changed.
 break_lock() {
-  if [ "$(cat "$LOCK/owner" 2>/dev/null || true)" != "$OWNER_SEEN" ]; then return 0; fi
+  if [ -n "$RECORD_SEEN" ]; then
+    claim_record "$RECORD_SEEN" "$OWNER_SEEN" || return 1
+    say "taking over a stale lock in $OUT: $STALE_REASON"
+    remove_lock || { say "cannot remove the stale lock $LOCK"; exit 1; }
+    return 0
+  fi
+  # No record to claim. This script never leaves files in a lock without a record, so files here may be those of a
+  # new owner that has just appeared: look again. Files that stay were put there by something else: not removed.
+  if [ -n "$(ls -A "$LOCK" 2>/dev/null)" ]; then
+    STALE_REASON='it holds files but no owner record (not left by this script): remove it if no run is generating'
+    return 1
+  fi
+  # Empty: record this run in it, as in a lock it has just made. Only one run can, whichever lock is there by now.
+  record_owner || return 1
   say "taking over a stale lock in $OUT: $STALE_REASON"
-  rm -rf "$LOCK"
 }
 
 acquire_lock() {
-  local status errors=0 announced=0
+  local status errors=0 failures=0 announced=0
   while :; do
     status=0
     try_lock || status=$?
@@ -143,9 +214,19 @@ acquire_lock() {
     esac
     errors=0
     if lock_is_stale; then
-      break_lock
+      if break_lock; then
+        if [ "$HAVE_LOCK" = 1 ]; then return 0; fi
+        failures=0
+        continue
+      fi
+      # Usually another run got there first, and the next look finds its lock. Again and again means it cannot be done.
+      failures=$((failures + 1))
+      if [ "$failures" -ge 3 ]; then say "cannot take over the stale lock $LOCK: $STALE_REASON"; exit 1; fi
+      sleep 1
       continue
     fi
+    failures=0
+    if [ ! -d "$LOCK" ]; then continue; fi # released at this moment: try again at once
     if [ "$announced" = 0 ]; then
       say "another run ($(describe_owner)) is generating the samples in $OUT; waiting for it"
       announced=1
@@ -155,12 +236,15 @@ acquire_lock() {
 }
 
 release_lock() {
-  local line
-  if [ "$HAVE_LOCK" != 1 ]; then return 0; fi
+  if [ "$HAVE_LOCK" = 1 ]; then
+    # Like any removal, through the claim: a lock that another run took over (this run looked stale) is not ours now.
+    if claim_record owner "$OWNER_LINE"; then remove_lock || say "could not remove the lock $LOCK"; fi
+  elif [ "$CREATED" = 1 ]; then
+    # Made the lock but stopped before recording itself in it: nobody else acts on a lock that has just changed.
+    rmdir "$LOCK" 2>/dev/null || true
+  fi
   HAVE_LOCK=0
-  line="$(cat "$LOCK/owner" 2>/dev/null || true)"
-  # A lock that names another owner was taken over (this run looked stale); it is not ours to remove.
-  if [ -z "$line" ] || [ "$line" = "$OWNER_LINE" ]; then rm -rf "$LOCK"; fi
+  CREATED=0
 }
 
 cleanup() {

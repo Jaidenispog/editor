@@ -26,12 +26,30 @@ const FAKE_FFMPEG = [
   '',
 ].join('\n');
 
+/**
+ * Stands in for date, ls, mv, rm and rmdir (it runs the real command named by $0, found after its own folder on PATH),
+ * to make one step of a run start late, as on a busy machine. In a run with SLOW_LOCK_MARK set, its first ls, mv, rm or
+ * rmdir on the lock (its first look at, or change to, a lock it has judged stale) waits SLOW_LOCK_SECONDS; in a run
+ * with SLOW_DATE_MARK set, its first date (taken just before it writes its owner record) waits SLOW_DATE_SECONDS.
+ */
+const SLOW_COMMAND = [
+  '#!/usr/bin/env bash',
+  'if [ "${0##*/}" = date ]; then',
+  '  if [ -n "${SLOW_DATE_MARK:-}" ] && [ ! -e "$SLOW_DATE_MARK" ]; then : > "$SLOW_DATE_MARK"; sleep "$SLOW_DATE_SECONDS"; fi',
+  'elif [ -n "${SLOW_LOCK_MARK:-}" ] && [ ! -e "$SLOW_LOCK_MARK" ]; then',
+  '  case "$*" in *.generating.lock*) : > "$SLOW_LOCK_MARK"; sleep "$SLOW_LOCK_SECONDS" ;; esac',
+  'fi',
+  'PATH="${PATH#*:}" exec "${0##*/}" "$@"',
+  '',
+].join('\n');
+
 /** One generation calls ffmpeg six times: samples A, B (encode, then rotation remux), C, D and the music. */
 const CALLS_PER_GENERATION = 6;
 const TIMEOUT = 30_000;
 
 let root: string;
 let bin: string;
+let slow: string;
 let host: string;
 let count = 0;
 
@@ -41,6 +59,12 @@ beforeAll(async () => {
   await mkdir(bin);
   await writeFile(path.join(bin, 'ffmpeg'), FAKE_FFMPEG);
   await chmod(path.join(bin, 'ffmpeg'), 0o755);
+  slow = path.join(root, 'slow');
+  await mkdir(slow);
+  for (const name of ['date', 'ls', 'mv', 'rm', 'rmdir']) {
+    await writeFile(path.join(slow, name), SLOW_COMMAND);
+    await chmod(path.join(slow, name), 0o755);
+  }
   host = (await execa('uname', ['-n'])).stdout.trim();
 });
 
@@ -63,6 +87,12 @@ function fresh() {
     run: (args: string[] = [], extra: Record<string, string> = {}) => execa('bash', [SAMPLE_SCRIPT, ...args, dir], { env: env(extra), reject: false, all: true }),
     calls: async (): Promise<string[]> => (existsSync(log) ? (await readFile(log, 'utf8')).split('\n').filter(Boolean) : []),
   };
+}
+
+/** Runs the script on t's folder with the stand-ins above: its first look at or change to the lock waits `delay` s. */
+function slowRun(t: ReturnType<typeof fresh>, delay: string, index: number) {
+  const PATH = [slow, bin, process.env['PATH'] ?? ''].join(path.delimiter);
+  return t.run([], { PATH, SLOW_LOCK_SECONDS: delay, SLOW_LOCK_MARK: `${t.dir}-slow-${index}`, FAKE_FFMPEG_SECONDS: '0.3' });
 }
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -120,6 +150,61 @@ describe('make-sample-footage.sh with a stand-in ffmpeg', () => {
     expect(existsSync(t.lock)).toBe(false);
   }, TIMEOUT);
 
+  it('lets exactly one of several runs take over a stale lock, even when each starts changing it late', async () => {
+    const t = fresh();
+    const deadPid = (await execa('bash', ['-c', 'echo $$'])).stdout.trim();
+    await mkdir(t.lock, { recursive: true });
+    await writeFile(t.owner, `${deadPid} ${host} ${now()}\n`);
+    // All three find the owner gone at once, then each one's first change to the lock starts late, by a different
+    // amount. A later run must neither remove the lock that the first one has made since, nor its footage.
+    const results = await Promise.all(['0.5', '1', '1.5'].map((delay, i) => slowRun(t, delay, i)));
+    for (const result of results) expect(result.exitCode, result.all).toBe(0);
+    expect(results.filter((result) => result.all.includes('taking over a stale lock'))).toHaveLength(1);
+    const calls = await t.calls();
+    expect(calls).toHaveLength(CALLS_PER_GENERATION);
+    expect(new Set(calls.map((line) => line.split(' ')[0])).size).toBe(1);
+    expect(samplesComplete(t.dir)).toBe(true);
+    expect((await readdir(t.dir)).sort()).toEqual([...SAMPLE_FILES, '.samples-complete'].sort());
+  }, TIMEOUT);
+
+  it('lets one of several runs take over a lock left empty long ago, even when each starts on it late', async () => {
+    const t = fresh();
+    await mkdir(t.lock, { recursive: true });
+    const old = new Date(Date.now() - 5 * 60_000);
+    await utimes(t.lock, old, old);
+    // As above, but with no owner record to claim: a later run must not take or remove the lock the first one holds.
+    const results = await Promise.all(['0.5', '1', '1.5'].map((delay, i) => slowRun(t, delay, i)));
+    for (const result of results) expect(result.exitCode, result.all).toBe(0);
+    expect(results.filter((result) => result.all.includes('taking over a stale lock'))).toHaveLength(1);
+    const calls = await t.calls();
+    expect(calls).toHaveLength(CALLS_PER_GENERATION);
+    expect(new Set(calls.map((line) => line.split(' ')[0])).size).toBe(1);
+    expect(samplesComplete(t.dir)).toBe(true);
+    expect((await readdir(t.dir)).sort()).toEqual([...SAMPLE_FILES, '.samples-complete'].sort());
+  }, TIMEOUT);
+
+  it('lets only one of several runs record itself in a lock left empty long ago, however late each one writes', async () => {
+    const t = fresh();
+    await mkdir(t.lock, { recursive: true });
+    const old = new Date(Date.now() - 5 * 60_000);
+    await utimes(t.lock, old, old);
+    // All three find the lock empty at once; then each one's owner record is written late (its first `date` is slow),
+    // by a different amount. The record is created exclusively, so the later ones must not record themselves as well.
+    const PATH = [slow, bin, process.env['PATH'] ?? ''].join(path.delimiter);
+    const results = await Promise.all(
+      ['0.5', '1', '1.5'].map((delay, i) =>
+        t.run([], { PATH, SLOW_DATE_SECONDS: delay, SLOW_DATE_MARK: `${t.dir}-date-${i}`, FAKE_FFMPEG_SECONDS: '0.3' }),
+      ),
+    );
+    for (const result of results) expect(result.exitCode, result.all).toBe(0);
+    expect(results.filter((result) => result.all.includes('taking over a stale lock'))).toHaveLength(1);
+    const calls = await t.calls();
+    expect(calls).toHaveLength(CALLS_PER_GENERATION);
+    expect(new Set(calls.map((line) => line.split(' ')[0])).size).toBe(1);
+    expect(samplesComplete(t.dir)).toBe(true);
+    expect((await readdir(t.dir)).sort()).toEqual([...SAMPLE_FILES, '.samples-complete'].sort());
+  }, TIMEOUT);
+
   it('treats an owner that was killed but not yet reaped (a zombie) as gone', async () => {
     const t = fresh();
     // The background `sleep 0` exits at once; its parent becomes `sleep 30`, which never reaps it.
@@ -161,6 +246,34 @@ describe('make-sample-footage.sh with a stand-in ffmpeg', () => {
     expect(result.exitCode, result.all).toBe(0);
     expect(result.all).toContain('no owner record');
     expect(samplesComplete(t.dir)).toBe(true);
+  }, TIMEOUT);
+
+  it('takes over a lock that a run killed while removing it left behind, by claiming the record it left', async () => {
+    const t = fresh();
+    await mkdir(path.join(t.lock, 'work.abc123'), { recursive: true });
+    await writeFile(path.join(t.lock, 'work.abc123', 'sample_a_portrait_sdr.mp4'), 'half-written');
+    await writeFile(path.join(t.lock, 'owner.claimed.4321'), `1234 ${host} ${now() - 300}\n`);
+    const old = new Date(Date.now() - 5 * 60_000);
+    await utimes(t.lock, old, old);
+    const result = await t.run();
+    expect(result.exitCode, result.all).toBe(0);
+    expect(result.all).toContain('no owner record (only owner.claimed.4321)');
+    expect(samplesComplete(t.dir)).toBe(true);
+    expect((await readdir(t.dir)).sort()).toEqual([...SAMPLE_FILES, '.samples-complete'].sort());
+  }, TIMEOUT);
+
+  it('does not remove files that something else left in a lock without an owner record, and says so', async () => {
+    const t = fresh();
+    await mkdir(t.lock, { recursive: true });
+    await writeFile(path.join(t.lock, 'notes.txt'), 'not made by the script');
+    const old = new Date(Date.now() - 5 * 60_000);
+    await utimes(t.lock, old, old);
+    const result = await t.run();
+    expect(result.exitCode).toBe(1);
+    expect(result.all).toContain('cannot take over the stale lock');
+    expect(result.all).toContain('remove it if no run is generating');
+    expect(existsSync(path.join(t.lock, 'notes.txt'))).toBe(true);
+    expect(await t.calls()).toHaveLength(0);
   }, TIMEOUT);
 
   it('waits for a live owner instead of taking its lock', async () => {
