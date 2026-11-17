@@ -1,6 +1,6 @@
-import { computeTimeline, type Segment, type StyleId, type TransitionType } from '@studio/core';
+import { computeTimeline, hasBeatGrid, type Segment, type StyleId, type TransitionType } from '@studio/core';
 import { extension, freeIntervals, play, startTimes, type Draft } from './draft.js';
-import { cutTime, landRevealOnBeat, nearestBeatIndex, shiftCut, strongestBeat, startBeatsThatFit, type BeatGrid } from './music.js';
+import { NO_CLEAR_BEAT_NOTES, cutTime, landRevealOnBeat, nearestBeatIndex, shiftCut, strongestBeat, startBeatsThatFit, type BeatGrid } from './music.js';
 import { round } from './random.js';
 import { CALM_TRANSITIONS, type EffectiveSettings, type ResolvedEditingStyle } from './settings.js';
 import type { BuildContext, Recipe } from './styles.js';
@@ -237,20 +237,26 @@ export interface RevealPlan {
  * Plans the reveal on the track's strongest beat (design §4.3.1.6): with the music start on automatic, the start is
  * chosen so the strongest beat falls on the reveal at 45–90 % of the edit (the beat montage reveals on its final shot,
  * up to 95 %); with a fixed start, the reveal moves to the strongest beat when it lies at 35–85 %. No clear drop →
- * nearest downbeat.
+ * nearest downbeat. The biggest lift comes from the track's loudness, so a track with no clear beat (`hasBeatGrid`) can
+ * still have one; it has no downbeat to fall back on, and those notes say the reveal stays where the cut works best.
  */
 export function planReveal(input: PlannerInput, s: EffectiveSettings, revealSec: number | null, fixedStartSec: number | null, currentStartSec?: number): RevealPlan | null {
   const es = s.styleFromVideos;
   const music = input.music;
   if (!es || es.reveal !== 'strongest_beat' || !music || !s.musicOn) return null;
+  const onBeat = hasBeatGrid(music.beatTimesSec, music.durationSec);
+  /** The note when the reveal falls back: the nearest downbeat, which a track with no clear beat does not have. */
+  const fallback = (downbeat: string) => (onBeat ? downbeat : NO_CLEAR_BEAT_NOTES.reveal);
   const strongest = strongestBeat(music);
-  if (!strongest || !strongest.found) return { musicStartSec: null, targetOutputSec: null, note: 'No clear drop in this track — the reveal lands on a downbeat.' };
+  if (!strongest || !strongest.found) return { musicStartSec: null, targetOutputSec: null, note: fallback('No clear drop in this track — the reveal lands on a downbeat.') };
   const title = music.title ? `'${music.title}'` : 'the track';
   const note = `The finished look lands on the biggest lift in ${title} (estimate).`;
   if (fixedStartSec !== null) {
     const out = strongest.atSec - fixedStartSec;
     const share = out / s.target;
-    return share >= 0.35 && share <= 0.85 ? { musicStartSec: null, targetOutputSec: round(out, 3), note } : { musicStartSec: null, targetOutputSec: null, note: 'The biggest lift in this track is outside the edit with the start you chose, so the reveal lands on a downbeat.' };
+    return share >= 0.35 && share <= 0.85
+      ? { musicStartSec: null, targetOutputSec: round(out, 3), note }
+      : { musicStartSec: null, targetOutputSec: null, note: fallback('The biggest lift in this track is outside the edit with the start you chose, so the reveal lands on a downbeat.') };
   }
   if (revealSec === null) return null;
   // Most styles hold the finished look for the last 15–30 % of the edit, so the reveal sits at up to 90 % (the beat
@@ -269,7 +275,9 @@ export function planReveal(input: PlannerInput, s: EffectiveSettings, revealSec:
     const score = Math.abs(out - revealSec) + (phase !== null && indexOf(b) % 4 !== phase ? 0.75 : 0);
     if (!best || score < best.score) best = { start: b, out, score };
   }
-  return best ? { musicStartSec: round(best.start, 3), targetOutputSec: round(best.out, 3), note } : { musicStartSec: null, targetOutputSec: null, note: 'The biggest lift in this track does not fit this edit, so the reveal lands on a downbeat.' };
+  return best
+    ? { musicStartSec: round(best.start, 3), targetOutputSec: round(best.out, 3), note }
+    : { musicStartSec: null, targetOutputSec: null, note: fallback('The biggest lift in this track does not fit this edit, so the reveal lands on a downbeat.') };
 }
 
 /** Note for a reveal that could not be moved (or kept) on the strongest beat. */
@@ -278,16 +286,21 @@ export const REVEAL_MISSED_NOTE = 'The reveal could not be kept exactly on the b
 /**
  * Applies the reveal plan after timing is final; falls back to the nearest downbeat. Returns the output time the
  * reveal landed on when the plan note says it lands on the biggest lift (to be rechecked once the plan is final, see
- * {@link recheckRevealNote}), else null.
+ * {@link recheckRevealNote}), else null. For a track with no clear beat (a stand-in grid) there is no downbeat: the
+ * reveal stays where the cut works best and the note says so.
  */
 export function applyReveal(ctx: BuildContext, drafts: Draft[], grid: BeatGrid | null, plan: RevealPlan): { targetSec: number; note: string } | null {
-  if (!grid?.fromMusic) return null;
+  if (!grid) return null;
   const r = revealIndex(ctx.input.styleId, drafts);
   if (plan.targetOutputSec !== null && r > 0) {
     if (landRevealAt(drafts, r, plan.targetOutputSec)) {
       if (plan.note) ctx.notes.push(plan.note);
       return plan.note ? { targetSec: plan.targetOutputSec, note: plan.note } : null;
     }
+  }
+  if (!grid.fromMusic) {
+    ctx.notes.push(plan.targetOutputSec !== null ? NO_CLEAR_BEAT_NOTES.revealOffLift : (plan.note ?? NO_CLEAR_BEAT_NOTES.reveal));
+    return null;
   }
   if (ctx.input.styleId !== 'beat_montage') landRevealOnBeat(drafts, grid);
   ctx.notes.push(plan.targetOutputSec !== null ? 'The reveal could not be moved onto the biggest lift with this footage, so it lands on a downbeat.' : (plan.note ?? 'The reveal lands on a downbeat.'));
@@ -342,8 +355,9 @@ export function applyZoomStyle(ctx: BuildContext, drafts: Draft[], grid: BeatGri
     ctx.notes.push('Slow push-ins as in your videos.');
     return;
   }
-  // punch_in
-  if (styleId === 'clean_promo' || !grid) return;
+  // punch_in: on cuts that land on a beat. The beat montage has its own steady rhythm without a clear beat (its note says
+  // so); the other styles have only the track's beats, so a track with no clear beat gets no punch-ins there.
+  if (styleId === 'clean_promo' || !grid || (!grid.fromMusic && styleId !== 'beat_montage')) return;
   const r = revealIndex(styleId, drafts);
   let punched = 0;
   for (let i = 1; i < drafts.length; i++) {
@@ -370,5 +384,6 @@ export function applyZoomStyle(ctx: BuildContext, drafts: Draft[], grid: BeatGri
     d.keepOriginalSound = false;
     punched++;
   }
-  if (punched > 0) ctx.notes.push(`Punch-in zooms (up to ${zoom.scale.toFixed(2).replace(/0$/, '')}×) on some beat cuts, from your style.`);
+  // "Beat cuts" only for the music's own beats; on the montage's stand-in rhythm they are just cuts.
+  if (punched > 0) ctx.notes.push(`Punch-in zooms (up to ${zoom.scale.toFixed(2).replace(/0$/, '')}×) on some ${grid.fromMusic ? 'beat ' : ''}cuts, from your style.`);
 }

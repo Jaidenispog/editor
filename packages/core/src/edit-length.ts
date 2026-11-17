@@ -37,6 +37,15 @@ export function usableBeats(beatTimesSec: readonly number[], trackSec: number): 
 }
 
 /**
+ * True when a track has a beat the planners cut to: at least {@link MIN_GRID_BEATS} usable beats (the beat tracker
+ * finds none in a track with no clear beat). With fewer, the planners keep a steady stand-in rhythm, which is not the
+ * music's beat: no plan reports cuts on the beat of such a track, and nothing in it is placed on its "beat". Pure.
+ */
+export function hasBeatGrid(beatTimesSec: readonly number[], trackSec: number): boolean {
+  return usableBeats(beatTimesSec, trackSec).length >= MIN_GRID_BEATS;
+}
+
+/**
  * The earliest point (seconds into the track) the music of an edit can start. The planners start the music on a beat,
  * so this is the track's first usable beat (anywhere in its first beat, by how the beat tracker places beats), or 0 s
  * when the track has too few beats to cut to. Pure.

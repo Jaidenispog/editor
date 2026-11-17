@@ -309,4 +309,42 @@ suite('Music routes (database-backed)', () => {
     expect(trims.json.tracks[0].reasons).toContain('Trims the edit to 39.8 s');
     expect((await call(route.GET, 'GET', '/api/music/suggestions?durationSec=500', {})).status).toBe(400);
   });
+
+  // Last, so its extra track does not change the suggestions above.
+  it('starts the Sound panel’s "Cut to the beat" as on only when the track has a beat', async () => {
+    as(owner);
+    const { getDb } = await import('../src/lib/db');
+    const { schema } = await import('@studio/db');
+    const { eq } = await import('drizzle-orm');
+    const db = getDb();
+    // A SYNTHETIC track with no clear beat (the beat tracker found none), and a version of the beat montage cut to it
+    // whose plan lists its cuts as on the beat, as the rules planner listed the cuts on its stand-in rhythm before.
+    const ambient = randomUUID();
+    const edit = randomUUID();
+    const version = randomUUID();
+    await db.insert(schema.musicTracks).values({
+      id: ambient,
+      title: 'Ambient pad',
+      storageKey: `music/${ambient}/original.mp3`,
+      mimeType: 'audio/mpeg',
+      byteSize: 10,
+      durationSec: 40,
+      bpm: null,
+      status: 'ready',
+      beats: { beatTimesSec: [], energy: [0.2, 0.5, 0.9, 0.4], energyStepSec: 10 },
+      licence: MusicLicenceSchema.parse({ kind: 'catalogue', permitted: { promotionalUse: true, instagram: true }, confirmedByOwnerAt: null }),
+    });
+    const listed = (trackId: string): EditPlan => {
+      const p = planWithMusic(ids.asset, trackId);
+      return { ...p, styleId: 'beat_montage', audio: { ...p.audio, beatAlignment: { bpm: 120, alignedCutTimesSec: [5] } } };
+    };
+    await db.insert(schema.edits).values({ id: edit, projectId: ids.project, generationId: ids.generation, styleId: 'beat_montage', slot: 1, currentVersionId: version });
+    await db.insert(schema.editVersions).values({ id: version, editId: edit, versionNo: 1, origin: 'initial', status: 'preview_ready', plan: listed(ambient) });
+    const route = await import('../src/app/api/music/versions/[id]/route');
+    const sound = async () => (await call(route.GET, 'GET', `/api/music/versions/${version}`, { id: version })).json.sound;
+    expect(await sound()).toMatchObject({ hasMusic: true, beatAligned: false });
+    // The same listing with a track that has a beat starts it as on.
+    await db.update(schema.editVersions).set({ plan: listed(ids.track) }).where(eq(schema.editVersions.id, version));
+    expect(await sound()).toMatchObject({ hasMusic: true, beatAligned: true });
+  });
 });

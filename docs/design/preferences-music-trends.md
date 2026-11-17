@@ -694,7 +694,10 @@ apart from the cut times listed as on the beat, which both planners now take fro
   beat falls on the reveal (the first `result` segment) at 45–80 % of the edit, within the track's bounds. When the
   owner fixed the start, the reveal moves to the strongest beat if it lies at 35–85 % of the edit; otherwise the
   existing `landRevealOnBeat` (nearest downbeat) applies. No clear drop in the track (rise < 6 dB) → nearest
-  downbeat, with the note "No clear drop in this track — the reveal lands on a downbeat."
+  downbeat, with the note "No clear drop in this track — the reveal lands on a downbeat." A track with no clear beat
+  (below) has no downbeat and no beat to move the music start by: those cases say "This track has no clear beat, so the
+  reveal stays where the cut works best." ("The reveal could not be moved onto the biggest lift with this footage, so
+  it stays where the cut works best." when the footage cannot reach a lift it could have).
 - **Zoom**: `none` → every segment `zoom: null` (style push-ins included); `push_in` → the style's existing zoom
   places use `{ from: 1, to: scale }`, and process shots ≥ 1.5 s alternate push-ins; `punch_in` → on `shareOfCuts`
   of the hard cuts that land on a beat, instead of cutting to another shot the current shot continues (same asset,
@@ -779,6 +782,25 @@ apart from the cut times listed as on the beat, which both planners now take fro
   A 30 s edit with a 30 s, 120 BPM track whose first beat is at 0.3 s is planned to 29.5 s with the music from 0.3 s
   and every montage cut on a beat; before, it ran 30 s with the music from 0 s and every cut 0.2 s off a beat while
   `beatAlignment` listed them all.
+- **A track with no clear beat.** The beat tracker finds no beat in such a track (ambient music, speech, noise); a
+  track with fewer than 4 usable beats counts the same (`hasBeatGrid`, `packages/core/src/edit-length.ts`). The rules
+  planner still needs a grid for timing, so it keeps a steady stand-in rhythm from where the music starts (the track's
+  tempo, or 120 BPM), but marks it as not the music's beat (`BeatGrid.fromMusic: false`, like the 120 BPM grid without
+  music), and nothing presents it as one: no plan reports `audio.beatAlignment` for such a track (null from both
+  planners: `beatAlignmentFor` for the AI plan, so an AI plan's cuts on a stray beat or two are not reported either),
+  so plan facts never record `beatAligned` and the Sound panel does not start "Cut to the beat" as on. Nothing is moved
+  onto the stand-in for the beat's sake: "Cut to the beat" (asked for, or accepted from the owner's videos), beats per
+  cut, accents on beats, the before & after's reveal nudge, "Land the reveal on a beat" and punch-ins on beat cuts do
+  nothing in the four fitted styles, whose cuts are then exactly those of the same edit without music. The beat montage
+  keeps cutting to the stand-in and says so (`"Ambient" has no clear beat, so the cuts follow a steady 120 BPM rhythm.`,
+  with its opening sentence "… cuts through the work to a steady rhythm …"). The music starts where it did. The plan
+  says when a beat option had nothing to work with ("This track has no clear beat, so shot lengths follow the footage."
+  and/or "… so the reveal stays where the cut works best.", one sentence when both apply). The reveal on the strongest
+  beat still lands on the track's biggest lift when the owner chose the start and it can (the lift comes from the
+  loudness, not the beat); it never falls back to a downbeat such a track does not have. Before, the stand-in counted as
+  the music's beat: a 40 s track with no beat listed 37 beat montage cuts "on the beat" at 120 BPM, and the plan notes
+  said "Every cut lands on a beat of …", "The reveal is timed to land on a beat of the music." and "… lands on a
+  downbeat.".
 
 Each style keeps its character, so the five edits stay different:
 
@@ -846,6 +868,7 @@ choices do not raise `OFF_STYLE_TRANSITION` warnings; errors are unchanged.
 | Plan note (rules planner) | "Straight cuts with a white flash on every 4th beat, from your style." / "The finished look lands on the biggest lift in 'Track' (estimate)." |
 | Plan note (editing style left out) | The three step-down notes and their revision wordings, word for word in §4.3.1.6 ("Never worse than the defaults") |
 | Plan note (trimmed to the music) | "The edit was trimmed to 39.8 s so it ends before the music does." |
+| Plan note (track with no clear beat, §4.3.1.6) | Beat montage: `"Ambient" has no clear beat, so the cuts follow a steady 120 BPM rhythm.` (opening "… cuts through the work to a steady rhythm …"). Other styles, only when a beat option was asked for or accepted: "This track has no clear beat, so shot lengths follow the footage." / "This track has no clear beat, so the reveal stays where the cut works best." / both: "This track has no clear beat, so shot lengths follow the footage and the reveal stays where the cut works best." Reveal on the biggest lift out of reach: "The reveal could not be moved onto the biggest lift with this footage, so it stays where the cut works best." Never "on the beat", "a beat of" or "downbeat" for such a track |
 | Music start picker (§4.7 item 5) | Start cannot be chosen: "This track is shorter than the edit, so the music starts at the beginning and the edit will be trimmed to 39.8 s so it ends before the music does." ("This track is as long as the edit, …" within 0.05 s; "This track is not much longer than the edit, …"; with a later first beat "… so the music starts on its first beat, 0.3 s in, and the edit will be trimmed to 29.5 s …"). Start on Automatic or chosen and the track trims the edit: "The edit will be trimmed to 44.9 s so it ends before the music does." |
 | Track too short (form, route 400, worker) | "The chosen track is 30 seconds long, which is shorter than the 45-second edit. Choose a longer track or a shorter length." (a track that is not shorter but leaves under 5 s of music after its first beat, which only a very short edit can meet: "From its first beat the chosen track leaves only N seconds of music, which is too short for the M-second edit. Choose a longer track or a shorter length.") |
 | Suggested for you (length) | "Trims the edit to 39.8 s" (a reason on a usable track) · "Shorter than the edit (0:30)." (unusable) |
@@ -1061,12 +1084,13 @@ duration. Editing the licence re-asks for confirmation (branch -2 behaviour kept
 5. **Length and the chosen track** (one rule, `editLengthForTrack` in `packages/core/src/edit-length.ts`, used by the
    form, `POST /api/projects/[id]/generate`, "Suggested for you", both planners and the worker). The planners start
    the music on a beat, at the earliest on the track's first usable beat (`earliestMusicStartSec`: the beat tracker
-   puts it anywhere in the first beat period; 0 s for a track with fewer than 4 beats), so the rule measures the music
-   from there, with the music start on automatic or chosen. When the music from the first beat leaves at least 0.15 s
-   after the edit, the edit plays as asked. Otherwise it is trimmed to what that music leaves (the track less its first
-   beat and 0.15 s, rounded down to 0.1 s, allowing for binary rounding: 16.15 − 0.15 counts as 16.0), as long as the
-   track is long enough: its length less 0.15 s is at least 88 % of the asked length (the length alone decides this,
-   never the beat phase), and the music from the first beat is at least 5 s. A 45 s edit with a 40 s track becomes
+   puts it anywhere in the first beat period; 0 s for a track with fewer than 4 beats, which has no clear beat to cut
+   to, §4.3.1.6), so the rule measures the music from there, with the music start on automatic or chosen. When the
+   music from the first beat leaves at least 0.15 s after the edit, the edit plays as asked. Otherwise it is trimmed
+   to what that music leaves (the track less its first beat and 0.15 s, rounded down to 0.1 s, allowing for binary
+   rounding: 16.15 − 0.15 counts as 16.0), as long as the track is long enough: its length less 0.15 s is at least
+   88 % of the asked length (the length alone decides this, never the beat phase), and the music from the first beat
+   is at least 5 s. A 45 s edit with a 40 s track becomes
    39.8 s (39.4 s when the first beat is at 0.45 s), and a 30 s edit with a 30 s track 29.8 s (29.5 s from a first beat
    at 0.3 s). The plan says "The edit was trimmed to 39.8 s so it ends before the music does.", and the music start
    picker says so before generating (§4.3.1.8): when the start cannot be chosen, in its note on where the music starts
@@ -1109,7 +1133,7 @@ On each preview card, the existing "Revise" area gains a **Sound** tab next to t
 | --- | --- | --- |
 | Track | Current track / another usable library track / No music | Re-cut (planner) when the track changes; "No music" uses the fast path |
 | Song section | Energy strip of the track with a window the length of the edit; drag or "Use the strongest part" (max-energy window). Shows the chosen start in m:ss | Two buttons: **Keep my cuts** (fast path: shifts `startOffsetSec`, snapped to a beat) or **Re-cut to this section** (planner with `musicStartSec`) |
-| Cut to the beat | On / Off (shown only when the track has beats) | Re-cut |
+| Cut to the beat | On / Off (shown only when the track has beats); it starts On only when the version's plan lists cuts on the beat and its track has a beat (`sound.beatAligned`, never for a track with no clear beat, §4.3.1.6) | Re-cut |
 | Land the reveal on a beat | On / Off (only for styles with a result shot) | Re-cut |
 | Music volume | Slider 0–100 % (step 5) | Fast path |
 | Original sound | Off · Under the music · Original sound only (disabled with a reason if no clip has sound) + volume slider | Fast path |

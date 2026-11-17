@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { durationBoundsFor, earliestMusicStartSec, editLengthForTrack, floorToTenth, usableBeats } from '../src/index.js';
+import { durationBoundsFor, earliestMusicStartSec, editLengthForTrack, floorToTenth, hasBeatGrid, usableBeats } from '../src/index.js';
 
 describe('the length window a plan is checked against', () => {
   it('is ±12 %, never tighter than ±2 s and never under 3 s', () => {
@@ -76,5 +76,14 @@ describe('the music measured from the first beat (the planners start the music o
     expect(earliestMusicStartSec([0.3, 0.8, 1.3], 40)).toBe(0);
     expect(earliestMusicStartSec([], 40)).toBe(0);
     expect(usableBeats([0.3, 0.35, 0.8, 0.8, 1.3], 40)).toEqual([0.3, 0.8, 1.3]);
+  });
+
+  it('tells a track with a beat from one with no clear beat (fewer than 4 usable beats)', () => {
+    expect(hasBeatGrid([0.3, 0.8, 1.3, 1.8], 40)).toBe(true);
+    // The beat tracker finds no beat in a track without a clear one.
+    expect(hasBeatGrid([], 40)).toBe(false);
+    expect(hasBeatGrid([1, 2, 3], 40)).toBe(false);
+    // Only usable beats count: a duplicate, one too close to the last, one past the end and a NaN leave 3.
+    expect(hasBeatGrid([0.3, 0.3, 0.35, 0.8, 1.3, 50, Number.NaN], 40)).toBe(false);
   });
 });

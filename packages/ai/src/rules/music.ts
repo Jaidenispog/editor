@@ -1,23 +1,43 @@
-import { MIN_GRID_BEATS, findDrop, usableBeats } from '@studio/core';
+import { MIN_GRID_BEATS, findDrop, hasBeatGrid, usableBeats, type AudioPlan } from '@studio/core';
 import type { PlannerMusic } from '../types.js';
 import { grow, hardMinPlay, shrink, startTimes, type Draft } from './draft.js';
 import { round } from './random.js';
 
 /** Beat positions on the OUTPUT timeline, plus where in the track playback starts. */
 export interface BeatGrid {
-  /** Seconds into the track where the edit starts (always on a beat when beats are known). */
+  /** Seconds into the track where the edit starts (always on a beat when the grid is the track's own beats). */
   startOffsetSec: number;
   /** Output-time beat positions starting at 0, extended past the edit by the median interval. */
   beats: number[];
   /** Median beat interval in seconds. */
   interval: number;
-  /** Tempo reported by the analysis, or derived from the beat interval; null for the 120 BPM stand-in grid. */
+  /** Tempo reported by the analysis, or derived from the beat interval; null for the 120 BPM grid without music. */
   bpm: number | null;
-  /** True when the grid comes from real music beats (false = the 120 BPM stand-in without music). */
+  /**
+   * True when the grid is the track's own beats (at least MIN_GRID_BEATS usable beats, see `hasBeatGrid`). False for a
+   * steady stand-in rhythm: without music, and for a track with no clear beat, whose music still plays from
+   * `startOffsetSec`. The stand-in is not the music's beat: nothing is snapped to it for the beat's sake and no plan
+   * reports cuts on it (the beat montage still cuts to it, and says so).
+   */
   fromMusic: boolean;
 }
 
 const FALLBACK_INTERVAL = 0.5; // 120 BPM
+
+/**
+ * Plan notes (rules planner) for the beat options on a track with no clear beat (`hasBeatGrid`): "Cut to the beat"
+ * (asked for, or from the owner's videos) and a reveal on a beat or on the strongest beat have no beat to work with, so
+ * nothing is moved onto the steady stand-in rhythm and the plan says so instead of claiming a beat. `revealOffLift` is
+ * for a reveal planned on the track's biggest lift (from its loudness) that the footage cannot reach: with beats it
+ * would land on a downbeat instead.
+ */
+export const NO_CLEAR_BEAT_NOTES = {
+  cuts: 'This track has no clear beat, so shot lengths follow the footage.',
+  reveal: 'This track has no clear beat, so the reveal stays where the cut works best.',
+  /** `cuts` and `reveal` in one sentence, when both apply. */
+  cutsAndReveal: 'This track has no clear beat, so shot lengths follow the footage and the reveal stays where the cut works best.',
+  revealOffLift: 'The reveal could not be moved onto the biggest lift with this footage, so it stays where the cut works best.',
+} as const;
 
 function median(values: number[]): number {
   if (values.length === 0) return 0;
@@ -51,7 +71,9 @@ export function snapMusicStart(music: PlannerMusic, startSec: number): number {
 
 /**
  * Builds the beat grid for an edit of `lengthSec`. With music, playback starts on a beat chosen per take
- * (bar-sized steps) so that the whole edit fits inside the track; without music a 120 BPM grid is used.
+ * (bar-sized steps) so that the whole edit fits inside the track; without music a 120 BPM grid is used, and for a track
+ * with no clear beat (fewer than MIN_GRID_BEATS usable beats) a steady stand-in rhythm at the track's tempo (or 120 BPM)
+ * from where its music starts, marked `fromMusic: false` because it is not the music's beat.
  * `fixedStartSec` (the owner's choice) overrides both the per-take choice and `preferStartSec`: playback starts
  * on the first beat at or after it, or on the latest beat that still fits when that one would run past the
  * end of the track. The track's first beat always fits a length from the shared rule (`plannedLength`, which
@@ -70,9 +92,10 @@ export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt:
 
   const fixed = typeof fixedStartSec === 'number' && Number.isFinite(fixedStartSec) ? Math.max(0, fixedStartSec) : null;
   if (beats.length < MIN_GRID_BEATS) {
+    // No clear beat: the music plays from here, and the grid is a steady stand-in rhythm, not the music's beat.
     const maxStart = Math.max(0, music.durationSec - lengthSec - MUSIC_END_GAP_SEC);
     const start = Math.min(maxStart, fixed ?? attempt * 4 * interval);
-    return { startOffsetSec: round(Math.max(0, start), 3), beats: synthetic(0, interval, horizon), interval, bpm, fromMusic: true };
+    return { startOffsetSec: round(Math.max(0, start), 3), beats: synthetic(0, interval, horizon), interval, bpm, fromMusic: false };
   }
 
   const fits = beats.map((t, i) => ({ t, i })).filter(({ t }) => t + lengthSec <= music.durationSec - MUSIC_END_GAP_SEC);
@@ -123,23 +146,30 @@ function onBeats(beats: readonly number[], cutTimes: readonly number[]): number[
 
 /**
  * Output cut times that land within 40 ms of a beat of the grid the rules planner cut to (reported in the plan's
- * beat-alignment info). Pass the times of the plan as it plays (`feltJoinTimes`): the grid starts where the music does.
+ * beat-alignment info, only for a grid of the track's own beats: `fromMusic`). Pass the times of the plan as it plays
+ * (`feltJoinTimes`): the grid starts where the music does.
  */
 export function alignedCuts(grid: BeatGrid, cutTimes: readonly number[]): number[] {
   return onBeats(grid.beats, cutTimes);
 }
 
 /**
- * Output cut times that land within 40 ms of a beat of `music` when it starts at `startOffsetSec` (output time t plays
- * music time startOffsetSec + t; beats rounded as in the rules planner's grid, so both planners report the same cuts for
- * the same plan). For a plan the rules planner did not build (the AI plan): its beat-alignment info is worked out from
- * where its music actually starts, never taken from the plan itself.
+ * The beat-alignment info (`audio.beatAlignment`) of a plan whose music is `music` starting at `startOffsetSec`: the
+ * cut times (output time, as the plan plays) within 40 ms of a beat of the track (output time t plays music time
+ * startOffsetSec + t; beats rounded as in the rules planner's grid, so both planners report the same cuts for the same
+ * plan), with the track's tempo. Null for a track with no clear beat (`hasBeatGrid`): it has no beat to report cuts on,
+ * as the rules planner's stand-in rhythm is not its beat. For a plan the rules planner did not build (the AI plan): its
+ * beat-alignment info is worked out from where its music actually starts, never taken from the plan itself.
  */
-export function cutsOnTheBeat(music: PlannerMusic, startOffsetSec: number, cutTimes: readonly number[]): number[] {
-  return onBeats(
-    cleanBeats(music).map((b) => round(b - startOffsetSec, 3)),
-    cutTimes,
-  );
+export function beatAlignmentFor(music: PlannerMusic, startOffsetSec: number, cutTimes: readonly number[]): AudioPlan['beatAlignment'] {
+  if (!hasBeatGrid(music.beatTimesSec, music.durationSec)) return null;
+  return {
+    bpm: music.bpm && music.bpm > 0 ? round(music.bpm, 1) : null,
+    alignedCutTimesSec: onBeats(
+      cleanBeats(music).map((b) => round(b - startOffsetSec, 3)),
+      cutTimes,
+    ),
+  };
 }
 
 /**

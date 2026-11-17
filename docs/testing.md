@@ -276,7 +276,8 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   and `editLengthForTrack`: kept, trimmed to 39.8 s for 45 s with a 40 s track, the 88 % and 5 s limits, the refusal
   message; no tenth lost to binary rounding (16 s with 16.15 s kept, 74/65.35, 90/79.35 and 10/8.95 trimmed); the
   music measured from the first beat (45/40 → 39.5 s from 0.3 s, 39.4 s from 0.45 s; 30/30 → 29.5 s from 0.3 s),
-  whether a track is long enough judged on its length alone; `earliestMusicStartSec` and `usableBeats`),
+  whether a track is long enough judged on its length alone; `earliestMusicStartSec`, `usableBeats` and `hasBeatGrid`,
+  which tells a track with a beat from one with no clear beat),
   `packages/ai/test/planned-length.test.ts` (the rules plan, the AI brief's `target` and the AI plan's
   `targetDurationSec` all 39.8 s; music switched off by an instruction keeps 45 s; a revised length is trimmed too; a
   30 s track is refused with the shared message; the AI brief's reveal on the biggest lift worked out for the trimmed
@@ -286,6 +287,15 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   plays, the music lasts 0.1 s past the edit, the montage's cuts are all on beats, the trimmed note; an AI plan built
   from the same cuts reports exactly the same beats, and its list follows where its music actually starts, not the
   model's own list; the AI brief's target and fixed start leave room from the first beat),
+  `packages/ai/test/rules-no-clear-beat.test.ts` (a SYNTHETIC 40 s track with no beat, and one with 3 beats: across
+  every style, the default and an accepted style, with and without "Cut to the beat" and "Land the reveal on a beat",
+  two takes, neither planner reports `beatAlignment`, plan facts say `beatAligned: false` (and
+  `packages/core/test/foundations.test.ts` checks `planCutsOnTheBeat`: a listed cut counts only when the track, when
+  known, has a beat) and no plan note claims a
+  beat; the fitted styles' cuts are exactly those of the same edit without music; the beat montage keeps its 120 BPM
+  (or 60 BPM from the 3 beats) stand-in from where the music starts and says the track has no clear beat; the notes
+  for beat options with nothing to work with, one sentence when both apply; with the start chosen, the reveal still
+  lands on the track's biggest lift where the footage reaches it, and never falls back to a downbeat),
   `apps/worker/test/plan-length.test.ts` (no database: the worker's own `planWithFallback` + `planningContextFor` on
   the planner fixtures with 40 s tracks; 0 of 315 edits fail across the default and six accepted styles × five styles
   × three tracks × three takes, where the window around the requested 45 s refuses 15 default-style plans (9 before
@@ -309,7 +319,8 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   checks generation start with the music start on automatic: a 50 s edit with a 40 s track is refused with the
   planners' message, a 45 s edit is accepted, and the track's music option carries its first beat (`firstBeatSec`).
   `apps/web/test/music-routes.integration.test.ts` checks that "Suggested for you" offers that 40 s track for a 45 s
-  edit with "Trims the edit to 39.8 s".
+  edit with "Trims the edit to 39.8 s", and that the Sound panel's "Cut to the beat" starts as on only when the
+  version's track has a beat (a stored plan listing cuts on the beat of a track with no clear beat starts it as off).
 - Only with the owner's real videos (design §4.3.1.10): 3–5 of their own posted videos, cuts and flashes counted by a
   person on a 15 s excerpt of each (cut count ± 10 %, flash count ± 1, tempo ± 2 BPM or an octave). Thresholds are
   starting values from synthetic clips until then.

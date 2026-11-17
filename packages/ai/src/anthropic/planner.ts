@@ -4,7 +4,7 @@ import { AppError, CancelledError, EDIT_PLAN_VERSION, VERTICAL_1080, type AudioP
 import type { Logger } from 'pino';
 import { DEFAULT_MODEL_RATES, type RateTable } from '../pricing.js';
 import { feltJoinTimes } from '../rules/editing-style.js';
-import { cutsOnTheBeat } from '../rules/music.js';
+import { beatAlignmentFor } from '../rules/music.js';
 import { plannedSettings } from '../rules/settings.js';
 import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '../types.js';
 import { mapAnthropicError, usageFrom, type AnthropicMessagesClient, type StructuredResponse } from './client.js';
@@ -114,12 +114,11 @@ export function toPlanCandidate(wire: PlannerWire, input: PlannerInput): unknown
       : null;
   // Which cuts land on a beat follows from the plan's own cuts (as it plays) and where its music actually starts, worked
   // out as for the rules planner's plans: the model's own list is replaced, so a plan never says a cut is on the beat
-  // when it is not.
+  // when it is not, and a track with no clear beat gets no beat-alignment info at all.
   let beatAlignment: AudioPlan['beatAlignment'] = null;
   if (music && input.music) {
     const cuts = feltJoinTimes(wire.segments as unknown as Segment[], Boolean(s.styleFromVideos?.accent));
-    const bpm = input.music.bpm && input.music.bpm > 0 ? Math.round(input.music.bpm * 10) / 10 : null;
-    beatAlignment = { bpm, alignedCutTimesSec: cutsOnTheBeat(input.music, music.startOffsetSec, cuts) };
+    beatAlignment = beatAlignmentFor(input.music, music.startOffsetSec, cuts);
   }
   return {
     version: EDIT_PLAN_VERSION,

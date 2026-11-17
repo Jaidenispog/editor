@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EditPlan } from '../src/edit-plan.js';
 import { isGenuinelyCompleted } from '../src/completion.js';
-import { PlanFactsSchema, computePlanFacts } from '../src/plan-facts.js';
+import { PlanFactsSchema, computePlanFacts, planCutsOnTheBeat } from '../src/plan-facts.js';
 import { ALL_JOB_TYPES, JOB_PAYLOAD_SCHEMAS, JOB_TYPES, isJobType } from '../src/jobs.js';
 import { AppSettingsSchema, DEFAULT_SETTINGS, resolveLegalUrls } from '../src/settings.js';
 import { LEGAL_PAGE_KINDS, publishedLegalPage, suggestedLegalDraft } from '../src/settings/legal.js';
@@ -123,6 +123,25 @@ describe('computePlanFacts', () => {
       originalSound: true,
       beatAligned: false,
     });
+  });
+
+  it('counts cuts as on the beat only when the plan lists some and its track, when known, has a beat', () => {
+    const listed = fixturePlan();
+    const beats = { beatTimesSec: Array.from({ length: 80 }, (_, i) => i * 0.5), durationSec: 40 };
+    // From the plan alone (plan facts): the planners list cuts only for a track with a beat.
+    expect(planCutsOnTheBeat(listed)).toBe(true);
+    expect(planCutsOnTheBeat(listed, beats)).toBe(true);
+    // A plan made before the planners stopped listing cuts on the stand-in rhythm of a track with no clear beat, with
+    // that track (no beat found, or too few beats), and with its track gone: not on the beat.
+    expect(planCutsOnTheBeat(listed, { beatTimesSec: [], durationSec: 40 })).toBe(false);
+    expect(planCutsOnTheBeat(listed, { beatTimesSec: [1, 2, 3], durationSec: 40 })).toBe(false);
+    expect(planCutsOnTheBeat(listed, null)).toBe(false);
+    // Nothing listed is never on the beat, whatever the track.
+    const none = fixturePlan();
+    none.audio = { ...none.audio, beatAlignment: { bpm: 120, alignedCutTimesSec: [] } };
+    expect(planCutsOnTheBeat(none, beats)).toBe(false);
+    none.audio = { ...none.audio, beatAlignment: null };
+    expect(planCutsOnTheBeat(none)).toBe(false);
   });
 });
 

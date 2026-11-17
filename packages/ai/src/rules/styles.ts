@@ -12,7 +12,10 @@ export interface BuildContext {
   input: PlannerInput;
   s: EffectiveSettings;
   footage: Footage;
-  /** Beat grid (music beats, or the 120 BPM stand-in for the montage); null when beats do not matter. */
+  /**
+   * Beat grid (the track's beats, or a steady stand-in rhythm: 120 BPM for the montage without music, or for a track
+   * with no clear beat, `fromMusic: false`); null when beats do not matter.
+   */
   grid: BeatGrid | null;
   rng: () => number;
   nextId: () => string;
@@ -243,7 +246,8 @@ function buildBeatMontage(ctx: BuildContext): BuildResult {
   let totalBeats = nearestBeatIndex(grid, s.target);
   // With music the montage ends before the music does: the nearest whole beat to the target, or the last one that
   // still leaves 0.15 s of the track after it (rounding up could otherwise outrun a track the edit was trimmed to).
-  const music = grid.fromMusic && s.musicOn ? ctx.input.music : null;
+  // The grid starts where the music does, also for a track with no clear beat (a steady stand-in rhythm).
+  const music = s.musicOn ? ctx.input.music : null;
   if (music) {
     const room = music.durationSec - grid.startOffsetSec - MUSIC_TAIL_SEC;
     while (totalBeats > 1 && (grid.beats[totalBeats] ?? Number.POSITIVE_INFINITY) > room + 1e-6) totalBeats--;
@@ -378,7 +382,10 @@ function buildBeatMontage(ctx: BuildContext): BuildResult {
   ctx.notes.push(
     grid.fromMusic
       ? `Every cut lands on a beat of "${ctx.input.music?.title ?? 'the track'}"${grid.bpm ? ` (${Math.round(grid.bpm)} BPM)` : ''}.`
-      : 'Without music the cuts follow a steady 120 BPM rhythm.',
+      : music
+        ? // A track with no clear beat: the stand-in rhythm is not its beat, and the note says so.
+          `${music.title ? `"${music.title}"` : 'The track'} has no clear beat, so the cuts follow a steady ${Math.round(60 / grid.interval)} BPM rhythm.`
+        : 'Without music the cuts follow a steady 120 BPM rhythm.',
   );
 
   const recipe: Recipe = {
@@ -570,7 +577,10 @@ function buildBeforeAfter(ctx: BuildContext): BuildResult {
   return { drafts, recipe };
 }
 
-/** Nudges the reveal cut onto the nearest beat (when music is present) without changing the total length. */
+/**
+ * Nudges the reveal cut onto the nearest beat of the music without changing the total length. Only onto the track's own
+ * beats: without music, or for a track with no clear beat, the reveal stays where it is.
+ */
 function alignRevealToBeat(ctx: BuildContext, drafts: Draft[]): void {
   const grid = ctx.grid;
   if (!grid?.fromMusic) return;

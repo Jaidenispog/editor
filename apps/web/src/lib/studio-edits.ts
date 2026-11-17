@@ -21,6 +21,7 @@ import {
   newId,
   originalSoundModeOf,
   parseRevisionInstruction,
+  planCutsOnTheBeat,
   withoutMusic,
   type AudioPatch,
   type EditPlan,
@@ -522,7 +523,9 @@ export async function versionMusic(versionId: string, user: SessionUser): Promis
       duckUnderOriginal: m?.duckUnderOriginal ?? null,
       originalSound: plan ? originalSoundModeOf(plan) : 'off',
       originalVolume: plan?.audio.originalSound.volume ?? 1,
-      beatAligned: Boolean(plan?.audio.beatAlignment && plan.audio.beatAlignment.alignedCutTimesSec.length > 0),
+      // The panel's starting "Cut to the beat": the track's own beats decide, so a plan made before the planners stopped
+      // listing cuts on the stand-in rhythm of a track with no clear beat does not start it as on.
+      beatAligned: plan ? planCutsOnTheBeat(plan, track ? { beatTimesSec: track.beats?.beatTimesSec ?? [], durationSec: track.durationSec ?? 0 } : null) : false,
     },
     clearance,
     clearanceSummary: clearanceSummary(clearance),

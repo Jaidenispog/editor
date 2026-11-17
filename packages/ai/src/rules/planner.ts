@@ -8,6 +8,7 @@ import {
   VERTICAL_1080,
   computeTimeline,
   durationBoundsFor,
+  hasBeatGrid,
   paletteTransitionTypes,
   validateEditPlan,
   type AudioPlan,
@@ -21,7 +22,7 @@ import {
 import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '../types.js';
 import { fitDuration, play, startTimes, totalDuration, grow, shrink, type Draft } from './draft.js';
 import { collectFootage, type Candidate, type Footage } from './footage.js';
-import { MUSIC_END_GAP_SEC, alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
+import { MUSIC_END_GAP_SEC, NO_CLEAR_BEAT_NOTES, alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
 import { alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, feltJoinTimes, notePalette, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
 import { clamp, hashString, round, seededRandom } from './random.js';
 import { beatSyncFor, effectiveSettings, plannedLength, tameTransition, type EffectiveSettings, type ResolvedEditingStyle, type StyleFallbackStep } from './settings.js';
@@ -51,6 +52,16 @@ const STYLE_RATIONALE: Record<PlannerInput['styleId'], string> = {
   clean_promo: 'Uses the steadiest, best-exposed shots with soft transitions and the business name up front.',
   process_story: 'Shows the cut in the order it happened: the start, the work and the finished result.',
 };
+
+/** The beat montage's sentence for a track with no clear beat: it cuts to a steady stand-in rhythm, not to a beat. */
+const MONTAGE_NO_BEAT_RATIONALE = 'Opens on the strongest detail shot, cuts through the work to a steady rhythm and holds the finished cut at the end.';
+
+/** The style's rationale sentence (the beat montage cuts to a steady rhythm when its track has no clear beat). */
+function styleRationale(input: PlannerInput, s: EffectiveSettings): string {
+  const music = s.musicOn ? input.music : null;
+  if (input.styleId === 'beat_montage' && music && !hasBeatGrid(music.beatTimesSec, music.durationSec)) return MONTAGE_NO_BEAT_RATIONALE;
+  return STYLE_RATIONALE[input.styleId];
+}
 
 /**
  * Deterministic edit planner with no network access. It is the fallback whenever the AI planner is not
@@ -84,7 +95,7 @@ export class RulesPlanner implements EditPlanner {
     let attempt = base.attempt;
     let plan: EditPlan | null = null;
     for (let take = 0; take < 3; take++) {
-      const intro = [STYLE_RATIONALE[input.styleId], ...(attempt > 0 && !base.revising ? [`Take ${attempt + 1} uses different shots and timing from the earlier takes.`] : [])];
+      const intro = [styleRationale(input, base), ...(attempt > 0 && !base.revising ? [`Take ${attempt + 1} uses different shots and timing from the earlier takes.`] : [])];
       const s: EffectiveSettings = { ...base, attempt, notes: [...intro, ...base.notes], emphasise: [...base.emphasise], deemphasise: [...base.deemphasise] };
       plan = buildWithStyleFallback(input, s, footage);
       const isRegenerate = !s.revising && previous && attempt > 0;
@@ -223,7 +234,8 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     taken.add(id);
     return id;
   };
-  const needsGrid = input.styleId === 'beat_montage' || Boolean(input.music && s.musicOn);
+  const musicPlays = Boolean(input.music && s.musicOn);
+  const needsGrid = input.styleId === 'beat_montage' || musicPlays;
   const preferStart = previous?.audio.music?.startOffsetSec;
   const es = s.styleFromVideos;
   let fullGrid = needsGrid ? beatGrid(s.musicOn ? input.music : null, s.target, s.attempt, preferStart, input.musicStartSec ?? null) : null;
@@ -282,13 +294,20 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   if (es && input.styleId === 'beat_montage' && grid) applyMontagePalette(ctx, drafts, grid);
   else if (es) notePalette(ctx);
   const everyN = es?.beatsPerCut ?? null;
-  if (grid?.fromMusic && !recipe.exact && beatMode === 'on' && everyN) {
-    if (snapCutsToBeatSteps(drafts, grid, everyN, s.style.pacing.minShotSec) > 0) ctx.notes.push(`Shots last whole steps of ${everyN} beat${everyN === 1 ? '' : 's'} where the style's shot lengths allow, from your style.`);
-  } else if (grid?.fromMusic && !recipe.exact && beatMode === 'on' && snapCutsToBeats(drafts, grid) > 0) ctx.notes.push('Cuts are nudged onto the beat of the music where the footage allows.');
+  if (grid && !recipe.exact && beatMode === 'on') {
+    // A track with no clear beat has only the steady stand-in rhythm, which is not its beat: nothing is moved onto it.
+    if (!grid.fromMusic) {
+      if (musicPlays) ctx.notes.push(NO_CLEAR_BEAT_NOTES.cuts);
+    } else if (everyN) {
+      if (snapCutsToBeatSteps(drafts, grid, everyN, s.style.pacing.minShotSec) > 0) ctx.notes.push(`Shots last whole steps of ${everyN} beat${everyN === 1 ? '' : 's'} where the style's shot lengths allow, from your style.`);
+    } else if (snapCutsToBeats(drafts, grid) > 0) ctx.notes.push('Cuts are nudged onto the beat of the music where the footage allows.');
+  }
   if (es && grid?.fromMusic && !recipe.exact) alignAccentsToBeats(drafts, grid);
   // "Land the finished look on the strongest beat" (from the owner's videos): with the music start on automatic the
   // start moves (by whole bars) so the track's biggest lift falls where the reveal is; then the reveal is nudged onto it.
-  const reveal = es?.reveal === 'strongest_beat' && fullGrid?.fromMusic && !previous ? planRevealFor(ctx, drafts, fullGrid) : null;
+  // The biggest lift comes from the track's loudness, so this also runs for a track with no clear beat (planReveal and
+  // applyReveal then never fall back to a downbeat).
+  const reveal = es?.reveal === 'strongest_beat' && fullGrid && musicPlays && !previous ? planRevealFor(ctx, drafts, fullGrid) : null;
   if (reveal?.musicStartSec !== null && reveal?.musicStartSec !== undefined && input.music) {
     fullGrid = beatGrid(input.music, s.target, s.attempt, undefined, reveal.musicStartSec);
     if (grid) grid = fullGrid;
@@ -297,6 +316,12 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   if (!reveal && grid?.fromMusic && input.revealOnBeat) {
     if (landRevealOnBeat(drafts, grid)) ctx.notes.push('The first shot of the finished cut starts on a beat.');
     else ctx.notes.push('The reveal could not be moved onto a beat with this footage, so it stays where the cut works best.');
+  } else if (!reveal && grid && musicPlays && input.revealOnBeat) ctx.notes.push(NO_CLEAR_BEAT_NOTES.reveal);
+  const noBeatCuts = ctx.notes.indexOf(NO_CLEAR_BEAT_NOTES.cuts);
+  const noBeatReveal = ctx.notes.indexOf(NO_CLEAR_BEAT_NOTES.reveal);
+  if (noBeatCuts >= 0 && noBeatReveal >= 0) {
+    ctx.notes[noBeatCuts] = NO_CLEAR_BEAT_NOTES.cutsAndReveal;
+    ctx.notes.splice(noBeatReveal, 1);
   }
 
   const keepPreviousText = Boolean(previous && !recipe.exact && previous.textOverlays.length > 0 && s.text !== 'none');
@@ -331,8 +356,9 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   const state: ComposeState = {
     bannedText: new Set<string>(),
     captionsOn: captionsWanted,
-    musicOn: Boolean(input.music && s.musicOn),
-    musicOffset: fullGrid?.fromMusic ? fullGrid.startOffsetSec : 0,
+    musicOn: musicPlays,
+    // Where the grid starts, also for a track with no clear beat (its stand-in rhythm starts where its music does).
+    musicOffset: musicPlays && fullGrid ? fullGrid.startOffsetSec : 0,
     accentPeaks: Boolean(es?.accent),
   };
   const vctx: PlanValidationContext = {
@@ -627,7 +653,7 @@ interface ComposeState {
   bannedText: Set<string>;
   captionsOn: boolean;
   musicOn: boolean;
-  /** Where the music starts: the start of the beat grid (on a beat), never moved. */
+  /** Where the music starts: the start of the beat grid (on a beat when the track has beats), never moved. */
   musicOffset: number;
   /** Report an accent's peak (not its end) as the moment of the cut (only with an accepted accent). */
   accentPeaks: boolean;
@@ -681,9 +707,9 @@ function compose(
     const prevMusic = previous?.audio.music;
     const change = s.revisionHints?.music === 'quieter' ? 0.7 : s.revisionHints?.music === 'louder' ? 1.25 : 1;
     const volume = prevMusic ? prevMusic.volume * change : s.musicVolume;
-    // The music starts where the beat grid starts (on a beat): the cuts were placed on that grid, and beatAlignment
-    // below is measured against it. It is never moved to fit a longer edit; such an edit is shortened instead (see
-    // withMusicGap and repair).
+    // The music starts where the beat grid starts (on a beat, when the track has beats): the cuts were placed on that
+    // grid, and beatAlignment below is measured against it. It is never moved to fit a longer edit; such an edit is
+    // shortened instead (see withMusicGap and repair).
     const offset = state.musicOffset;
     musicPlan = {
       trackId: music.trackId,
@@ -696,6 +722,7 @@ function compose(
   }
   // The cuts as the plan plays them (its segments, timed as the renderer times them), against the grid the cuts were
   // placed on, which starts where the music does: the same report the AI plan gets for the same cuts (toPlanCandidate).
+  // Only a grid of the track's own beats is reported: the stand-in rhythm for a track with no clear beat is not its beat.
   const beatAlignment =
     musicPlan && grid?.fromMusic
       ? { bpm: grid.bpm && grid.bpm > 0 ? round(grid.bpm, 1) : null, alignedCutTimesSec: alignedCuts(grid, feltJoinTimes(segments, state.accentPeaks)) }
