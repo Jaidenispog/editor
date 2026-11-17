@@ -251,7 +251,9 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   three videos stays in use, with the "still in use" line and stoppable, after a version bump and with no videos;
   stopping "Cutting to the beat" (`resetEditingStyle(prefs, row)`) also takes back the beats per cut accepted with it,
   with their sources and the row's decision, leaves the other rows as they were (each row resets only its own values),
-  and beats per cut left from the videos keep the row in use until then;
+  and beats per cut left from the videos keep the row in use until then; transitions and a pace accepted from three
+  videos stay in use, with the line, next to the different values the same videos give when measured again (also
+  after "No thanks", not after using the new one or stopping the row);
   `alsoChanges`,
   `valueKey` stability and conflicts; no "exact/precise/detected/trending/viral" wording),
   `packages/core/test/editing-style.test.ts` (an accepted music fit alone is not a planning value; `MusicFitSchema`
@@ -321,8 +323,9 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   `preferences.editingStyle.musicFit.bpmLow`, nothing stored), and "Change: use each style's own" on "Cutting to the
   beat" (`…/summary/reset` with `{ field: 'beatSync' }`: owner only, other fields 400 with nothing written, beat sync
   and the beats per cut accepted with it back to the defaults with no sources or decision, the transitions accepted with
-  them still in use, the audit row). `apps/web/test/your-style.test.ts` checks what the card sends for that button (the
-  whole row) and which rows offer it. `apps/web/test/studio-access.integration.test.ts`
+  them still in use, the audit row), and transitions accepted earlier that stay in use, with the line and stoppable,
+  once the stored videos are measured again as cross-fades. `apps/web/test/your-style.test.ts` checks what the card
+  sends for that button (the whole row) and which rows offer it, next to a new suggestion too. `apps/web/test/studio-access.integration.test.ts`
   checks generation start with the music start on automatic: a 50 s edit with a 40 s track is refused with the
   planners' message, a 45 s edit is accepted, and the track's music option carries its first beat (`firstBeatSec`).
   `apps/web/test/music-routes.integration.test.ts` checks that "Suggested for you" offers that 40 s track for a 45 s

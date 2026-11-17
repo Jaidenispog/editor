@@ -421,6 +421,64 @@ describe('summariseReferenceStyle', () => {
     expect(summariseReferenceStyle([], stopped).suggestions.some((r) => r.inUse)).toBe(false);
   });
 
+  it('keeps a value accepted earlier in use, with the line, when the videos measured again suggest another', () => {
+    // Three videos with half-second cross-fades and 2 s shots; the owner accepts the transitions and the pace.
+    const cross = assembleReferenceSignals(rawStyle({ joins: Array.from({ length: 7 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })) }));
+    const before = ['a', 'b', 'c'].map((id) => profileWith(cross, id));
+    const first = summariseReferenceStyle(before, prefs());
+    const palette = first.suggestions.find((r) => r.field === 'transitionPalette')!;
+    const pace = first.suggestions.find((r) => r.field === 'pacing')!;
+    expect(palette.value).toMatchObject({ types: ['fade'] });
+    expect(pace.value).toBe('balanced');
+    const accepted = applySummaryDecisions(prefs(), first, { accept: ['transitionPalette', 'pacing'], dismiss: [], valueKeys: { transitionPalette: palette.valueKey!, pacing: pace.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+
+    // The same videos measured again by a newer version of the measuring see straight cuts every half second (the old
+    // copies are left out as an older version). The cross-fades and the balanced pace accepted earlier are still what
+    // the planners and the form use.
+    const next = REFERENCE_STYLE_ANALYSIS_VERSION + 1;
+    const hard = assembleReferenceSignals(rawStyle({ joins: Array.from({ length: 31 }, (_, i): RawJoin => ({ kind: 'hard', timeSec: 0.5 * (i + 1), durationSec: 0 })) }));
+    const again = ['a2', 'b2', 'c2'].map((id) => profileWith({ ...hard, analysisVersion: next }, id));
+    const later = summariseReferenceStyle([...again, ...before], accepted, { analysisVersion: next });
+    expect(accepted.editingStyle.transitionPalette).toEqual(palette.value);
+    expect(accepted.pacing).toBe('balanced');
+    const t = later.suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(t).toMatchObject({ state: 'open', action: 'Use straight cuts', inUse: true });
+    expect(t.value).toMatchObject({ hardCutShare: 1, types: [] });
+    expect(t.seen).toBe(`Straight cuts between almost every shot. Seen in 3 of 3 videos. ${STILL_IN_USE_LINE}`);
+    // Length, pace, colour and text say so too (they have no Change on the card; they change in the editing preferences).
+    const p = later.suggestions.find((r) => r.field === 'pacing')!;
+    expect(p).toMatchObject({ value: 'fast', state: 'open', inUse: true });
+    expect(p.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
+    // Rows with nothing accepted from the videos are offered as before.
+    for (const r of later.suggestions.filter((x) => !['transitionPalette', 'pacing'].includes(x.field))) {
+      expect(r.inUse, r.field).toBe(false);
+      expect(r.seen, r.field).not.toContain(STILL_IN_USE_LINE);
+    }
+
+    // "No thanks" to the new one keeps the earlier one in use; using the new one or stopping the row ends the line.
+    const dismissed = applySummaryDecisions(accepted, later, { accept: [], dismiss: ['transitionPalette'], valueKeys: { transitionPalette: t.valueKey! } }, '2026-11-16T04:00:00Z').preferences;
+    expect(summariseReferenceStyle([...again, ...before], dismissed, { analysisVersion: next }).suggestions.find((r) => r.field === 'transitionPalette')).toMatchObject({ state: 'dismissed', inUse: true, seen: t.seen });
+    const used = applySummaryDecisions(accepted, later, { accept: ['transitionPalette'], dismiss: [], valueKeys: { transitionPalette: t.valueKey! } }, '2026-11-16T04:00:00Z').preferences;
+    const usedRow = summariseReferenceStyle([...again, ...before], used, { analysisVersion: next }).suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(usedRow).toMatchObject({ state: 'accepted', inUse: true });
+    expect(usedRow.seen).not.toContain(STILL_IN_USE_LINE);
+    const stoppedRow = summariseReferenceStyle([...again, ...before], resetEditingStyle(accepted, 'transitionPalette'), { analysisVersion: next }).suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(stoppedRow).toMatchObject({ state: 'open', inUse: false });
+    expect(stoppedRow.seen).not.toContain(STILL_IN_USE_LINE);
+
+    // Beats per cut left in use from the videos (beat sync changed by the owner) show on the beat row next to a suggestion.
+    const onBeat = ['d', 'e', 'f'].map((id) => profileWith(assembleReferenceSignals(rawStyle()), id));
+    const beatSummary = summariseReferenceStyle(onBeat, prefs());
+    const beat = beatSummary.suggestions.find((r) => r.field === 'beatSync')!;
+    expect(beat.alsoChanges).toEqual([{ field: 'beatsPerCut', value: 2 }]);
+    const withBeat = applySummaryDecisions(prefs(), beatSummary, { accept: ['beatSync'], dismiss: [], valueKeys: { beatSync: beat.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+    const owner = { by: 'owner' as const, at: '2026-11-16T04:00:00Z', referenceAssetIds: [], referenceName: '' };
+    const half: EditingPreferences = { ...withBeat, editingStyle: { ...withBeat.editingStyle, beatSync: 'off', sources: { ...withBeat.editingStyle.sources, beatSync: owner } } };
+    const beatRow = summariseReferenceStyle(onBeat, half).suggestions.find((r) => r.field === 'beatSync')!;
+    expect(beatRow).toMatchObject({ state: 'open', inUse: true });
+    expect(beatRow.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
+  });
+
   it('keeps valueKeys stable regardless of key order', () => {
     expect(stableJson({ b: 1, a: { d: 2, c: 3 } })).toBe(stableJson({ a: { c: 3, d: 2 }, b: 1 }));
   });

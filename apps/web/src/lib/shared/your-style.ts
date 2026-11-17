@@ -11,10 +11,11 @@ export interface SummaryRowActions {
   stop: boolean;
 }
 
-export function summaryRowActions(row: Pick<SummarySuggestion, 'field' | 'state' | 'inUse' | 'value'>, canEdit: boolean): SummaryRowActions {
+export function summaryRowActions(row: Pick<SummarySuggestion, 'field' | 'state' | 'inUse'>, canEdit: boolean): SummaryRowActions {
   return {
     decide: row.state === 'open' || row.state === 'dismissed',
-    stop: canEdit && isEditingStyleRow(row.field) && (row.state === 'accepted' || (row.inUse && row.value === null)),
+    // Also next to a new suggestion: the value accepted earlier is still in use until the owner chooses.
+    stop: canEdit && isEditingStyleRow(row.field) && (row.state === 'accepted' || row.inUse),
   };
 }
 

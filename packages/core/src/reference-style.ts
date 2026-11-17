@@ -652,14 +652,18 @@ export interface SummarySuggestion {
   alsoChanges: SummaryAlsoChange[];
   state: SummaryRowState;
   /**
-   * True when the value in use came from your videos. An editing-style row whose value from the videos is still in use
-   * stays `inUse` when nothing measured backs it any more (`value` null: the videos were removed, or measured with an
-   * older version of the measuring), so the card can still show it and offer to stop it.
+   * True when the value in use came from your videos. It stays `inUse` while that value is in use, also when the videos
+   * now suggest another one (`state` open or dismissed, `seen` ending with {@link STILL_IN_USE_LINE}), and for an
+   * editing-style row when nothing measured backs it any more (`value` null: the videos were removed, or measured with
+   * an older version of the measuring), so the card can still show it and, on an editing-style row, offer to stop it.
    */
   inUse: boolean;
 }
 
-/** Added to an editing-style row whose value from the videos is still in use when nothing measured backs it now. */
+/**
+ * Added to a row whose value from the videos is still in use while the videos now suggest another one, and to an
+ * editing-style row whose value from the videos is still in use when nothing measured backs it now.
+ */
 export const STILL_IN_USE_LINE = 'What you accepted earlier from your videos is still in use.';
 
 export interface ReferenceStyleSummary {
@@ -1106,17 +1110,21 @@ export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceS
     if (decision && decision.valueKey === valueKey && decision.decision === 'dismissed') state = 'dismissed';
     else if (matches) state = decision && decision.valueKey === valueKey && decision.decision === 'accepted' ? 'accepted' : 'matches';
     else state = 'open';
+    // A value accepted from the videos stays in use until the owner chooses, also when the videos now suggest another
+    // one (measured again, or other videos added): the row offers the new suggestion and still says the earlier one is
+    // in use (with Change on an editing-style row), so the card never hides what is applied.
+    const inUse = isEditingStyleRow(field) ? rowFromVideos(field) : c.fromVideos;
     return {
       field,
       label,
       value: c.value,
       valueKey,
-      seen: `${c.seen} ${seenIn(c.evidence)}`,
+      seen: `${c.seen} ${seenIn(c.evidence)}${inUse && !matches ? ` ${STILL_IN_USE_LINE}` : ''}`,
       action: state === 'open' || state === 'dismissed' ? c.action : null,
       evidence: c.evidence,
       alsoChanges: c.alsoChanges,
       state,
-      inUse: matches && c.fromVideos,
+      inUse,
     };
   });
 

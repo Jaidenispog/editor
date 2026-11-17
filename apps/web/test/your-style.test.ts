@@ -26,6 +26,15 @@ describe('"Your style from your videos" card actions', () => {
     expect(summaryRowActions(row('zoom', 'matches', false), true)).toEqual({ decide: false, stop: false });
   });
 
+  it('offers the stop next to a new suggestion while the value accepted earlier is still in use', () => {
+    // The videos measured again suggest straight cuts; the cross-fades accepted earlier are still in use.
+    expect(summaryRowActions(row('transitionPalette', 'open', true, { hardCutShare: 1, types: [], durationSec: 0.3, accent: null }), true)).toEqual({ decide: true, stop: true });
+    expect(summaryRowActions(row('beatSync', 'dismissed', true), true)).toEqual({ decide: true, stop: true });
+    // Length, pace, colour and text show the earlier value in use too, but change in the editing preferences.
+    expect(summaryRowActions(row('pacing', 'open', true, 'fast'), true)).toEqual({ decide: true, stop: false });
+    expect(anyStyleFromVideos([row('transitionPalette', 'open', true)])).toBe(true);
+  });
+
   it('shows "Go back to each style\'s own" while any editing-style row is in use', () => {
     expect(anyStyleFromVideos([row('pacing', 'accepted', true), row('beatSync', 'open', false)])).toBe(false);
     expect(anyStyleFromVideos([row('pacing', 'accepted', false), row('beatSync', 'not_measured', true, null)])).toBe(true);

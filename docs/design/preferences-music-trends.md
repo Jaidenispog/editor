@@ -528,7 +528,13 @@ latest 12 ready reference profiles (all projects). Each video counts once.
   and says "What you accepted earlier from your videos is still in use." (`STILL_IN_USE_LINE`), and the card keeps
   **Go back to each style's own**, even when no video is combined at all. A row counts every value accepting it set
   (`SUMMARY_ROW_STYLE_FIELDS`): "Cutting to the beat" is in use while its beat sync or the beats per cut accepted with
-  it are, and **Change: use each style's own** resets them all (§4.3.1.5 "Stopping one row").
+  it are, and **Change: use each style's own** resets them all (§4.3.1.5 "Stopping one row"). The same holds when the
+  videos now suggest another value (they were measured again, or other videos were added): the row offers the new
+  suggestion (**Use this** / **No thanks**) and still keeps `inUse`, its line ending "What you accepted earlier from
+  your videos is still in use.", with **Change** on an editing-style row; a length, pace, colour or text row accepted
+  here says the same (it is changed in the editing preferences above). Using the new suggestion or stopping the row
+  ends the line; **No thanks** to it keeps the earlier value in use. Before, such a row showed only the new suggestion
+  (`inUse` was "matches the suggestion and came from the videos") while the planners kept applying the earlier value.
 
 #### 4.3.1.5 Schemas (Zod 4, `packages/core`, no migration)
 
@@ -875,6 +881,7 @@ choices do not raise `OFF_STYLE_TRANSITION` warnings; errors are unchanged.
 | Older measurement | "Measured before transitions and beat were added. Upload it again to include it." |
 | Older version of the measuring | Per video: "Measured with an older version of the measuring, so it is not used. Upload the video again, then remove this copy." Summary: "2 videos were measured with an older version of the measuring and are not used. Upload them again, then remove the old copies from their projects." (one video: "1 video was measured with an older version of the measuring and is not used. Upload it again, then remove the old copy from its project.") Its suggestions, if asked for: "This video was measured with an older version of the measuring, so its suggestions are not offered. Upload it again to get new ones." (409) |
 | Accepted value with no video behind it now | The row's line ends "What you accepted earlier from your videos is still in use." (with "In use: from your videos" and **Change: use each style's own**) |
+| Accepted value the videos now differ from | The new suggestion, its "Seen in …", then "What you accepted earlier from your videos is still in use." (with "In use: from your videos", the suggestion's buttons, and **Change: use each style's own** on an editing-style row) |
 | End screen | "Skipped a dark end screen in the last 3 s." |
 | Plan note (rules planner) | "Straight cuts with a white flash on every 4th beat, from your style." / "The finished look lands on the biggest lift in 'Track' (estimate)." |
 | Plan note (editing style left out) | The three step-down notes and their revision wordings, word for word in §4.3.1.6 ("Never worse than the defaults") |
@@ -898,7 +905,8 @@ New card above **Reference videos** in `preferences-tab.tsx` (component `YourSty
   Zooms, Music. Each row: what was seen (plain sentence), the agreement chip ("Seen in 3 of 4 videos"), and either
   **Use this** / **No thanks**, "Matches your settings", "Your videos differ here" or the not-measured reason. A
   small "In use: from your videos" chip on accepted rows, with **Change** (it sends the row to
-  `POST /api/references/summary/reset`, which resets every value accepting the row set, §4.3.1.5). A value accepted from the videos that no
+  `POST /api/references/summary/reset`, which resets every value accepting the row set, §4.3.1.5). The chip and
+  **Change** stay next to a new suggestion while the value accepted earlier is still in use (§4.3.1.4). A value accepted from the videos that no
   combined video backs any more (removed, or measured with an older version of the measuring) keeps its chip and
   **Change**, with "What you accepted earlier from your videos is still in use." (§4.3.1.4): the rows and **Go back
   to each style's own** stay on the card while anything from the videos is in use, even with no video combined.

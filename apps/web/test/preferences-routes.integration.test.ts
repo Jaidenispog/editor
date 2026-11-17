@@ -549,4 +549,49 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     const audits = (await db.query.auditLog.findMany()).filter((a) => a.action === 'preferences.editing_style_changed').map((a) => a.data);
     expect(audits).toContainEqual({ reset: true, by: 'owner', row: 'beatSync', fields: ['beatSync', 'beatsPerCut'] });
   });
+
+  it('shows the transitions accepted earlier as still in use, and stoppable, when the videos measured again suggest others', async () => {
+    as(owner);
+    const { eq } = await import('drizzle-orm');
+    const summaryRoute = await import('../src/app/api/references/summary/route');
+    const resetRoute = await import('../src/app/api/references/summary/reset/route');
+    type Row = { field: string; state: string; value: unknown; seen: string; action: string | null; inUse: boolean };
+    const rows = async () => new Map(((await call(summaryRoute.GET, 'GET', '/api/references/summary', {})).json.suggestions as Row[]).map((r) => [r.field, r]));
+    // The straight cuts with white flashes accepted in the test before are in use.
+    const accepted = (await settingsRow()).preferences.editingStyle.transitionPalette;
+    expect(accepted).toMatchObject({ hardCutShare: 1, accent: { type: 'fadewhite' } });
+    expect((await rows()).get('transitionPalette')).toMatchObject({ state: 'accepted', inUse: true });
+
+    // Both videos measured again (SYNTHETIC): half-second cross-fades instead of the flashes.
+    const cross = assembleReferenceSignals({
+      fps: 30,
+      measuredSec: 16,
+      endScreenTrimmedSec: 0,
+      joins: Array.from({ length: 7 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })),
+      zoomShots: { checked: 16, pushScales: [], pullScales: [] },
+      audio: { bpm: 120, confidence: 0.9, beatTimesSec: Array.from({ length: 33 }, (_, i) => i * 0.5), energy: Array.from({ length: 64 }, () => 0.5), energyStepSec: 0.25, speechLikely: false },
+    });
+    const measured = (await db.query.mediaAssets.findMany({ where: (t, { and: all, eq: is, isNull }) => all(is(t.kind, 'reference_video'), isNull(t.deletedAt)) })).filter(
+      (a) => (a.referenceProfile as { style?: unknown } | null)?.style,
+    );
+    expect(measured.length).toBe(2);
+    try {
+      for (const a of measured) await db.update(schema.mediaAssets).set({ referenceProfile: { ...(a.referenceProfile as object), style: cross } as never }).where(eq(schema.mediaAssets.id, a.id));
+      // The row offers the cross-fades and still says the flashes accepted earlier are in use, with Change.
+      const row = (await rows()).get('transitionPalette')!;
+      expect(row).toMatchObject({ state: 'open', action: 'Use half-second cross-fades', inUse: true });
+      expect(row.value).toMatchObject({ types: ['fade'], durationSec: 0.5 });
+      expect(row.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
+      // They are still what the planners use.
+      expect((await settingsRow()).preferences.editingStyle.transitionPalette).toEqual(accepted);
+      // The card's Change stops them; the cross-fades stay on offer, with nothing in use.
+      expect((await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, { field: 'transitionPalette' })).status).toBe(200);
+      expect((await settingsRow()).preferences.editingStyle.transitionPalette).toBeNull();
+      const stopped = (await rows()).get('transitionPalette')!;
+      expect(stopped).toMatchObject({ state: 'open', action: 'Use half-second cross-fades', inUse: false });
+      expect(stopped.seen).not.toContain(STILL_IN_USE_LINE);
+    } finally {
+      for (const a of measured) await db.update(schema.mediaAssets).set({ referenceProfile: a.referenceProfile }).where(eq(schema.mediaAssets.id, a.id));
+    }
+  });
 });
