@@ -22,6 +22,7 @@ import {
   isOlderMeasuringVersion,
   measureBeatSignal,
   olderVersionNotice,
+  openSuggestions,
   STILL_IN_USE_LINE,
   paletteFromCounts,
   profileReference,
@@ -301,6 +302,25 @@ describe('summariseReferenceStyle', () => {
     const old = ['a', 'b', 'c'].map((id) => profileWith(assembleReferenceSignals(rawStyle()), id));
     const again = ['a2', 'b2', 'c2'].map((id) => profileWith({ ...assembleReferenceSignals(rawStyle()), analysisVersion: next }, id));
     expect(summariseReferenceStyle([...again, ...old], prefs(), { analysisVersion: next })).toMatchObject({ total: 3, olderVersion: 3 });
+  });
+
+  it('leaves the suggestions of a video measured with an older version of the measuring out of those waiting', () => {
+    // What Settings → Editing preferences → Reference videos counts ("N suggestions waiting for you") and the Studio card
+    // offers; POST /api/references/[assetId]/decide refuses such a video's suggestions with 409.
+    const style = assembleReferenceSignals(rawStyle());
+    const today = profileWith(style, 'a');
+    const other = profileWith({ ...style, analysisVersion: REFERENCE_STYLE_ANALYSIS_VERSION + 1 }, 'b');
+    expect(openSuggestions(today).length).toBeGreaterThan(0);
+    expect(other.suggestions).toEqual(today.suggestions);
+    expect(isOlderMeasuringVersion(other)).toBe(true);
+    expect(openSuggestions(other)).toEqual([]);
+    // After a version bump the video measured today waits for nothing, and one measured by the new version does.
+    expect(openSuggestions(today, REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toEqual([]);
+    expect(openSuggestions(other, REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toEqual(openSuggestions(today));
+    // A video measured before transitions and beat were added still offers its own (only its version is unknown).
+    const v1 = profileWith(null, 'c');
+    expect(isOlderMeasuringVersion(v1)).toBe(false);
+    expect(openSuggestions(v1).length).toBeGreaterThan(0);
   });
 
   it('keeps an accepted editing-style row in use, and stoppable, when no current video backs it', () => {

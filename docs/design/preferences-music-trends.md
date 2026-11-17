@@ -520,7 +520,9 @@ latest 12 ready reference profiles (all projects). Each video counts once.
   then remove this copy.") stay true until then, and **Remove** on the project's reference card clears them. Raising
   the version (when the measuring changes what it measures) therefore takes the earlier profiles out of "your style"
   until those videos are uploaded again; they stay in the videos list with a chip. Such a video's own suggestions
-  (its pace, length and colour came from that measuring too) are not offered on its Studio reference card, and
+  (its pace, length and colour came from that measuring too) are not offered on its Studio reference card, Settings →
+  Editing preferences → **Reference videos** counts none of them as waiting (`openSuggestions` leaves them out, so both
+  places count the same; before, the list still said "2 suggestions waiting for you"), and
   `POST /api/references/[assetId]/decide` refuses them (409).
 - **Accepted values stay in use**: an editing-style value accepted from the videos stays in use until the owner
   changes it, also when no combined video backs it any more (they were removed, or measured with an older version):

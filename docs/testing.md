@@ -247,7 +247,8 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   example; v1 → v2 reads; summary 1 of 1, 1 of 2 differs, 3 of 4 pooled, octave-folded tempos, older profiles only for
   v1 rows, profiles from an older measuring version (a simulated bump to version 2) combined into no row, the pace
   included, and counted with the "measured with an older version of the measuring" wording, still counted after the
-  same videos are uploaded again (so the wording says to remove the old copies); a transitions value accepted from
+  same videos are uploaded again (so the wording says to remove the old copies), and none of their own suggestions
+  left waiting (`openSuggestions`, what Settings → Reference videos counts); a transitions value accepted from
   three videos stays in use, with the "still in use" line and stoppable, after a version bump and with no videos;
   stopping "Cutting to the beat" (`resetEditingStyle(prefs, row)`) also takes back the beats per cut accepted with it,
   with their sources and the row's decision, leaves the other rows as they were (each row resets only its own values),
@@ -316,8 +317,9 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   read-only), `POST …/summary/decide` (owner-only, CSRF, stale `valueKey` → 409 with nothing written, accept writes
   `editingStyle` + `sources` + `summaryDecisions` and the audit rows), Settings refusing `sources`/`summaryDecisions`
   and recording owner changes, `…/summary/reset`, a SYNTHETIC profile from another measuring version (listed with
-  `olderVersion`, rows exactly as without it, its own suggestions refused with 409 and nothing written, still counted
-  after the same video is uploaded again, until the old copy is removed), a transitions value accepted from the
+  `olderVersion`, rows exactly as without it, none of its own suggestions waiting in what `GET /api/references` gives
+  the Settings list, its own suggestions refused with 409 and nothing written, still counted after the same video is
+  uploaded again, until the old copy is removed), a transitions value accepted from the
   videos that stays in use and stoppable once the stored profiles are moved to another measuring version,
   `PUT /api/settings` refusing a reversed `musicFit` tempo range (400 on
   `preferences.editingStyle.musicFit.bpmLow`, nothing stored), and "Change: use each style's own" on "Cutting to the

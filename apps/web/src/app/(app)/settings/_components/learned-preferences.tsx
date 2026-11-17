@@ -255,6 +255,7 @@ export function ReferenceSuggestionsList() {
         {refs && refs.length ? (
           <ul className="divide-y divide-charcoal-100">
             {refs.map((r) => {
+              // None for a video measured with an older version of the measuring, as on its Studio card (openSuggestions).
               const waiting = r.profile ? openSuggestions(r.profile).length : 0;
               return (
                 <li key={r.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">

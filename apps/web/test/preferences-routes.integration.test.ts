@@ -5,7 +5,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { REFERENCE_STYLE_ANALYSIS_VERSION, STILL_IN_USE_LINE, assembleReferenceSignals, profileReference, type EditPlan, type RawJoin, type ReferenceStyleProfile } from '@studio/core';
+import { REFERENCE_STYLE_ANALYSIS_VERSION, STILL_IN_USE_LINE, assembleReferenceSignals, isOlderMeasuringVersion, openSuggestions, profileReference, type EditPlan, type RawJoin, type ReferenceStyleProfile, type ReferenceStyleProfileV2 } from '@studio/core';
 import { runMigrations } from '@studio/db';
 import { dropTestDatabase } from './helpers/test-database';
 
@@ -411,9 +411,16 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     const rows = (r: { json: { suggestions: Array<{ field: string; valueKey: string | null; evidence: unknown; state: string }> } }) => r.json.suggestions.map((x) => [x.field, x.valueKey, x.evidence, x.state]);
     expect(rows(after)).toEqual(rows(before));
 
-    // Its own suggestions (its pace, length and colour came from that measuring too) are not offered: refused, and
-    // nothing is written.
+    // Its own suggestions (its pace, length and colour came from that measuring too) are not offered: Settings →
+    // Reference videos counts none waiting (as the list does, from GET /api/references), the decide route refuses them,
+    // and nothing is written.
     expect(profile.suggestions.length).toBeGreaterThan(0);
+    const listRoute = await import('../src/app/api/references/route');
+    const listed = (await call(listRoute.GET, 'GET', '/api/references', {})).json.references as Array<{ id: string; profile: ReferenceStyleProfileV2 | null }>;
+    const item = listed.find((r) => r.id === id)!;
+    expect(item.profile?.suggestions.length).toBe(profile.suggestions.length);
+    expect(openSuggestions(item.profile!)).toEqual([]);
+    expect(listed.filter((r) => r.id !== id && r.profile?.style).every((r) => !isOlderMeasuringVersion(r.profile!))).toBe(true);
     const decideRoute = await import('../src/app/api/references/[assetId]/decide/route');
     const prefsBefore = (await settingsRow()).preferences;
     const refused = await call(decideRoute.POST, 'POST', `/api/references/${id}/decide`, { assetId: id }, { accept: [profile.suggestions[0]!.field] });

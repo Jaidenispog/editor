@@ -212,8 +212,14 @@ function clamp01(n: number): number {
   return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
 }
 
-/** Suggestions that still need a decision (not matching the settings, not yet accepted or dismissed). */
-export function openSuggestions(profile: Pick<ReferenceStyleProfile, 'suggestions' | 'decisions'>): ReferenceSuggestion[] {
+/**
+ * Suggestions that still need a decision (not matching the settings, not yet accepted or dismissed): what a reference's
+ * Studio card offers and Settings → Editing preferences → Reference videos counts as waiting. None for a video measured
+ * with an older version of the measuring ({@link isOlderMeasuringVersion}): its suggestions are not offered (its pace,
+ * length and colour came from that measuring too) and `POST /api/references/[assetId]/decide` refuses them (409).
+ */
+export function openSuggestions(profile: Pick<ReferenceStyleProfileV2, 'suggestions' | 'decisions' | 'style'>, current: number = REFERENCE_STYLE_ANALYSIS_VERSION): ReferenceSuggestion[] {
+  if (isOlderMeasuringVersion(profile, current)) return [];
   return profile.suggestions.filter((s) => s.reason !== MATCHES_SETTINGS_REASON && !profile.decisions[s.field]);
 }
 
