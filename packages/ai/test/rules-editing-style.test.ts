@@ -88,13 +88,19 @@ function beatOf(plan: EditPlan, t: number): { index: number; dist: number } {
 
 describe('editing style from your videos in the rules planner', () => {
   it('defaults: all plans are identical to before this feature (stored snapshot)', () => {
-    const plans: unknown[] = [];
+    const plans: EditPlan[] = [];
     for (const styleId of STYLE_IDS)
       for (const m of [null, clickTrack()])
         for (const attempt of [0, 1])
           for (const beatSync of [undefined, 'on'] as const) plans.push(planner.plan(plannerInput(labelledProject(), { styleId, music: m, attempt, ...(beatSync ? { beatSync } : {}), revealOnBeat: beatSync === 'on' })));
-    // Hash of the same 40 plans computed on commit 5801c8c, before the editing style existed.
-    expect(createHash('sha256').update(JSON.stringify(plans)).digest('hex')).toBe('a3db9b9764310e7a2e2c148fe40be720014bd9523edd103607ff8efe5f5f398d');
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    // Everything but the cut times listed as on the beat is as on commit 5801c8c, before the editing style existed: that
+    // commit's 40 plans hashed to a3db9b97…, and the same plans with `alignedCutTimesSec` emptied hash to this value.
+    const unlisted = plans.map((p) => ({ ...p, audio: { ...p.audio, beatAlignment: p.audio.beatAlignment && { ...p.audio.beatAlignment, alignedCutTimesSec: [] } } }));
+    expect(hash(unlisted)).toBe('1111c7cf4dd356ebad17691ee6062b692810e36a4282658d90f832e3c6bde18c');
+    // The listed times now come from each plan as it plays (its segments, timed as the renderer times them), not from the
+    // planner's drafts: 9 of these plans list some cuts one millisecond later than before. Pinned as well.
+    expect(hash(plans)).toBe('e2a24f91bc454d380935672d71bb14bd6fd4d402154b3bb31d60676da269a722');
   });
 
   it('finds the strongest beat of the synthetic track', () => {

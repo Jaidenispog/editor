@@ -1,4 +1,4 @@
-import type { StyleId, TransitionType } from '@studio/core';
+import { computeTimeline, type Segment, type StyleId, type TransitionType } from '@studio/core';
 import { extension, freeIntervals, play, startTimes, type Draft } from './draft.js';
 import { cutTime, landRevealOnBeat, nearestBeatIndex, shiftCut, strongestBeat, startBeatsThatFit, type BeatGrid } from './music.js';
 import { round } from './random.js';
@@ -34,6 +34,21 @@ export function feltCutTime(drafts: readonly Draft[], i: number): number {
   if (!d || !t) return cutTime(drafts, i);
   const start = startTimes(drafts)[i] ?? 0;
   return isAccent(t) ? start + ACCENT_PEAK_FRACTION * t.durationSec : start + t.durationSec;
+}
+
+/**
+ * The output time of each join of a plan as it plays: from its segments, timed the way the renderer times them
+ * (`computeTimeline`), so a millisecond rounded off a segment's source range moves the join too. A join is felt at the
+ * end of its transition (the cut for a hard cut), or at an accent's peak when `accentPeaks` (an accent accepted from the
+ * owner's videos). Both planners report a plan's beat alignment from these times.
+ */
+export function feltJoinTimes(segments: readonly Segment[], accentPeaks: boolean): number[] {
+  return computeTimeline({ segments: [...segments] })
+    .segments.slice(1)
+    .map((p) => {
+      const t = p.segment.transitionIn;
+      return p.startSec + (accentPeaks && isAccent(t) ? ACCENT_PEAK_FRACTION * t!.durationSec : (t?.durationSec ?? 0));
+    });
 }
 
 /** The draft that shows the finished look (the "reveal") for each style, or -1. */

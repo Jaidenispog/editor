@@ -2,6 +2,7 @@ import {
   RESTRAINED_TRANSITIONS,
   STYLES,
   computeTimeline,
+  earliestMusicStartSec,
   editLengthForTrack,
   effectivePreferences,
   isDefaultPlanningStyle,
@@ -201,13 +202,16 @@ export function effectiveSettings(input: PlannerInput): EffectiveSettings {
 
 /**
  * The length this plan aims for once its music is known, by the rule in @studio/core (`editLengthForTrack`): the
- * requested (or revised) length, or a little less when the chosen track is a little shorter and plays from a start the
- * planner picks; a track too short for that is refused with a message for the owner. Without music (none chosen, or
- * switched off by an instruction) the length stays as asked.
+ * requested (or revised) length, or a little less when the music from the track's first usable beat
+ * (`earliestMusicStartSec`, where both planners can start it at the earliest, since the music starts on a beat) does
+ * not cover it; a track too short for that is refused with a message for the owner. The same rule applies with a start
+ * the owner chose: the music then starts on the first beat at or after the choice, or on the latest beat that still
+ * leaves room for this length (`beatGrid`). Without music (none chosen, or switched off by an instruction) the length
+ * stays as asked.
  */
 export function plannedLength(input: PlannerInput, s: Pick<EffectiveSettings, 'target' | 'musicOn'> = effectiveSettings(input)): EditLengthForTrack {
   if (!input.music || !s.musicOn) return { ok: true, targetSec: s.target, trimmed: false };
-  return editLengthForTrack(s.target, input.music.durationSec);
+  return editLengthForTrack(s.target, input.music.durationSec, earliestMusicStartSec(input.music.beatTimesSec, input.music.durationSec));
 }
 
 /**

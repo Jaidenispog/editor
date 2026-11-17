@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { durationBoundsFor, type EditPlan } from '@studio/core';
+import { DEFAULT_EDITING_STYLE, DEFAULT_SETTINGS, durationBoundsFor, type EditPlan, type EditingStyle } from '@studio/core';
 import { toPlanCandidate } from '../src/anthropic/planner.js';
 import type { PlannerWire } from '../src/anthropic/schemas.js';
-import { buildPlannerUserContent } from '../src/anthropic/prompts.js';
+import { buildPlannerUserContent, editingStyleBriefFor } from '../src/anthropic/prompts.js';
 import { RulesPlanner } from '../src/rules/planner.js';
 import { plannedLength, plannedTargetSec } from '../src/rules/settings.js';
 import type { PlannerInput } from '../src/types.js';
@@ -56,4 +56,32 @@ describe('the length both planners aim for', () => {
     expect(plannedTargetSec(input)).toBe(45);
     expect(briefOf(input).target.durationSec).toBe(45);
   });
+
+  it("works out the AI brief's reveal on the biggest lift for the trimmed length, with the music where the rules planner starts it", () => {
+    // Worked out for the asked length instead, no start of these tracks would leave room for the edit, and the brief
+    // would give the AI planner no reveal time at all.
+    const style: EditingStyle = { ...DEFAULT_EDITING_STYLE, transitionPalette: { hardCutShare: 0, types: ['fade'], durationSec: 0.3, accent: null }, beatSync: 'on', beatsPerCut: 2, reveal: 'strongest_beat' };
+    const cases: Array<{ edit: number; track: number; liftAt: number; firstBeat: number; planned: number; reveal: number; start: number }> = [
+      { edit: 45, track: 40, liftAt: 24, firstBeat: 0, planned: 39.8, reveal: 24, start: 0 },
+      { edit: 45, track: 40, liftAt: 30, firstBeat: 0, planned: 39.8, reveal: 30, start: 0 },
+      { edit: 30, track: 27, liftAt: 18, firstBeat: 0, planned: 26.8, reveal: 18, start: 0 },
+      { edit: 20, track: 17.9, liftAt: 12, firstBeat: 0, planned: 17.7, reveal: 12, start: 0 },
+      // The lift's beat is 23.8 s into this track; the music starts on its first beat, 0.3 s in.
+      { edit: 45, track: 40, liftAt: 24, firstBeat: 0.3, planned: 39.5, reveal: 23.5, start: 0.3 },
+    ];
+    for (const c of cases) {
+      const input = at(c.edit, liftTrack(c.track, c.liftAt, c.firstBeat), { preferences: { ...DEFAULT_SETTINGS.preferences, editingStyle: style } });
+      expect(plannedTargetSec(input)).toBe(c.planned);
+      expect(editingStyleBriefFor(input)?.['reveal'], JSON.stringify(c)).toEqual({ mode: 'strongest_beat', targetOutputSec: c.reveal, musicStartOffsetSec: c.start });
+      expect(planner.plan(input).audio.music?.startOffsetSec).toBe(c.start);
+    }
+  });
 });
+
+/** A SYNTHETIC 120 BPM track of `durationSec` with beats from `firstBeatSec` and a loud section (its biggest lift) from `liftAtSec`. */
+function liftTrack(durationSec: number, liftAtSec: number, firstBeatSec: number): NonNullable<PlannerInput['music']> {
+  const beats: number[] = [];
+  for (let t = firstBeatSec; t < durationSec; t += 0.5) beats.push(Math.round(t * 1000) / 1000);
+  const energy = Array.from({ length: Math.round(durationSec * 4) }, (_, i) => Math.round((i * 0.25 >= liftAtSec ? 1 : 0.126) * (i % 2 === 0 ? 1 : 0.3) * 1000) / 1000);
+  return { trackId: 'lift-120', durationSec, bpm: 120, beatTimesSec: beats, title: 'Synthetic lift 120', energy, energyStepSec: 0.25 };
+}

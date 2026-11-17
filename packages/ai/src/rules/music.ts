@@ -1,4 +1,4 @@
-import { findDrop } from '@studio/core';
+import { MIN_GRID_BEATS, findDrop, usableBeats } from '@studio/core';
 import type { PlannerMusic } from '../types.js';
 import { grow, hardMinPlay, shrink, startTimes, type Draft } from './draft.js';
 import { round } from './random.js';
@@ -26,11 +26,15 @@ function median(values: number[]): number {
   return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
-/** Sorted, de-duplicated beat times inside the track. */
+/**
+ * Seconds of music an edit leaves unplayed at the end of the track, at least: a start beat "fits" an edit when the edit
+ * ends this long before the track does, and the rules planner shortens an edit that would end later (see planner.ts).
+ */
+export const MUSIC_END_GAP_SEC = 0.1;
+
+/** Sorted, de-duplicated beat times inside the track (the same beats the shared length rule starts from). */
 function cleanBeats(music: PlannerMusic): number[] {
-  const inside = music.beatTimesSec.filter((t) => Number.isFinite(t) && t >= 0 && t < music.durationSec);
-  const sorted = [...new Set(inside.map((t) => round(t, 3)))].sort((a, b) => a - b);
-  return sorted.filter((t, i) => i === 0 || t - sorted[i - 1]! > 0.12);
+  return usableBeats(music.beatTimesSec, music.durationSec);
 }
 
 /**
@@ -50,7 +54,9 @@ export function snapMusicStart(music: PlannerMusic, startSec: number): number {
  * (bar-sized steps) so that the whole edit fits inside the track; without music a 120 BPM grid is used.
  * `fixedStartSec` (the owner's choice) overrides both the per-take choice and `preferStartSec`: playback starts
  * on the first beat at or after it, or on the latest beat that still fits when that one would run past the
- * end of the track.
+ * end of the track. The track's first beat always fits a length from the shared rule (`plannedLength`, which
+ * measures the music from that beat); for a longer length no beat may fit, and playback then starts on the first
+ * beat all the same (the rules planner shortens such an edit to the music left after it, never moving the music).
  */
 export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt: number, preferStartSec?: number, fixedStartSec?: number | null): BeatGrid {
   const horizon = lengthSec + 8;
@@ -63,13 +69,13 @@ export function beatGrid(music: PlannerMusic | null, lengthSec: number, attempt:
   const bpm = music.bpm ?? (interval > 0 ? round(60 / interval, 1) : null);
 
   const fixed = typeof fixedStartSec === 'number' && Number.isFinite(fixedStartSec) ? Math.max(0, fixedStartSec) : null;
-  if (beats.length < 4) {
-    const maxStart = Math.max(0, music.durationSec - lengthSec - 0.1);
+  if (beats.length < MIN_GRID_BEATS) {
+    const maxStart = Math.max(0, music.durationSec - lengthSec - MUSIC_END_GAP_SEC);
     const start = Math.min(maxStart, fixed ?? attempt * 4 * interval);
     return { startOffsetSec: round(Math.max(0, start), 3), beats: synthetic(0, interval, horizon), interval, bpm, fromMusic: true };
   }
 
-  const fits = beats.map((t, i) => ({ t, i })).filter(({ t }) => t + lengthSec <= music.durationSec - 0.1);
+  const fits = beats.map((t, i) => ({ t, i })).filter(({ t }) => t + lengthSec <= music.durationSec - MUSIC_END_GAP_SEC);
   const barStarts = fits.filter(({ i }) => i % 4 === 0);
   const pool = barStarts.length > 0 ? barStarts : fits;
   let chosen = pool.length > 0 ? pool[Math.min(pool.length - 1, attempt % Math.max(1, Math.min(pool.length, 4)))]! : { t: beats[0]!, i: 0 };
@@ -107,9 +113,33 @@ export function nearestBeatIndex(grid: BeatGrid, t: number): number {
   return best;
 }
 
-/** Output cut times that land within 40 ms of a beat (reported in the plan's beat-alignment info). */
-export function alignedCuts(grid: BeatGrid, cutTimes: number[]): number[] {
-  return cutTimes.filter((c) => grid.beats.some((b) => Math.abs(b - c) <= 0.04)).map((c) => round(c, 3));
+/** A cut this close to a beat is on it (the plan's beat-alignment info). */
+const ON_BEAT_SEC = 0.04;
+
+/** The cut times (output time) within {@link ON_BEAT_SEC} of one of `beats` (output time), rounded to the millisecond. */
+function onBeats(beats: readonly number[], cutTimes: readonly number[]): number[] {
+  return cutTimes.filter((c) => beats.some((b) => Math.abs(b - c) <= ON_BEAT_SEC + 1e-9)).map((c) => round(c, 3));
+}
+
+/**
+ * Output cut times that land within 40 ms of a beat of the grid the rules planner cut to (reported in the plan's
+ * beat-alignment info). Pass the times of the plan as it plays (`feltJoinTimes`): the grid starts where the music does.
+ */
+export function alignedCuts(grid: BeatGrid, cutTimes: readonly number[]): number[] {
+  return onBeats(grid.beats, cutTimes);
+}
+
+/**
+ * Output cut times that land within 40 ms of a beat of `music` when it starts at `startOffsetSec` (output time t plays
+ * music time startOffsetSec + t; beats rounded as in the rules planner's grid, so both planners report the same cuts for
+ * the same plan). For a plan the rules planner did not build (the AI plan): its beat-alignment info is worked out from
+ * where its music actually starts, never taken from the plan itself.
+ */
+export function cutsOnTheBeat(music: PlannerMusic, startOffsetSec: number, cutTimes: readonly number[]): number[] {
+  return onBeats(
+    cleanBeats(music).map((b) => round(b - startOffsetSec, 3)),
+    cutTimes,
+  );
 }
 
 /**
@@ -206,5 +236,5 @@ export function strongestBeat(music: Pick<PlannerMusic, 'energy' | 'energyStepSe
 
 /** Beats (seconds into the track) at which an edit of `lengthSec` can start and still fit inside the track. */
 export function startBeatsThatFit(music: PlannerMusic, lengthSec: number): number[] {
-  return cleanBeats(music).filter((t) => t + lengthSec <= music.durationSec - 0.1);
+  return cleanBeats(music).filter((t) => t + lengthSec <= music.durationSec - MUSIC_END_GAP_SEC);
 }

@@ -1,4 +1,4 @@
-import { AppError, type SegmentLabel, type StyleId } from '@studio/core';
+import { AppError, MUSIC_TAIL_SEC, type SegmentLabel, type StyleId } from '@studio/core';
 import type { PlannerInput } from '../types.js';
 import { MAX_SEGMENTS, MIN_PLAY_SEC, grow, hardMinPlay, largestFree, placeWindow, play, shrink, startTimes, type Draft } from './draft.js';
 import { NEUTRAL_LABELS, PROCESS_LABELS, bySource, byScore, bySteadiness, lengthOf, withLabels, type Candidate, type Footage } from './footage.js';
@@ -241,6 +241,13 @@ function buildBeatMontage(ctx: BuildContext): BuildResult {
   let holdBeats = 4 * iv >= 1.5 && 4 * iv <= 3.2 ? 4 : Math.max(1, Math.ceil(1.5 / iv));
 
   let totalBeats = nearestBeatIndex(grid, s.target);
+  // With music the montage ends before the music does: the nearest whole beat to the target, or the last one that
+  // still leaves 0.15 s of the track after it (rounding up could otherwise outrun a track the edit was trimmed to).
+  const music = grid.fromMusic && s.musicOn ? ctx.input.music : null;
+  if (music) {
+    const room = music.durationSec - grid.startOffsetSec - MUSIC_TAIL_SEC;
+    while (totalBeats > 1 && (grid.beats[totalBeats] ?? Number.POSITIVE_INFINITY) > room + 1e-6) totalBeats--;
+  }
   let body = totalBeats - hookBeats - holdBeats;
   if (body < 0) {
     holdBeats = Math.max(1, Math.ceil(1.5 / iv));

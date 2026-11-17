@@ -3,6 +3,7 @@ import {
   CancelledError,
   DEFAULT_EDITING_STYLE,
   EDIT_PLAN_VERSION,
+  MUSIC_TAIL_SEC,
   STYLES,
   VERTICAL_1080,
   computeTimeline,
@@ -20,8 +21,8 @@ import {
 import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '../types.js';
 import { fitDuration, play, startTimes, totalDuration, grow, shrink, type Draft } from './draft.js';
 import { collectFootage, type Candidate, type Footage } from './footage.js';
-import { alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
-import { ACCENT_PEAK_FRACTION, alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, isAccent, notePalette, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
+import { MUSIC_END_GAP_SEC, alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
+import { alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, feltJoinTimes, notePalette, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
 import { clamp, hashString, round, seededRandom } from './random.js';
 import { beatSyncFor, effectiveSettings, plannedLength, tameTransition, type EffectiveSettings, type ResolvedEditingStyle, type StyleFallbackStep } from './settings.js';
 import { STYLE_BUILDERS, applyOpening, type BuildContext, type Recipe } from './styles.js';
@@ -359,25 +360,48 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     recheckReveal();
     const plan = compose(ctx, drafts, textFor, state, previous, grid);
     const res = validateEditPlan(plan, vctx);
-    if (res.ok && res.plan) return res.plan;
-    lastErrors = res.errors;
-    if (!repair(ctx, drafts, plan, res.errors, state, fit, retransition)) break;
+    const errors = withMusicGap(plan, res.errors, input);
+    if (res.ok && res.plan && errors.length === 0) return res.plan;
+    lastErrors = errors;
+    if (!repair(ctx, drafts, plan, errors, state, fit, retransition)) break;
   }
   // Last chance: accept a plan that is a little off the ±5 % aim but inside the window the worker allows (the same
   // `durationBoundsFor` around the same target, trimmed to the music when it was).
   recheckReveal();
   const plan = compose(ctx, drafts, textFor, state, previous, grid);
   const loose = validateEditPlan(plan, { ...vctx, durationBounds: durationBoundsFor(s.target) });
-  if (loose.ok && loose.plan) return loose.plan;
-  const durationOnly = (loose.errors.length ? loose.errors : lastErrors).every((e) => e.code === 'DURATION_OUT_OF_RANGE');
+  const looseErrors = withMusicGap(plan, loose.errors, input);
+  if (loose.ok && loose.plan && looseErrors.length === 0) return loose.plan;
+  const durationOnly = (looseErrors.length ? looseErrors : lastErrors).every((e) => e.code === 'DURATION_OUT_OF_RANGE');
   const name = STYLES[input.styleId].name.toLowerCase();
   throw new AppError(
     'PROCESSING_FAILED',
     durationOnly
       ? `There is not enough usable footage for a ${Math.round(s.target)}-second ${name}. Add more clips or choose a shorter length.`
       : `The ${name} could not be built from this footage.`,
-    { details: { errors: loose.errors.length ? loose.errors : lastErrors } },
+    { details: { errors: looseErrors.length ? looseErrors : lastErrors } },
   );
+}
+
+/**
+ * The validator's issues plus one of the rules planner's own: the music starts where the beat grid starts (on a beat,
+ * see compose), so an edit must end at least 0.1 s before the music from there does (the validator alone allows the
+ * music to end up to 0.05 s early). Such an edit is reported as MUSIC_TOO_SHORT, and the repair shortens it.
+ */
+function withMusicGap(plan: EditPlan, errors: readonly PlanIssue[], input: PlannerInput): PlanIssue[] {
+  const m = plan.audio.music;
+  const music = input.music;
+  if (!m || !music || errors.some((e) => e.code === 'MUSIC_TOO_SHORT')) return [...errors];
+  const total = computeTimeline(plan).totalDurationSec;
+  if (m.startOffsetSec + total <= music.durationSec - MUSIC_END_GAP_SEC + 1e-6) return [...errors];
+  return [
+    ...errors,
+    {
+      code: 'MUSIC_TOO_SHORT',
+      message: `Music starts at ${m.startOffsetSec.toFixed(1)}s and the track (${music.durationSec.toFixed(1)}s) ends as the edit does`,
+      path: 'audio.music',
+    },
+  ];
 }
 
 /** The reveal plan for this edit from where the reveal currently sits (see planReveal). */
@@ -603,6 +627,7 @@ interface ComposeState {
   bannedText: Set<string>;
   captionsOn: boolean;
   musicOn: boolean;
+  /** Where the music starts: the start of the beat grid (on a beat), never moved. */
   musicOffset: number;
   /** Report an accent's peak (not its end) as the moment of the cut (only with an accepted accent). */
   accentPeaks: boolean;
@@ -625,7 +650,6 @@ function compose(
   const { input, s, footage } = ctx;
   const style = s.style;
   const total = totalDuration(drafts);
-  const starts = startTimes(drafts);
 
   const anyAudio = drafts.some((d) => d.cand.hasAudio);
   const music = input.music && state.musicOn ? input.music : null;
@@ -657,7 +681,10 @@ function compose(
     const prevMusic = previous?.audio.music;
     const change = s.revisionHints?.music === 'quieter' ? 0.7 : s.revisionHints?.music === 'louder' ? 1.25 : 1;
     const volume = prevMusic ? prevMusic.volume * change : s.musicVolume;
-    const offset = clamp(state.musicOffset, 0, Math.max(0, music.durationSec - total - 0.1));
+    // The music starts where the beat grid starts (on a beat): the cuts were placed on that grid, and beatAlignment
+    // below is measured against it. It is never moved to fit a longer edit; such an edit is shortened instead (see
+    // withMusicGap and repair).
+    const offset = state.musicOffset;
     musicPlan = {
       trackId: music.trackId,
       startOffsetSec: round(offset, 3),
@@ -667,12 +694,12 @@ function compose(
       duckUnderOriginal: true,
     };
   }
-  const cutTimes = starts.slice(1).map((t, i) => {
-    const tr = drafts[i + 1]?.transitionIn ?? null;
-    return t + (state.accentPeaks && isAccent(tr) ? ACCENT_PEAK_FRACTION * tr!.durationSec : (tr?.durationSec ?? 0));
-  });
+  // The cuts as the plan plays them (its segments, timed as the renderer times them), against the grid the cuts were
+  // placed on, which starts where the music does: the same report the AI plan gets for the same cuts (toPlanCandidate).
   const beatAlignment =
-    musicPlan && grid?.fromMusic ? { bpm: grid.bpm && grid.bpm > 0 ? round(grid.bpm, 1) : null, alignedCutTimesSec: alignedCuts(grid, cutTimes) } : null;
+    musicPlan && grid?.fromMusic
+      ? { bpm: grid.bpm && grid.bpm > 0 ? round(grid.bpm, 1) : null, alignedCutTimesSec: alignedCuts(grid, feltJoinTimes(segments, state.accentPeaks)) }
+      : null;
 
   const overlays = textFor(drafts).filter((o) => !state.bannedText.has(o.text));
   const captions = state.captionsOn ? buildCaptions(drafts, footage.transcripts) : [];
@@ -796,21 +823,16 @@ function repair(
       case 'MUSIC_TOO_SHORT': {
         const music = ctx.input.music;
         if (music) {
+          // The music stays on the beat it starts on (the cuts follow that beat grid). The fit's tolerance (or a
+          // longer revision) can land past what the music leaves after it: fit to that instead (the validator's
+          // length window still applies).
           const total = totalDuration(drafts);
-          const next = Math.max(0, music.durationSec - total - 0.1);
-          if (next < state.musicOffset) {
-            state.musicOffset = next;
+          const room = music.durationSec - state.musicOffset - MUSIC_TAIL_SEC;
+          if (total > room && room > 0) {
+            cap = room - 0.05;
             changed = true;
-          } else {
-            // The fit's tolerance can land a little past the end of a track the target was trimmed to: fit to
-            // what the music leaves instead (the validator's length window still applies).
-            const room = music.durationSec - state.musicOffset - 0.15;
-            if (total > room && room > 0) {
-              cap = room - 0.05;
-              changed = true;
-            }
-            refit = true;
           }
+          refit = true;
         }
         break;
       }
