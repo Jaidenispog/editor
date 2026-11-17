@@ -526,7 +526,9 @@ latest 12 ready reference profiles (all projects). Each video counts once.
   changes it, also when no combined video backs it any more (they were removed, or measured with an older version):
   its row then has no suggestion, keeps `inUse` ("In use: from your videos" with **Change: use each style's own**)
   and says "What you accepted earlier from your videos is still in use." (`STILL_IN_USE_LINE`), and the card keeps
-  **Go back to each style's own**, even when no video is combined at all.
+  **Go back to each style's own**, even when no video is combined at all. A row counts every value accepting it set
+  (`SUMMARY_ROW_STYLE_FIELDS`): "Cutting to the beat" is in use while its beat sync or the beats per cut accepted with
+  it are, and **Change: use each style's own** resets them all (§4.3.1.5 "Stopping one row").
 
 #### 4.3.1.5 Schemas (Zod 4, `packages/core`, no migration)
 
@@ -661,6 +663,15 @@ with `beatSync: 'on'` as one row.
 records the decision and `valueKey`. The owner can change any of them later in Settings (source becomes
 `owner`) or press **Go back to each style's own** (resets `editingStyle` to its defaults, keeps v1 fields). Audit
 `reference.summary_decided` / `preferences.editing_style_changed`.
+
+**Stopping one row** (**Change: use each style's own**, `POST /api/references/summary/reset` with `{ field }`): every
+editing-style value accepting that row set goes back to its default, with its source and the row's decision
+(`resetEditingStyle(prefs, row)`, `SUMMARY_ROW_STYLE_FIELDS`): "Cutting to the beat" resets `beatSync` and
+`beatsPerCut` (the beats per cut it was accepted with, or none), the other rows their own field. A bolder palette's
+`transitions: 'varied'` stays, as with **Go back to each style's own** (an ordinary preference, shown under Transitions in
+the editing preferences). Before, the card stopped a row through `PUT /api/settings` with only the row's own field, so
+the beats per cut accepted with "Cutting to the beat" stayed in use (the beat montage kept cutting every N beats) while
+no row showed anything in use and **Go back to each style's own** disappeared.
 
 #### 4.3.1.6 What accepted suggestions change in the five edits
 
@@ -886,7 +897,8 @@ New card above **Reference videos** in `preferences-tab.tsx` (component `YourSty
 - Rows in this order: Pace, Length, Colour, On-screen text, Transitions, Cutting to the beat, Big moment (reveal),
   Zooms, Music. Each row: what was seen (plain sentence), the agreement chip ("Seen in 3 of 4 videos"), and either
   **Use this** / **No thanks**, "Matches your settings", "Your videos differ here" or the not-measured reason. A
-  small "In use: from your videos" chip on accepted rows, with **Change**. A value accepted from the videos that no
+  small "In use: from your videos" chip on accepted rows, with **Change** (it sends the row to
+  `POST /api/references/summary/reset`, which resets every value accepting the row set, §4.3.1.5). A value accepted from the videos that no
   combined video backs any more (removed, or measured with an older version of the measuring) keeps its chip and
   **Change**, with "What you accepted earlier from your videos is still in use." (§4.3.1.4): the rows and **Go back
   to each style's own** stay on the card while anything from the videos is in use, even with no video combined.
@@ -1731,6 +1743,7 @@ All under `/api`, session required, JSON errors as in `docs/api.md`, CSRF guard 
 | POST | `/api/references/[assetId]/decide` | `{ accept: SuggestionField[], dismiss: SuggestionField[] }` | `{ profile, preferences }`; 409 `CONFLICT` "This video was measured with an older version of the measuring, so its suggestions are not offered. Upload it again to get new ones." for a profile from another measuring version (nothing is written) | owner; audit `reference.suggestions_decided` |
 | GET | `/api/references/summary` (v2, §4.3.1.9) | — | `{ summary: ReferenceStyleSummary, suggestions: SummarySuggestion[], videos: { total, measured, olderMeasurement, olderVersion, measuring, failed } }` (`olderVersion`: measured with an older version of the measuring, not combined) | signed in (staff read-only) |
 | POST | `/api/references/summary/decide` (v2) | `{ accept: ReferenceSummaryField[], dismiss: ReferenceSummaryField[], valueKeys: Record<field, string> }` | `{ summary, preferences }`; 409 `CONFLICT` "Your style summary changed — check the new suggestion." when a `valueKey` no longer matches | owner; audit `reference.summary_decided` |
+| POST | `/api/references/summary/reset` (v2) | none (every row), or `{ field }` with an editing-style row (`transitionPalette`, `beatSync`, `reveal`, `zoom`, `musicFit`; anything else 400): only the values accepting that row set, all of them ("Cutting to the beat" also `beatsPerCut`), §4.3.1.5 | `{ summary, preferences }` | owner; audit `preferences.editing_style_changed` |
 | PUT | `/api/settings` (v2 change) | `preferences.editingStyle` value fields editable; `sources` and `summaryDecisions` rejected with `VALIDATION`; a `musicFit` whose `bpmLow` is above its `bpmHigh` rejected with `VALIDATION` (400 on `preferences.editingStyle.musicFit.bpmLow`, "The music tempo range is the wrong way round: the lower BPM (bpmLow) must not be above the higher BPM (bpmHigh)."; nothing is stored; a single tempo is fine); a changed field records `sources[field] = { by: 'owner' }` | unchanged | owner; audit `preferences.editing_style_changed` |
 | DELETE | `/api/assets/[id]` (existing) | — | — | studio access; works for references |
 

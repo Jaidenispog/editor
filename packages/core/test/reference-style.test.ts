@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_EDITING_STYLE,
   DEFAULT_SETTINGS,
+  EDITING_STYLE_ROW_FIELDS,
   FORBIDDEN_STYLE_WORDS,
+  SUMMARY_ROW_STYLE_FIELDS,
+  isDefaultPlanningStyle,
   OLDER_VERSION_NOTE,
   REFERENCE_STYLE_ANALYSIS_VERSION,
   ReferenceStyleProfileSchema,
@@ -359,6 +363,62 @@ describe('summariseReferenceStyle', () => {
     expect(reset.transitions).toBe('varied');
     expect(reset.editingStyle.summaryDecisions.colour).toBeDefined();
     expect(reset.editingStyle.summaryDecisions.transitionPalette).toBeUndefined();
+  });
+
+  it('stops a row with every value accepting it set: "Cutting to the beat" also takes back the beats per cut', () => {
+    const profiles = ['a', 'b', 'c'].map((id) => profileWith(assembleReferenceSignals(rawStyle()), id));
+    const summary = summariseReferenceStyle(profiles, prefs());
+    const beat = summary.suggestions.find((r) => r.field === 'beatSync')!;
+    const palette = summary.suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(beat.alsoChanges).toEqual([{ field: 'beatsPerCut', value: 2 }]);
+    const accepted = applySummaryDecisions(prefs(), summary, { accept: ['beatSync', 'transitionPalette'], dismiss: [], valueKeys: { beatSync: beat.valueKey!, transitionPalette: palette.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+    expect(accepted.editingStyle).toMatchObject({ beatSync: 'on', beatsPerCut: 2, sources: { beatSync: { by: 'reference' }, beatsPerCut: { by: 'reference' } } });
+
+    // "Change: use each style's own" on the beat row: both values go back to the defaults the planners use, with their
+    // sources and the row's decision; the transitions accepted with it are untouched.
+    expect(SUMMARY_ROW_STYLE_FIELDS.beatSync).toEqual(['beatSync', 'beatsPerCut']);
+    const stopped = resetEditingStyle(accepted, 'beatSync');
+    const es = stopped.editingStyle;
+    expect(es).toMatchObject({ beatSync: DEFAULT_EDITING_STYLE.beatSync, beatsPerCut: DEFAULT_EDITING_STYLE.beatsPerCut });
+    expect(es.sources.beatSync).toBeUndefined();
+    expect(es.sources.beatsPerCut).toBeUndefined();
+    expect(es.summaryDecisions.beatSync).toBeUndefined();
+    expect(es.transitionPalette).toEqual(accepted.editingStyle.transitionPalette);
+    expect(es.sources.transitionPalette).toEqual(accepted.editingStyle.sources.transitionPalette);
+    expect(es.summaryDecisions.transitionPalette).toEqual(accepted.editingStyle.summaryDecisions.transitionPalette);
+    // The card offers the beat again with nothing in use there; the transitions are still in use from the videos.
+    const after = summariseReferenceStyle(profiles, stopped);
+    expect(after.suggestions.find((r) => r.field === 'beatSync')).toMatchObject({ state: 'open', inUse: false });
+    expect(after.suggestions.find((r) => r.field === 'transitionPalette')).toMatchObject({ state: 'accepted', inUse: true });
+    // Stopping the transitions row as well leaves nothing the planners use, as "Go back to each style's own" does.
+    expect(isDefaultPlanningStyle(resetEditingStyle(stopped, 'transitionPalette').editingStyle)).toBe(true);
+    expect(isDefaultPlanningStyle(resetEditingStyle(accepted).editingStyle)).toBe(true);
+    // Each row resets only its own values.
+    for (const row of EDITING_STYLE_ROW_FIELDS) {
+      const one = resetEditingStyle(accepted, row).editingStyle;
+      for (const f of ['transitionPalette', 'beatSync', 'beatsPerCut', 'reveal', 'zoom', 'musicFit'] as const) {
+        expect(stableJson(one[f]), `${row}: ${f}`).toBe(stableJson(SUMMARY_ROW_STYLE_FIELDS[row].includes(f) ? DEFAULT_EDITING_STYLE[f] : accepted.editingStyle[f]));
+      }
+    }
+  });
+
+  it('shows the beats per cut accepted with "Cutting to the beat" as in use until they are stopped too', () => {
+    // As stopping the beat row left it before: beat sync changed (by the owner), the beats per cut still from the videos.
+    const profiles = ['a', 'b', 'c'].map((id) => profileWith(assembleReferenceSignals(rawStyle()), id));
+    const summary = summariseReferenceStyle(profiles, prefs());
+    const beat = summary.suggestions.find((r) => r.field === 'beatSync')!;
+    const accepted = applySummaryDecisions(prefs(), summary, { accept: ['beatSync'], dismiss: [], valueKeys: { beatSync: beat.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+    const owner = { by: 'owner' as const, at: '2026-11-16T04:00:00Z', referenceAssetIds: [], referenceName: '' };
+    const halfStopped: EditingPreferences = { ...accepted, editingStyle: { ...accepted.editingStyle, beatSync: 'auto', sources: { ...accepted.editingStyle.sources, beatSync: owner } } };
+    expect(halfStopped.editingStyle).toMatchObject({ beatsPerCut: 2, sources: { beatsPerCut: { by: 'reference' } } });
+    // With no video behind it any more (removed, or measured with an older version): the row still says so.
+    const none = summariseReferenceStyle([], halfStopped).suggestions.find((r) => r.field === 'beatSync')!;
+    expect(none).toMatchObject({ value: null, inUse: true });
+    expect(none.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
+    // Stopping the row takes the beats per cut back too: nothing from the videos is left in use.
+    const stopped = resetEditingStyle(halfStopped, 'beatSync');
+    expect(stopped.editingStyle).toMatchObject({ beatSync: 'auto', beatsPerCut: null });
+    expect(summariseReferenceStyle([], stopped).suggestions.some((r) => r.inUse)).toBe(false);
   });
 
   it('keeps valueKeys stable regardless of key order', () => {

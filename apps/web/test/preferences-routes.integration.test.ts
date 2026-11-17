@@ -508,4 +508,45 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     ]);
     expect((await settingsRow()).preferences.editingStyle.musicFit).toEqual(fit(124, 124));
   });
+
+  it('"Change: use each style\'s own" on "Cutting to the beat" also stops the beats per cut accepted with it', async () => {
+    as(owner);
+    const summaryRoute = await import('../src/app/api/references/summary/route');
+    const decideRoute = await import('../src/app/api/references/summary/decide/route');
+    const resetRoute = await import('../src/app/api/references/summary/reset/route');
+    type Row = { field: string; state: string; value: unknown; valueKey: string | null; inUse: boolean; alsoChanges: Array<{ field: string; value: unknown }> };
+    const rows = async () => new Map(((await call(summaryRoute.GET, 'GET', '/api/references/summary', {})).json.suggestions as Row[]).map((r) => [r.field, r]));
+    const offered = await rows();
+    const beat = offered.get('beatSync')!;
+    const palette = offered.get('transitionPalette')!;
+    expect(beat).toMatchObject({ state: 'open', alsoChanges: [{ field: 'beatsPerCut', value: 2 }] });
+    const accepted = await call(decideRoute.POST, 'POST', '/api/references/summary/decide', {}, { accept: ['beatSync', 'transitionPalette'], valueKeys: { beatSync: beat.valueKey, transitionPalette: palette.valueKey } });
+    expect(accepted.status).toBe(200);
+    expect((await settingsRow()).preferences.editingStyle).toMatchObject({ beatSync: 'on', beatsPerCut: 2, sources: { beatSync: { by: 'reference' }, beatsPerCut: { by: 'reference' } } });
+
+    // Owner only; a field that is not an editing-style row is refused, and nothing changes.
+    as(staff);
+    expect((await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, { field: 'beatSync' })).status).toBe(403);
+    as(owner);
+    const before = (await settingsRow()).preferences;
+    for (const field of ['pacing', 'beatsPerCut', 'nonsense']) expect((await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, { field })).status, field).toBe(400);
+    expect((await settingsRow()).preferences).toEqual(before);
+
+    // What the card sends for the row: both values go back to the defaults, with their sources and the row's decision.
+    const stopped = await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, { field: 'beatSync' });
+    expect(stopped.status).toBe(200);
+    const style = (await settingsRow()).preferences.editingStyle;
+    expect(style).toMatchObject({ beatSync: 'auto', beatsPerCut: null, transitionPalette: palette.value });
+    expect(style.sources.beatSync).toBeUndefined();
+    expect(style.sources.beatsPerCut).toBeUndefined();
+    expect(style.summaryDecisions.beatSync).toBeUndefined();
+    // The transitions accepted with it stay in use and stoppable; the beat row offers the beat again, nothing in use.
+    expect(style.sources.transitionPalette).toMatchObject({ by: 'reference' });
+    const after = await rows();
+    expect(after.get('beatSync')).toMatchObject({ state: 'open', inUse: false });
+    expect(after.get('transitionPalette')).toMatchObject({ state: 'accepted', inUse: true });
+    expect((stopped.json.summary.suggestions as Row[]).find((r) => r.field === 'beatSync')).toMatchObject({ inUse: false });
+    const audits = (await db.query.auditLog.findMany()).filter((a) => a.action === 'preferences.editing_style_changed').map((a) => a.data);
+    expect(audits).toContainEqual({ reset: true, by: 'owner', row: 'beatSync', fields: ['beatSync', 'beatsPerCut'] });
+  });
 });

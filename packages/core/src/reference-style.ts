@@ -694,8 +694,26 @@ export const SUMMARY_ROW_LABELS: Record<Exclude<ReferenceSummaryField, 'beatsPer
 };
 const ROW_ORDER = Object.keys(SUMMARY_ROW_LABELS) as Array<keyof typeof SUMMARY_ROW_LABELS>;
 
-function isEditingStyleField(field: string): field is EditingStyleField {
-  return (EDITING_STYLE_FIELDS as readonly string[]).includes(field);
+/** The rows that set the editing style (each with **Change: use each style's own** while a value from the videos is in use). */
+export const EDITING_STYLE_ROW_FIELDS = ['transitionPalette', 'beatSync', 'reveal', 'zoom', 'musicFit'] as const satisfies readonly EditingStyleField[];
+export type EditingStyleRowField = (typeof EDITING_STYLE_ROW_FIELDS)[number];
+
+/**
+ * The editing-style values a row sets when it is accepted: its own, and for "Cutting to the beat" also the beats per cut
+ * (the value its `alsoChanges` carry, or none). A row is in use from the videos while any of them is, and stopping it
+ * (`resetEditingStyle(prefs, row)`) resets all of them, so nothing accepted with a row stays in use unseen. A bolder
+ * palette's `transitions: 'varied'` is an ordinary preference shown under Transitions, and stays, as with the reset.
+ */
+export const SUMMARY_ROW_STYLE_FIELDS: Readonly<Record<EditingStyleRowField, readonly EditingStyleField[]>> = {
+  transitionPalette: ['transitionPalette'],
+  beatSync: ['beatSync', 'beatsPerCut'],
+  reveal: ['reveal'],
+  zoom: ['zoom'],
+  musicFit: ['musicFit'],
+};
+
+export function isEditingStyleRow(field: string): field is EditingStyleRowField {
+  return (EDITING_STYLE_ROW_FIELDS as readonly string[]).includes(field);
 }
 
 const REASON_WORDS: Record<string, string> = {
@@ -1054,6 +1072,12 @@ export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceS
     }
   }
 
+  /**
+   * True while an editing-style value a row set when it was accepted from the videos is in use (its source is the videos
+   * and it is not the default): "Cutting to the beat" also counts the beats per cut accepted with it.
+   */
+  const rowFromVideos = (field: EditingStyleRowField) => SUMMARY_ROW_STYLE_FIELDS[field].some((f) => styleFromVideos(f) && stableJson(style[f]) !== stableJson(DEFAULT_EDITING_STYLE[f]));
+
   const suggestions: SummarySuggestion[] = ROW_ORDER.map((field) => {
     const c = candidates.get(field)!;
     const label = SUMMARY_ROW_LABELS[field];
@@ -1061,7 +1085,7 @@ export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceS
       const evidenceLine = c.evidence.measured > 0 || c.evidence.notMeasured.length ? ` ${seenIn(c.evidence)}` : '';
       // An editing-style value accepted from the videos stays in use until the owner changes it, even when no current
       // video backs it (all removed, or measured with an older version of the measuring): the row says so.
-      const stillInUse = isEditingStyleField(field) && styleFromVideos(field) && stableJson(style[field]) !== stableJson(DEFAULT_EDITING_STYLE[field]);
+      const stillInUse = isEditingStyleRow(field) && rowFromVideos(field);
       return {
         field,
         label,
@@ -1185,11 +1209,22 @@ export function applySummaryDecisions(prefs: EditingPreferences, summary: Refere
  * their summary decisions are forgotten so the rows can be accepted again). Length, pace, colour and text stay, and so
  * does `preferences.transitions` ('varied', pinned by the reference) when accepting a bolder palette turned it on: it
  * is an ordinary preference the owner changes in Settings, and the reset copy says it stays.
+ *
+ * With `row`, only that row ("Change: use each style's own" on it): every editing-style value accepting it set
+ * ({@link SUMMARY_ROW_STYLE_FIELDS}: "Cutting to the beat" also resets the beats per cut) returns to its default, with its
+ * source and the row's decision forgotten. Pure.
  */
-export function resetEditingStyle(prefs: EditingPreferences): EditingPreferences {
-  const decisions = { ...(prefs.editingStyle?.summaryDecisions ?? {}) };
-  for (const f of EDITING_STYLE_FIELDS) delete decisions[f];
-  return { ...prefs, editingStyle: { ...DEFAULT_EDITING_STYLE, summaryDecisions: decisions } };
+export function resetEditingStyle(prefs: EditingPreferences, row?: EditingStyleRowField): EditingPreferences {
+  const style = prefs.editingStyle ?? DEFAULT_EDITING_STYLE;
+  const decisions = { ...style.summaryDecisions };
+  const sources = { ...style.sources };
+  const values: Partial<Record<EditingStyleField, unknown>> = {};
+  for (const f of row ? SUMMARY_ROW_STYLE_FIELDS[row] : EDITING_STYLE_FIELDS) {
+    values[f] = DEFAULT_EDITING_STYLE[f];
+    delete sources[f];
+    delete decisions[f];
+  }
+  return { ...prefs, editingStyle: { ...style, ...values, sources, summaryDecisions: decisions } as EditingStyle };
 }
 
 // ---------------------------------------------------------------- wording for one video

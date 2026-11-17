@@ -3,7 +3,7 @@
 import { Film, RotateCcw, Sparkles } from 'lucide-react';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { DEFAULT_EDITING_STYLE, OLDER_MEASUREMENT_NOTE, OLDER_VERSION_NOTE, formatTrendDate, formatTrendDateTime, olderVersionNotice, type EditingStyleField, type ReferenceSummaryField, type SummarySuggestion } from '@studio/core';
+import { OLDER_MEASUREMENT_NOTE, OLDER_VERSION_NOTE, formatTrendDate, formatTrendDateTime, olderVersionNotice, type EditingStyleRowField, type ReferenceSummaryField, type SummarySuggestion } from '@studio/core';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,12 +13,11 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/components/ui/toast';
 import { apiRequest } from '@/lib/client/api-client';
 import type { ReferenceSummaryDto } from '@/lib/references';
+import { anyStyleFromVideos, stopRowRequest, summaryRowActions } from '@/lib/shared/your-style';
 
 /** Honesty line under the header (design §4.3.1.8). */
 const HONESTY =
   "These are estimates from your videos, not exact measurements. Check the next few edits and change anything that doesn't feel like you. Nothing from the videos is used in your edits, and the files were deleted after measuring.";
-
-const EDITING_STYLE_ROW_FIELDS: readonly string[] = ['transitionPalette', 'beatSync', 'reveal', 'zoom', 'musicFit'];
 
 function AgreementChip({ row }: { row: SummarySuggestion }) {
   const e = row.evidence;
@@ -49,9 +48,10 @@ function Row({
   canEdit: boolean;
   busy: string | null;
   onDecide: (accept: ReferenceSummaryField[], dismiss: ReferenceSummaryField[], key: string) => void;
-  onStop: (field: EditingStyleField) => void;
+  onStop: (field: EditingStyleRowField) => void;
 }) {
   const also = alsoChangesText(row);
+  const actions = summaryRowActions(row, canEdit);
   return (
     <li className="flex flex-col gap-2 py-3" data-summary-row={row.field}>
       <div className="flex flex-wrap items-center gap-2">
@@ -60,7 +60,7 @@ function Row({
         {row.inUse ? <Badge tone="info">In use: from your videos</Badge> : null}
       </div>
       <p className="text-sm text-charcoal-700">{row.seen}</p>
-      {row.state === 'open' || row.state === 'dismissed' ? (
+      {actions.decide ? (
         <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
           {canEdit ? (
             <>
@@ -88,9 +88,9 @@ function Row({
         </div>
       ) : null}
       {row.state === 'matches' ? <span className="text-xs text-charcoal-500">Matches your settings</span> : null}
-      {(row.state === 'accepted' || (row.inUse && row.value === null)) && canEdit && EDITING_STYLE_ROW_FIELDS.includes(row.field) ? (
+      {actions.stop ? (
         <div>
-          <Button size="sm" variant="ghost" className="min-h-11 sm:min-h-8" loading={busy === `s:${row.field}`} onClick={() => onStop(row.field as EditingStyleField)}>
+          <Button size="sm" variant="ghost" className="min-h-11 sm:min-h-8" loading={busy === `s:${row.field}`} onClick={() => onStop(row.field as EditingStyleRowField)}>
             Change: use each style&apos;s own
           </Button>
         </div>
@@ -142,17 +142,12 @@ export function YourStyleSummary({ canEdit }: { canEdit: boolean }) {
     }
   };
 
-  const stop = async (field: EditingStyleField) => {
+  const stop = async (field: EditingStyleRowField) => {
     setBusy(`s:${field}`);
     try {
-      await apiRequest('/api/settings', {
-        method: 'PUT',
-        body: {
-          preferences: {
-            editingStyle: { [field]: DEFAULT_EDITING_STYLE[field] },
-          },
-        },
-      });
+      // Every value accepting the row set goes back ("Cutting to the beat" also the beats per cut), not only its own.
+      const request = stopRowRequest(field);
+      await apiRequest(request.path, { method: request.method, body: request.body });
       load();
     } catch (err) {
       toast.error('Could not change that setting', err instanceof Error ? err.message : undefined);
@@ -176,7 +171,7 @@ export function YourStyleSummary({ canEdit }: { canEdit: boolean }) {
   };
 
   const open = data?.suggestions.filter((r) => r.state === 'open') ?? [];
-  const anyFromVideos = data?.suggestions.some((r) => r.inUse && EDITING_STYLE_ROW_FIELDS.includes(r.field)) ?? false;
+  const anyFromVideos = data ? anyStyleFromVideos(data.suggestions) : false;
   const v = data?.videos;
   const header =
     data && data.summary.total > 0

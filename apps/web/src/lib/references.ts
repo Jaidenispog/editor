@@ -4,6 +4,7 @@ import {
   AppError,
   ReferenceStyleProfileSchema,
   SUMMARY_MAX_PROFILES,
+  SUMMARY_ROW_STYLE_FIELDS,
   applySummaryDecisions,
   describeStyleSignals,
   isOlderMeasuringVersion,
@@ -11,6 +12,7 @@ import {
   resetEditingStyle,
   summariseReferenceStyle,
   type EditingPreferences,
+  type EditingStyleRowField,
   type ReferenceStyleProfile,
   type ReferenceStyleProfileV2,
   type ReferenceStyleSummary,
@@ -195,10 +197,20 @@ export async function decideReferenceSummary(
   return { summary: summariseReferenceStyle(profiles, next.preferences), preferences: next.preferences };
 }
 
-/** "Go back to each style's own": the editing style returns to its defaults; length, pace, colour and text stay (owner only). */
-export async function resetReferenceSummary(user: SessionUser): Promise<{ summary: ReferenceStyleSummary; preferences: EditingPreferences }> {
+/**
+ * "Go back to each style's own": the editing style returns to its defaults; length, pace, colour and text stay (owner
+ * only). With `row` ("Change: use each style's own" on one row), only the values accepting that row set, all of them
+ * ("Cutting to the beat" also the beats per cut), with their sources.
+ */
+export async function resetReferenceSummary(user: SessionUser, row?: EditingStyleRowField): Promise<{ summary: ReferenceStyleSummary; preferences: EditingPreferences }> {
   const { profiles } = await summaryInputs();
-  const next = await updateSettingsLocked((current) => ({ ...current, preferences: resetEditingStyle(current.preferences) }));
-  await writeAudit({ userId: user.id, action: 'preferences.editing_style_changed', entityType: 'settings', entityId: 'default', data: { reset: true, by: 'owner' } });
+  const next = await updateSettingsLocked((current) => ({ ...current, preferences: resetEditingStyle(current.preferences, row) }));
+  await writeAudit({
+    userId: user.id,
+    action: 'preferences.editing_style_changed',
+    entityType: 'settings',
+    entityId: 'default',
+    data: row ? { reset: true, by: 'owner', row, fields: [...SUMMARY_ROW_STYLE_FIELDS[row]] } : { reset: true, by: 'owner' },
+  });
   return { summary: summariseReferenceStyle(profiles, next.preferences), preferences: next.preferences };
 }
