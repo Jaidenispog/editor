@@ -507,6 +507,7 @@ function draftsFromPlan(ctx: BuildContext, prev: EditPlan): Draft[] | null {
       keep: seg.role === 'result' ? 'end' : seg.role === 'before' ? 'start' : 'centre',
       slot: 'body',
       autoTransition: false,
+      joinFrom: 'kept',
     });
   });
   if (drafts.length === 0) return null;
@@ -731,8 +732,9 @@ function compose(
   const overlays = textFor(drafts).filter((o) => !state.bannedText.has(o.text));
   const captions = state.captionsOn ? buildCaptions(drafts, footage.transcripts) : [];
   if (!music && !originalEnabled && !keep.some(Boolean)) ctx.notes.push('This edit has no sound: there is no music and the original sound is switched off.');
-  // The note for the transitions from the owner's videos says what this plan has: the accents it really places, where.
-  const paletteNote = s.styleFromVideos && ctx.notes.includes(PALETTE_NOTE_SLOT) ? paletteNoteFor(s.styleFromVideos, input.styleId, segments, revealIndex(input.styleId, drafts), grid) : null;
+  // The note for the transitions from the owner's videos says what this plan has: the joins the palette really chose
+  // (`joinFrom`), the style's own, and the accents it places, where.
+  const paletteNote = s.styleFromVideos && ctx.notes.includes(PALETTE_NOTE_SLOT) ? paletteNoteFor(s.styleFromVideos, input.styleId, segments, drafts.map((d) => d.joinFrom), revealIndex(input.styleId, drafts), grid) : null;
   const notes = ctx.notes.flatMap((n) => (n !== PALETTE_NOTE_SLOT ? [n] : paletteNote ? [paletteNote] : []));
 
   const title = previous?.title ?? `${style.name}${s.attempt > 0 ? ` · take ${s.attempt + 1}` : ''}`;
@@ -816,6 +818,8 @@ function repair(
         if (d?.transitionIn) {
           const t = d.transitionIn.durationSec * 0.6;
           d.transitionIn = t >= 0.2 ? { ...d.transitionIn, durationSec: round(t, 2) } : null;
+          // A transition from the palette dropped for length is a straight cut the palette did not choose.
+          if (!d.transitionIn && d.joinFrom === 'videos') d.joinFrom = undefined;
           d.autoTransition = false;
           changed = true;
           refit = true;
@@ -824,6 +828,8 @@ function repair(
       case 'FLASHY_TRANSITION':
         if (d) {
           d.transitionIn = tameTransition({ ...ctx.s, transitions: 'calm' }, d.transitionIn);
+          // The calm replacement is not the palette's transition.
+          if (d.joinFrom === 'videos') d.joinFrom = undefined;
           d.autoTransition = false;
           changed = true;
         }

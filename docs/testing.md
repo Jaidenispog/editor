@@ -269,12 +269,21 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   beat, the reveal on the strongest beat within ±0.1 s, punch-ins continuing the same shot at 1.2× and never above
   1.25, clean promo calm, "remove the flashy transitions" removes every accent, dismissed = defaults, a music fit
   alone = defaults in every style and take with no `editingStyle` in the AI brief, deterministic; AI brief and
-  `extraStyleTransitions`), `packages/ai/test/rules-palette-note.test.ts` (five accented palettes, white flashes and
-  dips to black every 4 or 8 beats or at the reveal only, straight cuts or cross-fades × five styles × three tracks,
-  none included × 15/20/30 s × two takes: the note for the accepted transitions is read as text and checked against the
-  plan's segments as they play, so every accent it claims is there, at the reveal or on the beats it names, and every
-  accent the plan has is described; the cinematic reveal's single flash at the reveal and the montage's "every 4th beat
-  from 0:04 to 0:12" only for an unbroken run).
+  `extraStyleTransitions`), `packages/ai/test/rules-palette-note.test.ts` (eight palettes: white flashes and dips to
+  black every 4 or 8 beats or at the reveal only with straight cuts, cross-fades or slides, cross-fades alone, wipes
+  and slides alone × the Transitions preference restrained and varied × five styles × three tracks, none included ×
+  15/20/30 s × two takes: the note for the accepted transitions is read as text and checked against the plan's
+  segments as they play. Every join kind it credits to the owner's videos is in the plan and in their palette
+  (straight cuts only when the palette cuts straight, clean promo's "cross-fade lengths" only for a cross-fade of the
+  palette's length); every kind it calls the style's own is in the plan and the style uses it; "rather than the
+  transitions from your videos" only when the plan has no transition that only the palette could have made; clean
+  promo's "no white flashes" names the palette's accent and the plan has none; every join the plan made is described,
+  straight cuts included; every accent it claims is there, at the reveal or on the beats it names, and every accent
+  the plan has is described. Revisions (240: "Make it 30 seconds." from a version made with the same palette or
+  without one, and "Make it faster.") are checked the same way with the joins of the shots they kept, by segment id,
+  left out, and never say that nothing comes from the videos. Also the cinematic reveal's single flash at the reveal,
+  the montage's "every 4th beat from 0:04 to 0:12" only for an unbroken run, and a calm cinematic reveal with slides
+  in the palette saying it keeps its own cross-fades rather than "Transitions as in your videos").
 - Planner step-down and plan notes: `packages/ai/test/rules-editing-style-sweep.test.ts` (design §4.3.1.6 "Never
   worse than the defaults"): every N, cross-fades of 0.3–1 s alone and with the beat, the reveal and punch-ins, at
   15/30/45/60 s × five styles × four music cases (70 s tracks at 60 s) × three takes, each judged by the worker's

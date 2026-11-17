@@ -703,15 +703,37 @@ apart from the cut times listed as on the beat, which both planners now take fro
   for one (so not on every such beat); the other styles place one, at the reveal (table below).
 - **The plan note for the accepted transitions** says what the finished plan has (`paletteNoteFor`,
   `packages/ai/src/rules/editing-style.ts`): it is written when the plan is composed, from its segments as they play,
-  since fitting, the beat, the reveal and repairs can still move or drop an accent. "Straight cuts", "Cross-fades as in
-  your videos" or "Transitions as in your videos", then the accents the plan really has: "with a white flash at the
-  reveal" (the four fitted styles, or nothing about a flash when none was placed), and for the beat montage "with a
-  white flash on every 4th beat from 0:04 to 0:12" only when its flashes fall on every 4th beat between those two (at
-  least three), otherwise "with 3 white flashes, each on a 4th beat", then "and one at the reveal" for the one into the
-  final shot ("dips to black" and "8th" alike). A beat montage with no accent left has no note for its transitions.
-  Before, the note repeated the palette ("a white flash on every 4th beat") whatever the plan had: one flash at the
-  reveal in the cinematic reveal, before & after and process story, and in the montage flashes with gaps between them
-  (for example on beats 12, 20 and 24 and into the final shot), or only two in a 30 s montage.
+  since fitting, the beat, the reveal and repairs can still move, drop or replace a join. Each join records who chose
+  it (`Draft.joinFrom`): the palette (one of its transitions, its accent, or a straight cut by its share), the style
+  (its own transition where the palette's cannot be used, such as slides in a calm style, or its straight cut where
+  the footage has no room for the palette's transition, or a repair's calm or dropped transition), or a revision's
+  earlier version. Only the joins the palette chose are credited to the owner's videos:
+  - Their kinds, then the accents the plan really has, ending ", from your style.": "Straight cuts and cross-fades
+    with a white flash at the reveal, from your style." The four fitted styles place one accent, at the reveal (when
+    none was placed, the note says nothing about one). For the beat montage, "with a white flash on every 4th beat
+    from 0:04 to 0:12" only when its flashes fall on every 4th beat between those two (at least three), otherwise
+    "with 3 white flashes, each on a 4th beat", then "and one at the reveal" for the one into the final shot ("dips to
+    black" and "8th" alike).
+  - Then the joins the style chose: "Some joins keep the style's own cross-fades." (a calm cinematic reveal with the
+    owner's half straight cuts, half slides: "Straight cuts with a dip to black at the reveal, from your style. Some
+    joins keep the style's own cross-fades."). A straight cut looks the same whoever chose it, so the style's own are
+    named only when the palette chose none (a montage whose cross-fades did not fit at every join: "Cross-fades, from
+    your style. Some joins keep the style's own straight cuts.").
+  - Nothing from the palette: "This style keeps its own cross-fades and dips to black rather than the transitions
+    from your videos." (the cinematic reveal with only wipes and slides from the videos, which it cannot use).
+  - Clean promo takes only the straight-cut share and the cross-fade length: "Cross-fade lengths follow your style."
+    ("Straight cuts and cross-fade lengths …" with a straight-cut share), and with an accent in the palette "Clean
+    promo stays calm, so it uses straight cuts from your style but no white flashes." (or "no dips to black").
+  - A revision keeps the joins of the shots it keeps and cannot tell whether those came from the videos, so the note
+    neither credits nor describes them, and says "Some joins keep the style's own …" rather than "… rather than the
+    transitions from your videos". When it kept every join, only clean promo's "no white flashes" is left to say.
+
+  Before, the note repeated the palette whatever the plan had: "Transitions as in your videos" when a calm style had
+  kept its own cross-fades instead of the owner's slides, "Straight cuts and cross-fade lengths follow your style."
+  for a clean promo whose joins were all its own cross-fades, no note at all for a beat montage without accents, and
+  "a white flash on every 4th beat" where the plan had one flash at the reveal (the cinematic reveal, before & after
+  and process story) or, in the montage, flashes with gaps between them (for example on beats 12, 20 and 24 and into
+  the final shot) or only two in a 30 s montage.
 - **Beat sync**: `PlannerInput.beatSync` defaults to `editingStyle.beatSync` when neither the form, the Sound
   panel nor a revision ("ignore the beat") set it — the same order in the rules planner and the AI brief
   (`beatSyncFor`). `on` runs `snapCutsToBeats` for styles that do not cut on the beat by themselves (existing).
@@ -758,7 +780,7 @@ apart from the cut times listed as on the beat, which both planners now take fro
      style's own timing and transitions."
 
   Every step starts from the notes taken before the first attempt, so no note from a failed attempt (such as
-  "Cross-fades as in your videos, from your style.") reaches the plan. The build adds its step's note itself
+  "Cross-fades, from your style.") reaches the plan. The build adds its step's note itself
   (`EffectiveSettings.styleFallback`), right after the notes it was given, once it knows whether it kept joins from
   the earlier version. A revision keeps the shots it can from the earlier version, each with its join ("keep
   everything the request does not mention"), so leaving out the transitions changes only the shots it adds; the kept
@@ -840,7 +862,7 @@ Each style keeps its character, so the five edits stay different:
 | Beat montage | all body joins | on every `everyBeats`, and at the final shot | always on the beat; N applies | final result shot | push-in / punch-in apply |
 | Cinematic reveal | process joins (calm types only, unless the family is "straight cuts", which makes them hard cuts) | only the pre-reveal join (replaces its dissolve/dip) | snapping when `on`; N applies to process shots | the held reveal | push-in replaces its subtle push-ins; punch-in only before the reveal |
 | Before and after | bridge joins | the before → after join | snapping when `on` | the after shot | apply |
-| Clean promo | `hardCutShare` and cross-fade length only | never (stays calm; note: "Clean promo stays calm, so it keeps straight cuts but no flashes") | snapping when `on` | final shot, on a downbeat only | push-in only; never punch-in |
+| Clean promo | `hardCutShare` and cross-fade length only | never (stays calm; note: "Clean promo stays calm, so it uses straight cuts from your style but no white flashes") | snapping when `on` | final shot, on a downbeat only | push-in only; never punch-in |
 | Process story | all joins | at the result only | snapping when `on`; N applies | first result shot | apply |
 
 A revision hint `transitions: restrained` drops flashy palette types and accents for that edit (accents become hard
@@ -897,7 +919,7 @@ choices do not raise `OFF_STYLE_TRANSITION` warnings; errors are unchanged.
 | Accepted value with no video behind it now | The row's line ends "What you accepted earlier from your videos is still in use." (with "In use: from your videos" and **Change: use each style's own**) |
 | Accepted value the videos now differ from | The new suggestion, its "Seen in …", then "What you accepted earlier from your videos is still in use." (with "In use: from your videos", the suggestion's buttons, and **Change: use each style's own** on an editing-style row) |
 | End screen | "Skipped a dark end screen in the last 3 s." |
-| Plan note (rules planner) | From what the plan has (§4.3.1.6): "Straight cuts with a white flash at the reveal, from your style." / "Cross-fades as in your videos, with a white flash at the reveal, from your style." / beat montage: "Straight cuts with a white flash on every 4th beat from 0:04 to 0:12, from your style." (only for flashes on every 4th beat between the two) or "Straight cuts with 3 white flashes, each on a 4th beat, and one at the reveal, from your style." / "The finished look lands on the biggest lift in 'Track' (estimate)." |
+| Plan note (rules planner) | From what the plan has (§4.3.1.6): "Straight cuts with a white flash at the reveal, from your style." / "Straight cuts and cross-fades with a white flash at the reveal, from your style." / "Straight cuts with a dip to black at the reveal, from your style. Some joins keep the style's own cross-fades." / "This style keeps its own cross-fades rather than the transitions from your videos." / clean promo: "Cross-fade lengths follow your style." or "Clean promo stays calm, so it uses straight cuts from your style but no white flashes." / beat montage: "Straight cuts with a white flash on every 4th beat from 0:04 to 0:12, from your style." (only for flashes on every 4th beat between the two) or "Straight cuts with 3 white flashes, each on a 4th beat, and one at the reveal, from your style." / "The finished look lands on the biggest lift in 'Track' (estimate)." |
 | Plan note (editing style left out) | The three step-down notes and their revision wordings, word for word in §4.3.1.6 ("Never worse than the defaults") |
 | Plan note (trimmed to the music) | "The edit was trimmed to 39.8 s so it ends before the music does." |
 | Plan note (track with no clear beat, §4.3.1.6) | Beat montage: `"Ambient" has no clear beat, so the cuts follow a steady 120 BPM rhythm.` (opening "… cuts through the work to a steady rhythm …"). Other styles, only when a beat option was asked for or accepted: "This track has no clear beat, so shot lengths follow the footage." / "This track has no clear beat, so the reveal stays where the cut works best." / both: "This track has no clear beat, so shot lengths follow the footage and the reveal stays where the cut works best." Reveal on the biggest lift out of reach: "The reveal could not be moved onto the biggest lift with this footage, so it stays where the cut works best." Never "on the beat", "a beat of" or "downbeat" for such a track |

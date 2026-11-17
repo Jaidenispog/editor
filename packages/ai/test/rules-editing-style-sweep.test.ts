@@ -60,8 +60,14 @@ const STYLES_TO_TRY: Array<[string, EditingStyle]> = [
 
 const STEPS = Object.keys(STYLE_FALLBACK_NOTES) as StyleFallbackStep[];
 const fallbackStep = (rationale: string): StyleFallbackStep | null => STEPS.find((k) => rationale.includes(STYLE_FALLBACK_NOTES[k])) ?? null;
-/** The plan notes for transitions from the owner's videos (a fallback plan must not carry one from a failed attempt). */
-const PALETTE_NOTE = /(Cross-fades|Transitions) as in your videos|Straight cuts(?: with [^.]+)?, from your style\.|cross-fade lengths follow your style/;
+/**
+ * The plan notes for transitions from the owner's videos (a fallback plan must not carry one from a failed attempt):
+ * the joins and accents taken from them ("Straight cuts and cross-fades with a white flash at the reveal, from your
+ * style."), the style's own ("Some joins keep the style's own …", "… rather than the transitions from your videos."),
+ * and the clean promo's ("Clean promo stays calm, …", "… follow your style.").
+ */
+const PALETTE_NOTE =
+  /(?:Straight cuts|Cross-fades|Slides|Wipes|Zoom transitions|Iris openings|Dips to black|White flashes|An? (?:white flash|dip to black)|\d+ (?:white flashes|dips to black))[^.]*, from your style\.|Some joins keep the style's own|rather than the transitions from your videos|Clean promo stays calm|follow your style\.|(?:Cross-fades|Transitions) as in your videos/;
 
 const transcriptsOf = (i: PlannerInput) => {
   const out: Record<string, NonNullable<(typeof i.analyses)[number]['transcript']>['segments']> = {};

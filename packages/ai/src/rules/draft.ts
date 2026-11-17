@@ -35,6 +35,12 @@ export interface Draft {
   slot: string;
   /** True when the style decides this draft's incoming transition (false keeps a revised plan's choice). */
   autoTransition: boolean;
+  /**
+   * Who chose the incoming join, for the plan note on the transitions from the owner's videos (`paletteNoteFor`):
+   * `videos` when the accepted palette decided it (one of its transitions, an accent, or a straight cut by its share),
+   * `kept` when a revision kept it from the earlier version; absent when the style chose it.
+   */
+  joinFrom?: 'videos' | 'kept';
 }
 
 /** Output (play) duration of a draft. */

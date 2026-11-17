@@ -78,23 +78,29 @@ export function withPalette(ctx: BuildContext, base: Recipe['transitionFor']): R
   return (list, i) => {
     const d = list[i];
     if (!d || i === 0 || ctx.s.transitions === 'none') return base(list, i);
+    /** Records who chose the join (the palette, or the style), for the plan note (paletteNoteFor). */
+    const by = (videos: boolean, t: Draft['transitionIn']): Draft['transitionIn'] => {
+      d.joinFrom = videos ? 'videos' : undefined;
+      return t;
+    };
     const reveal = i === revealIndex(styleId, list);
-    if (reveal && styleId !== 'clean_promo' && es.accent) return { type: es.accent.type, durationSec: es.accent.durationSec };
-    if (reveal && (styleId === 'cinematic_reveal' || styleId === 'before_after')) return base(list, i);
-    if (styleId === 'before_after' && d.slot === 'hold2') return base(list, i);
+    if (reveal && styleId !== 'clean_promo' && es.accent) return by(true, { type: es.accent.type, durationSec: es.accent.durationSec });
+    if (reveal && (styleId === 'cinematic_reveal' || styleId === 'before_after')) return by(false, base(list, i));
+    if (styleId === 'before_after' && d.slot === 'hold2') return by(false, base(list, i));
     const hard = frac(i, ctx.s.attempt) < palette.hardCutShare;
     if (styleId === 'clean_promo') {
       // Clean promo keeps its calm look: only the straight-cut share and the cross-fade length are taken.
-      if (hard) return null;
+      if (hard) return by(true, null);
       const b = base(list, i);
-      if (!b) return null;
-      return palette.types.some((t) => t === 'fade' || t === 'dissolve') ? { ...b, durationSec: palette.durationSec } : b;
+      if (!b) return by(false, null);
+      return palette.types.some((t) => t === 'fade' || t === 'dissolve') ? by(true, { ...b, durationSec: palette.durationSec }) : by(false, b);
     }
-    if (hard) return null;
+    if (hard) return by(true, null);
     let types = palette.types;
     if (styleId === 'cinematic_reveal' || ctx.s.transitions === 'calm') types = types.filter((t) => CALM_TRANSITIONS.includes(t));
-    if (types.length === 0) return palette.types.length === 0 ? null : base(list, i);
-    return { type: types[i % types.length]!, durationSec: palette.durationSec };
+    // No palette transition this style may use here (calm transitions only): the style keeps its own.
+    if (types.length === 0) return palette.types.length === 0 ? by(true, null) : by(false, base(list, i));
+    return by(true, { type: types[i % types.length]!, durationSec: palette.durationSec });
   };
 }
 
@@ -132,17 +138,19 @@ export function applyMontagePalette(ctx: BuildContext, drafts: Draft[], grid: Be
     last.transitionIn = null;
   }
   let lastAccent = Number.NEGATIVE_INFINITY;
-  let accents = 0;
   let others = 0;
   for (let j = 1; j < drafts.length; j++) {
     const t = cutTime(drafts, j);
     const idx = nearestBeatIndex(grid, t);
     const final = j === drafts.length - 1;
     const accent = es.accent;
+    // Who chose the join, for the plan note (paletteNoteFor): the palette, unless the join already has the montage's own
+    // transition or the palette wanted a transition here that the footage has no room for (the montage's own straight
+    // cut stays).
+    drafts[j]!.joinFrom = drafts[j]!.transitionIn ? undefined : 'videos';
     if (accent && ((accent.everyBeats && idx % accent.everyBeats === 0 && t - lastAccent >= 2 - 1e-6) || final)) {
       if (placeAroundCut(drafts, j, accent.type, accent.durationSec, ACCENT_PEAK_FRACTION)) {
         lastAccent = t;
-        accents++;
         continue;
       }
     }
@@ -151,10 +159,12 @@ export function applyMontagePalette(ctx: BuildContext, drafts: Draft[], grid: Be
       if (ctx.s.transitions === 'calm') types = types.filter((x) => CALM_TRANSITIONS.includes(x));
       const type = types[others % Math.max(1, types.length)];
       if (type && placeAroundCut(drafts, j, type, Math.min(palette.durationSec, 0.4), 0.5)) others++;
+      else drafts[j]!.joinFrom = undefined;
     }
   }
-  // The note describes the accents the finished plan has (see paletteNoteFor), so it is written once the plan is final.
-  if (accents > 0 && es.accent) ctx.notes.push(PALETTE_NOTE_SLOT);
+  // The note describes the joins and accents the finished plan has (see paletteNoteFor), so it is written once the plan
+  // is final.
+  ctx.notes.push(PALETTE_NOTE_SLOT);
 }
 
 /**
@@ -164,14 +174,10 @@ export function applyMontagePalette(ctx: BuildContext, drafts: Draft[], grid: Be
  */
 export const PALETTE_NOTE_SLOT = '\u0000accepted transitions';
 
-/** Notes for fitted styles once the palette has shaped the joins. */
+/** Notes for fitted styles once the palette has shaped the joins: written from the finished plan (paletteNoteFor). */
 export function notePalette(ctx: BuildContext): void {
   const es = ctx.s.styleFromVideos;
   if (!es?.palette || ctx.input.styleId === 'beat_montage' || ctx.s.transitions === 'none') return;
-  if (ctx.input.styleId === 'clean_promo') {
-    ctx.notes.push(es.accent ? 'Clean promo stays calm, so it keeps straight cuts but no flashes.' : 'Straight cuts and cross-fade lengths follow your style.');
-    return;
-  }
   ctx.notes.push(PALETTE_NOTE_SLOT);
 }
 
@@ -183,20 +189,24 @@ export interface PlacedAccents {
   everyBeats: number | null;
   /** True when the join into the reveal (the finished look) is an accent. */
   atReveal: boolean;
-  /** Any other accent (for example one kept by a revision from where the earlier version had it). */
+  /** Any other accent the palette placed (for example a montage accent whose peak is not on such a beat). */
   other: number;
 }
 
+/** Who chose each join of a plan, by segment index (see `Draft.joinFrom`; absent: the style). */
+export type JoinOrigins = ReadonlyArray<Draft['joinFrom']>;
+
 /**
- * Finds the accents (the accepted accent type) in a finished plan's segments, timed as the renderer plays them: the one
- * into the reveal (`revealAt`, the segment index of the finished look), the beat montage's on every `everyBeats`-th beat
- * of `grid` (peak within 40 ms of a beat whose index is a multiple of it), and the rest. Pure.
+ * Finds the accents of the owner's palette (the accepted accent type, at joins the palette chose: `joinFrom`) in a
+ * finished plan's segments, timed as the renderer plays them: the one into the reveal (`revealAt`, the segment index of
+ * the finished look), the beat montage's on every `everyBeats`-th beat of `grid` (peak within 40 ms of a beat whose index
+ * is a multiple of it), and the rest. Pure.
  */
-export function placedAccents(styleId: StyleId, segments: readonly Segment[], revealAt: number, grid: BeatGrid | null, accent: NonNullable<ResolvedEditingStyle['accent']>): PlacedAccents {
+export function placedAccents(styleId: StyleId, segments: readonly Segment[], joinFrom: JoinOrigins, revealAt: number, grid: BeatGrid | null, accent: NonNullable<ResolvedEditingStyle['accent']>): PlacedAccents {
   const placed: PlacedAccents = { type: accent.type, onBeats: [], everyBeats: accent.everyBeats, atReveal: false, other: 0 };
   computeTimeline({ segments: [...segments] }).segments.forEach((p, i) => {
     const t = p.segment.transitionIn;
-    if (i === 0 || !t || t.type !== accent.type) return;
+    if (i === 0 || !t || t.type !== accent.type || joinFrom[i] !== 'videos') return;
     if (i === revealAt) return void (placed.atReveal = true);
     const peak = p.startSec + ACCENT_PEAK_FRACTION * t.durationSec;
     if (styleId === 'beat_montage' && grid && accent.everyBeats) {
@@ -235,20 +245,99 @@ export function describeAccents(p: PlacedAccents): string | null {
   return parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`;
 }
 
+/** The kind of a join in plain words (plural). */
+function joinKind(t: TransitionType | null): string {
+  switch (t) {
+    case null:
+      return 'straight cuts';
+    case 'fade':
+    case 'dissolve':
+      return 'cross-fades';
+    case 'slideup':
+    case 'slidedown':
+      return 'slides';
+    case 'wipeleft':
+    case 'wiperight':
+      return 'wipes';
+    case 'zoomin':
+      return 'zoom transitions';
+    case 'circleopen':
+      return 'iris openings';
+    case 'fadeblack':
+      return 'dips to black';
+    case 'fadewhite':
+      return 'white flashes';
+  }
+}
+
+/** The order join kinds are listed in. */
+const JOIN_KIND_ORDER = ['straight cuts', 'cross-fades', 'cross-fade lengths', 'slides', 'wipes', 'zoom transitions', 'iris openings', 'dips to black', 'white flashes'];
+
+/** "a", "a and b", "a, b and c". */
+function listOf(words: readonly string[]): string {
+  return words.length <= 1 ? (words[0] ?? '') : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`;
+}
+
+function capitalised(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 /**
- * The plan note for the accepted transitions, written from the finished plan (design §4.3.1.6): the joins as accepted
- * ("Straight cuts", "Cross-fades as in your videos" or "Transitions as in your videos") and the accents the plan really
- * has, where it has them. Fitted styles place one accent, at the reveal; the beat montage places them on every
- * `everyBeats`-th beat where the footage allows, and at the reveal. Null for a beat montage with no accent left, which
- * has no note (as when none could be placed).
+ * The plan note for the accepted transitions, written from the finished plan (design §4.3.1.6): the joins the plan has,
+ * crediting the owner's videos only with those the palette really chose (`joinFrom`) and naming the style's own.
+ * - Joins from the palette by kind ("Straight cuts and cross-fades"), then its accents where they are ("with a white
+ *   flash at the reveal"; the beat montage's "on every 4th beat from 0:04 to 0:12" only for an unbroken run), ending
+ *   ", from your style." Then "Some joins keep the style's own cross-fades." for the joins the style chose (a calm style
+ *   keeping its own cross-fades instead of slides from the videos; a montage's straight cuts where the footage had no
+ *   room for a cross-fade). A straight cut looks the same whoever chose it, so the style's own are named only when the
+ *   palette chose none.
+ * - Nothing from the palette: "This style keeps its own cross-fades rather than the transitions from your videos." A
+ *   revision that kept joins from the earlier version (some may be from the videos) says "Some joins keep the style's
+ *   own cross-fades." instead; the kept joins themselves are neither credited nor described.
+ * - Clean promo takes only the straight-cut share and the cross-fade length: "Straight cuts and cross-fade lengths
+ *   follow your style.", or, with an accent in the palette and none in the plan, "Clean promo stays calm, so it uses
+ *   straight cuts from your style but no white flashes."
+ * Null when there is nothing to say. Pure.
  */
-export function paletteNoteFor(es: ResolvedEditingStyle, styleId: StyleId, segments: readonly Segment[], revealAt: number, grid: BeatGrid | null): string | null {
+export function paletteNoteFor(es: ResolvedEditingStyle, styleId: StyleId, segments: readonly Segment[], joinFrom: JoinOrigins, revealAt: number, grid: BeatGrid | null): string | null {
   const p = es.palette;
   if (!p) return null;
-  const accents = es.accent ? describeAccents(placedAccents(styleId, segments, revealAt, grid, es.accent)) : null;
-  if (styleId === 'beat_montage' && !accents) return null;
-  if (p.types.length === 0) return accents ? `Straight cuts with ${accents}, from your style.` : 'Straight cuts, from your style.';
-  return `${p.types.includes('fade') ? 'Cross-fades' : 'Transitions'} as in your videos${accents ? `, with ${accents}` : ''}, from your style.`;
+  const accentType = es.accent?.type ?? null;
+  const credited = new Set<string>();
+  const own = new Set<string>();
+  let kept = false;
+  let accentInPlan = false;
+  segments.forEach((seg, i) => {
+    if (i === 0) return;
+    const t = seg.transitionIn;
+    if (t && t.type === accentType) accentInPlan = true;
+    if (joinFrom[i] === 'kept') return void (kept = true);
+    if (joinFrom[i] !== 'videos') return void own.add(joinKind(t?.type ?? null));
+    if (t && t.type === accentType) return; // described with the accents
+    // Clean promo keeps its own calm cross-fades and takes only their length from the palette.
+    if (styleId === 'clean_promo' && t) {
+      if (Math.abs(t.durationSec - p.durationSec) <= 0.005) credited.add('cross-fade lengths');
+      else own.add(joinKind(t.type));
+      return;
+    }
+    credited.add(joinKind(t?.type ?? null));
+  });
+  if (credited.has('straight cuts')) own.delete('straight cuts');
+  const fromVideos = JOIN_KIND_ORDER.filter((k) => credited.has(k));
+  const theirOwn = listOf(JOIN_KIND_ORDER.filter((k) => own.has(k)));
+  const someOwn = theirOwn ? `Some joins keep the style's own ${theirOwn}.` : '';
+  const ownOnly = !theirOwn ? null : kept ? someOwn : `This style keeps its own ${theirOwn} rather than the transitions from your videos.`;
+  const withOwn = (text: string) => (someOwn ? `${text} ${someOwn}` : text);
+  if (styleId === 'clean_promo') {
+    if (es.accent && !accentInPlan) {
+      const none = `no ${joinKind(es.accent.type)}`;
+      return withOwn(`Clean promo stays calm, so it uses ${fromVideos.length ? `${listOf(fromVideos)} from your style but ${none}` : `${none} from your style`}.`);
+    }
+    return fromVideos.length ? withOwn(`${capitalised(listOf(fromVideos))} follow your style.`) : ownOnly;
+  }
+  const accents = es.accent ? describeAccents(placedAccents(styleId, segments, joinFrom, revealAt, grid, es.accent)) : null;
+  if (!fromVideos.length && !accents) return ownOnly;
+  return withOwn(`${capitalised(`${listOf(fromVideos)}${fromVideos.length && accents ? ' with ' : ''}${accents ?? ''}`)}, from your style.`);
 }
 
 /** Moves each accent so its peak lands on the nearest beat (fitted styles with music). */
