@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import pino from 'pino';
 import { AppError, DEFAULT_EDITING_STYLE, DEFAULT_SETTINGS, STYLE_IDS, computeTimeline, editLengthForTrack, validateEditPlan, type EditPlan, type EditingStyle, type StyleId } from '@studio/core';
-import { RulesPlanner, plannedTargetSec, type PlannerInput } from '@studio/ai';
+import { RulesPlanner, plannedTargetSec, type EditPlanner, type PlannerInput } from '@studio/ai';
 import { planWithFallback } from '../src/lib/planning.js';
 import { planningContextFor, validationContextFor } from '../src/handlers/generate.js';
 import type { LoadedFootage, LoadedMusic } from '../src/lib/plan-context.js';
@@ -109,6 +109,29 @@ describe('the worker judges a plan by the length the planners aimed for', () => 
   it('a track too short to trim to is refused with the shared message', async () => {
     const input = inputFor('process_story', clickTrack(30), 45, 0, DEFAULT_EDITING_STYLE);
     expect(await viaWorker(input)).toBe('The chosen track is 30 seconds long, which is shorter than the 45-second edit. Choose a longer track or a shorter length.');
+  });
+
+  it('refuses a track too short for the edit before the AI planner is asked, for a first plan and a revision alike', async () => {
+    let asked = 0;
+    const ai: EditPlanner = {
+      name: 'anthropic',
+      model: 'test-model',
+      planEdit: async () => {
+        asked++;
+        throw new AppError('PROCESSING_FAILED', 'The AI planner was asked.');
+      },
+    };
+    const message = 'The chosen track is 30 seconds long, which is shorter than the 45-second edit. Choose a longer track or a shorter length.';
+    const previousPlan = rules.plan(inputFor('process_story', clickTrack(30), 20, 0, DEFAULT_EDITING_STYLE));
+    for (const input of [
+      inputFor('process_story', clickTrack(30), 45, 0, DEFAULT_EDITING_STYLE),
+      inputFor('process_story', clickTrack(30), 45, 0, DEFAULT_EDITING_STYLE, { previousPlan, revisionInstruction: 'Make it 45 seconds.' }),
+    ]) {
+      const { footage, music } = loaded(input);
+      const outcome = planWithFallback(ai, rules, input, planningContextFor(footage, music, input, false, []), logger, new AbortController().signal);
+      await expect(outcome).rejects.toThrow(new AppError('PROCESSING_FAILED', message));
+    }
+    expect(asked).toBe(0);
   });
 });
 
