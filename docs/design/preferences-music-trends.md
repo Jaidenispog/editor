@@ -320,39 +320,79 @@ real videos have been seen (§13.4). Frame counts assume 30 fps and scale with t
 
 Detected in this order on the measured span; each frame belongs to at most one event.
 
-1. **Flashes and dips (white/black).** Baseline `Yb` = median YAVG of the 0.5 s before the event. A white event is a
-   run of frames with YAVG ≥ max(200, Yb + 60); a black event a run with YAVG ≤ 30 and `Yb − YAVG ≥ 0.5 × Yb`.
-   The event spans from the first frame where |YAVG − Yb| ≥ 15 to the frame where YAVG settles within 15 of the
-   next shot's level (capped at 1.5 s); its time is the frame of peak (white) or trough (black) luma. Brightness
-   alone is not enough: the extreme frame must be nearly uniform (10th–90th percentile spread of the Pass B grey frame
-   ≤ 24 levels, so a caption does not matter), or the brightness must ramp over ≥ 2 frames each way; the ramp frames
-   must be blends towards the extreme, and the picture must not be zooming into it (FFmpeg's `zoomin` passes through
-   a single-colour frame). Otherwise the frames go to the cut test: a short bright or dark *shot* between two hard
-   cuts is two cuts, not a flash. A uniform run at the extreme for more than 0.6 s is a black/white screen; only a
-   screen at the very start or after the last join is a title or end screen and left out of the shots — the cut (or
-   fade) into a screen inside the video counts as a join. A long bright or dark run with picture detail is just a
-   shot. Uniformity is judged frame by frame, not on the brightest or darkest frame alone: inside a long run, a screen
-   is uniform frames for more than 0.6 s that start within 0.5 s of the run (a cut or ramp into it) or right after a
-   cut (scene score ≥ 0.18 within a frame); the detailed frames before it go to the cut test, so a bright shot followed
-   by a white end card keeps its cut, and a light shot that drifts towards a uniform frame stays a shot. Kind:
-   `fade_white` / `fade_black`. If NCC(frame before, frame after) ≥ 0.6, the flash happened inside one shot
-   (`inShot`); it maps the same way, because the renderer can only place it at a join.
+1. **Flashes, dips and screens (white/black).** Baseline `Yb` = median YAVG of the 0.5 s before the frame. A white
+   run is frames with YAVG ≥ max(200, Yb + 60); a black run frames with YAVG ≤ 30 and `Yb − YAVG ≥ 0.5 × Yb`. Inside
+   a run, frames are judged one by one, not on the brightest or darkest frame alone; a frame is *uniform* when the
+   10th–90th percentile spread of its Pass B grey frame is ≤ 24 levels (so a caption does not matter).
+   - **Screens (title, end and mid-video cards).** A screen starts at uniform frames that come right after a cut into
+     them: a scene score ≥ 0.18 within a frame of the first uniform frame, at least 0.1 s after the start of the run
+     (the last steps of FFmpeg's steep `fadeblack`/`fadewhite` score as high as a cut but are the fade into the card).
+     It starts at the cut frame: the largest scene score of the first uniform frame and the frames either side (at 60
+     or 24 fps a Pass A frame can be looked up on the grey frame before it). The frames with picture detail before it
+     go to the cut test, so a bright shot before a white end card keeps its cut. Without such a cut the uniform frames
+     must start within 0.5 s of the start of the run, and the screen takes the run from its start and the frames up to
+     0.5 s before it whose YAVG is already 15 or more away from `Yb` (a cut or fade into the card); a short bright or
+     dark shot of up to 0.5 s cut softly (scene score below 0.18) into a card is taken into the screen with it, and its
+     cut is lost. An end screen found this way (one that goes on to the end of the span) starts with the whole fade
+     into it: the frames before it whose YAVG moves towards its white or black by at least 30 levels per second, up to
+     1.5 s, because a slow fade starts its run late (the baseline follows the ramp). Uniform frames that start later
+     in the run without a cut are a shot drifting towards white or black, which stays a shot.
+     The screen then goes on while the frame still shows the card: at least half of its grey pixels within 15 levels
+     of the card's last uniform frame, and the pixels that changed confined to part of the frame. A row or column of
+     the grey frame counts as changed when at least 5 % of its pixels changed; the changed rows must be fewer than 90 %
+     of the rows, and not 70 % or more of the rows together with 70 % or more of the columns. A logo, banner or text
+     that pops, fades, scales or slides onto the card (up to about 40 % of the frame, with untouched rows above or
+     below it) and a glitch of up to two frames (at 30 fps) after which the card is back stay in the screen, also once
+     the overlay pulls the brightness out of the run. A change that replaces most of the frame or reaches across it
+     ends the screen: a cut to another shot, also to a mostly blown-out shot inside the same white run or a mostly
+     black one inside a black run (which keeps its cut), or a fade out of the card. The cut out of the card is the
+     larger scene score of its last frame and the next. A screen lasts more than 0.6 s from the cut into it (or from
+     its first uniform frame), the frames with an overlay included.
+   - Only a screen that starts in the first 0.1 s of the span or after the last join is a title or end screen, and
+     the cut or fade into it is not a join. An end screen (white or black) that runs to the end of the video (to
+     within 0.25 s) is left out of every measurement (shots, zooms, beat, drop and music stop where it starts) and its
+     length is stored as `endScreenTrimmedSec`, as for the dark end part of §4.3.1.2. A title screen is reported but
+     stays the first shot, and the cut out of it is a join (a title from the very first frame is not found, and a fade
+     out of a title is lost, see the known limits in §4.3.1.10). A screen inside the video stays in the shots around
+     it; the cut (`hard`) or fade (`fade_white` / `fade_black`, when the screen took frames before its run) into it
+     counts as a join, and so does the cut out of it.
+   - **Flashes and dips.** A run of up to 0.6 s with no screen in it is a flash or dip. The event spans from the first
+     frame where |YAVG − Yb| ≥ 15 to the frame where YAVG settles within 15 of the next shot's level (capped at
+     1.5 s); its time is the frame of peak (white) or trough (black) luma. Brightness alone is not enough: the extreme
+     frame must be uniform, or the brightness must ramp over ≥ 2 frames each way; the ramp frames must be blends
+     towards the extreme, and the picture must not be zooming into it (FFmpeg's `zoomin` passes through a
+     single-colour frame). Otherwise the frames go to the cut test: a short bright or dark *shot* between two hard cuts
+     is two cuts, not a flash. Kind: `fade_white` / `fade_black`. If NCC(frame before, frame after) ≥ 0.6, the flash
+     happened inside one shot (`inShot`); it maps the same way, because the renderer can only place it at a join.
+   - A longer run with no screen in it (picture detail) is just a shot.
+   - **An end card reached by a slow fade** (checked after step 4). From an ordinary shot, a fade of more than about
+     0.5 s into a white card never makes a white run (the 0.5 s baseline follows the ramp), so step 4 reads the fade
+     as a gradual join, or finds nothing there when the card's overlay animates in soon after (the local median of the
+     change rises). Among the last three events, the latest first, a gradual join (`cross_fade` or `unclear`) belongs
+     to an end card when the card goes on (as above) to the end of the span for more than 0.6 s from uniform frames at
+     the white (YAVG ≥ 200) or black (YAVG ≤ 30) extreme that either follow the join within 0.5 s (the join is the
+     fade into the card, and the screen starts with it) or come right before it with no event before them (the join
+     is the card's overlay animating in, and the screen starts with the fade into those frames, found as above). The
+     join and any events after it inside the card are dropped. Fades inside the video are never changed this way.
    *Prototype*: an `xfade=fadewhite` of 0.2 s read YAVG 125 → 244 then back over 5 frames; `fadeblack` 0.3 s read
    125 → 5. FFmpeg's `fadewhite`/`fadeblack` reach their extreme about 20 % into the transition (measured at 0.2,
    0.5 and 1.0 s durations), which the planner uses to put an accent's peak on the beat (§4.3.1.6).
-2. **Hard cuts.** Frame `t` is a cut when its scene score ≥ max(0.18, 8 × the median score over ±1 s), it is the
-   largest score within ±2 frames, both neighbours score ≤ 0.5 × it, it is not inside a flash event, and
-   NCC(frame t−2, frame t+2) < 0.5 (rules out fast motion and camera flashes), unless the frames either side look
-   clearly less alike than the frames within each side (by 0.25: two different shots that look alike). The frames 1/30 s
-   either side are also tested for a shift along each axis: when a shift halves their difference *and* the shifted
-   frames look alike (NCC of the overlap ≥ 0.5 and at most 0.1 below the NCC within each side), the spike is a slide or
-   camera move, not a cut. The likeness check matters: a detailed shot cut against a smooth one (a gradient, a plain
-   wall) can halve the difference just by cropping, with the shifted frames as unlike as before. *Prototype*: real
-   cuts scored 0.26–0.91; one scored 0.264, below `detectScenes`' default 0.3, which is why v2 does not reuse that
-   threshold.
+2. **Hard cuts.** Frame `t` is a cut when it is not taken by step 1, its scene score ≥ max(0.18, 8 × the median
+   score over ±1 s), it is the largest score within ±2 frames, both neighbours score ≤ 0.5 × it, and NCC of the grey
+   frames 2/30 s either side < 0.5 (rules out fast motion and camera flashes), unless those frames look clearly less
+   alike than the frames within each side (by 0.25: two different shots that look alike). The grey frames 1/30 s
+   either side are also tested for a shift along each axis, up to half the frame (a 0.15 s slide moves about half the
+   frame between them; a search over a third of the frame stopped short of it): when a shift of at least 2 grey pixels
+   halves their difference *and* the shifted frames look alike (NCC of the overlap ≥ 0.5 and at most 0.1 below the NCC
+   within each side), the spike is a slide or camera move, not a cut. The likeness check matters: a detailed shot cut
+   against a smooth one (a gradient, a plain wall) can halve the difference just by cropping, with the shifted frames
+   as unlike as before. *Prototype*: real cuts scored 0.26–0.91; one scored 0.264, below `detectScenes`' default 0.3,
+   which is why v2 does not reuse that threshold.
    A busy single shot (Game-of-Life pattern) reached 0.27 on the frame after a cut, rejected by the ±2-frame
-   local-maximum rule. A spike inside a short burst of change (busy on both sides, or a spike below 0.35 followed by
-   a burst) belongs to a gradual join and is left for step 4 (FFmpeg's `zoomin` and blur transitions both have one).
+   local-maximum rule. A spike inside a short burst of change belongs to a gradual join and is left for step 4
+   (FFmpeg's `zoomin` and blur transitions both have one): at least 60 % of the frames in the 0.1 s after it change
+   clearly more than usual (as in step 4), and so do 60 % of the frames in the 0.1 s before it, or the spike is below
+   0.25 and the burst is over (under half of the frames 0.6–1 s after it still busy).
 3. **Punch-in jumps.** A cut where the scale fit (§4.3.1.3d step 2) between the frame before and the frame
    after finds `s` in 1.08–1.6 with residual ≤ 0.4 × the unscaled residual is reclassified `punch_in`: the same
    shot, cropped in. It still counts as a cut for pace and beat sync, but not as a transition; it feeds the zoom
@@ -369,10 +409,19 @@ Detected in this order on the measured span; each frame belongs to at most one e
      than the shots around them (median `lavfi.blur` < 1.5 × the neighbours: a blur transition is never a
      cross-fade). *Prototype*: a 0.5 s join kept
      scene scores ≤ 0.03 while YDIF sat at 1.9 × baseline and YAVG ramped linearly between the two shots' levels.
-   - **Slide/wipe**: per-frame change concentrates in a band (≥ 55 % of the |ΔF| in the top 30 % of rows or
-     columns) whose centroid moves the same way for ≥ 3 frames. Rows → `slide_vertical` with direction up/down;
-     columns → `wipe_horizontal` with direction left/right. *Prototype*: an `xfade=slideup` of 0.3 s kept scene
-     scores ≤ 0.09 while YDIF ramped from 11 to 37.
+   - **Camera move inside one shot** (a pan or tilt, even a whip pan; not a join, and the shot is not split there),
+     tested on windows that are not cross-fades: the frames 0.1 s either side of the window (no cut or flash lies that
+     close) are compared after moving the earlier one by the sum of the window's step-to-step shifts (each step
+     searched as in step 2, counted where the shift halves the difference). When that sum leaves the moved frames
+     overlapping by at least a quarter of the frame, and either the best shift within 15 % of the sum or the single
+     before/after shift (when it points the same way) leaves at most half the difference with the overlap correlating
+     at NCC ≥ 0.6, the window is the camera moving. A slide between two shots also moves the picture, but by about a
+     whole frame, so it does not overlap by a quarter.
+   - **Slide/wipe**: the step-to-step shift (searched up to a third of the frame, counted where it halves the
+     difference) points the same way for ≥ 3 steps with at most one the other way, or per-frame change concentrates in
+     a band (≥ 55 % of the |ΔF| in the top 30 % of rows or columns) whose centroid moves the same way for ≥ 3 frames.
+     Rows → `slide_vertical` with direction up/down; columns → `wipe_horizontal` with direction left/right.
+     *Prototype*: an `xfade=slideup` of 0.3 s kept scene scores ≤ 0.09 while YDIF ramped from 11 to 37.
    - **Zoom transition** (`zoom`): on frames that are not blurrier than the neighbours, the frame-to-frame scale fit
      counts only where it explains the change (residual ≤ 0.5 × the unscaled residual on a textured frame, as for
      zooms in shots); ≥ 3 such pairs at ≥ 1.03 (or ≤ 1/1.03) and at most one in four the other way.
@@ -798,7 +847,57 @@ track is
 | R10 124 BPM, every beat | a cut on each beat of a 124 BPM click for 15 s (beats not on the frame grid) | one cut per beat (≈ 31) | tempo 124 ± 2; `within1Frame` ≥ 85 %; `beatsPerCut` 1 |
 | R11 random cuts | 15 cuts at seeded random times over the 120 BPM click | chance alignment | beat `reportable: false`; no beat-sync suggestion |
 | X1–X8 review edge cases | dark and bright shots of 2 s between hard cuts; 0.3 s bright inserts between hard cuts; `fadeblack` 0.4 s; `zoomin` 0.4 s out of textured shots; `hblur` 0.4 s; `smoothleft/up/right/down`; 0.5 s and 1 s cross-fades with hard cuts on the 120 BPM beat at 60 and 25 fps | flash and screen rules, zoom gate, blur transitions, soft wipes, frame-rate independence | X1 5 hard, no flash or screen, 6 shots; X2 4 hard, no flash; X3 5 dips; X4 ≥ 4 of 5 zoom, no flash or cross-fade; X5 no zoom or cross-fade; X6 ≥ 4 of 5 right axis and direction, no cross-fade; X7/X8 ≥ 3 of 4 cross-fades within 0.15 s of their length (a 1 s one among them), cuts within a frame, beat 120 ± 1.5 BPM with ≥ 85 % of cuts within 80 ms |
-| X9–X11 regression cases | X2 with the last shot's gradient colours that lost a cut while FFmpeg still picked them at random (X9 light grey to blue, X10 light yellow-green); X2 with the last shot a white end card after a brighter insert (X11) | a cut into a smooth shot is not a slide; screens are uniform frame by frame | X9/X10 4 hard within a frame of the truth, no flash or screen; X11 3 hard (the bright shot keeps its cut), one end screen from 5.3 s |
+| X9–X11 regression cases | X2 with the last shot's gradient colours that lost a cut while FFmpeg still picked them at random (X9 light grey to blue, X10 light yellow-green); X2 with the last shot a white end card after a brighter insert (X11) | a cut into a smooth shot is not a slide; screens are uniform frame by frame; an end screen is left out of the measurements | X9/X10 4 hard within a frame of the truth, no flash or screen; X11 3 hard (the bright shot keeps its cut), one end screen from 5.3 s, `measuredSec` 5.3 ± 1 frame and `endScreenTrimmedSec` 2.7 ± 1 frame |
+| X12 steep fades into cards | `fadeblack` 0.5 s from SMPTE bars into a mid-video black card (text, grain), later `fadewhite` 0.5 s into a white end card | the last steps of a steep fade into a card are not a cut | 3 hard within a frame of 2, 6 and 7.5 s; exactly one `fade_black` in 4.0–4.65 s and no hard cut in it; one end screen starting in 9.0–9.1 s and no event after 9 s |
+| X13 cards at 60 fps | 60 fps; a 1 s white card entered and left by cuts on frames 305 and 365 (k mod 6 = 5: looked up on the grey frame before), a white end card entered on frame 563 | a cut into a card is counted once, at its frame | 4 hard within 1/60 s of 2 s, 305/60, 365/60 and 8 s (none at 5.1 s or after 9.38 s); one end screen within 1/60 s of 563/60 |
+| X14 animated end card | a white end card whose dark banner (27 % of the frame) fades in 0.4–0.8 s into it | an overlay fading in keeps the card one screen | 2 hard (2 and 4 s); one end screen from 5.3 s; no event after 5.3 s |
+| X15 cards with overlays | a mid-video white card (4–6 s) whose logo pops in 0.8 s into it, with a 1-frame glitch at 1.2 s; a black end card whose light logo grows in 10 steps 0.2–0.7 s into it | overlays and glitches stay inside the card; a mid-video card is one join in and one out | 4 hard (2, 4, 6, 7.5 s), nothing between 4.05 and 5.95 s; one end screen from 9.3 s, no event after it |
+| X16 cards, then bright or dark shots | a white card, then a cut at 5.2 s to SMPTE bars brightened by 0.5; a white card, then a cut at 8.8 s to the Mandelbrot set brightened by 0.5 with contrast 1.5; a black card, then a cut at 12.4 s to a test pattern darkened by 0.55 (each cut inside the card's white or black run) | a cut out of a card into a different shot ends the card and counts, also when that shot keeps most of the card's white or black | 10 hard within a frame of the truth; no screen |
+| X17 fast slides | five 0.15 s `xfade` slides between textured shots and a smooth gradient or noisy wall | a 0.15 s slide moves half the frame between the compared frames | ≥ 4 of 5 with the right axis and direction; no hard cut inside a slide |
+| X18 camera pans in one shot | one 9 s shot: a 540 × 960 window moving over a 1080 × 1920 test pattern, two pans (250 and 300 px, 0.3 and 0.5 s) and two tilts (300 and 500 px, 0.2 and 0.4 s) | camera motion inside one shot is not a join | no event; 1 shot |
+| X19 slides between similar shots | six windows of one detailed still (the Mandelbrot set's seahorse valley), each 5–13 % of the frame from the one before, joined by `slideup`, `slideleft`, `slidedown`, `slideright` and `wiperight` of 0.3 s (the second 0.2 s) | a slide moves the picture a whole frame, a camera move part of one | ≥ 4 of 5 with the right axis and direction; no hard cut |
+| X20 slow fade into an end card | a 1 s `xfade=fade` from SMPTE bars into a white end card | a slow fade into an end card is its entry, not a join | 2 hard (2 and 4 s), no `cross_fade`; one end screen starting in 6.0–6.6 s; `measuredSec` equal to its start |
+| X21 slow fade into a black end card | a 1 s `xfade=fade` from SMPTE bars into a black end card whose light banner (31 % of the frame) fades in 0.6 s after the fade | the end screen starts with the fade (its dark run starts late in it) | 2 hard (2 and 4 s), no event after 6 s; one end screen starting in 6.0–6.5 s; `measuredSec` equal to its start |
+| X22 slow fade, then a banner | a 1.2 s `xfade=fade` into a white end card whose dark banner (31 %) fades in 0.6 s after the fade (the fade alone reads as no event, the banner as a cross-fade) | the banner animating in belongs to the end card, which starts with the fade | 2 hard (2 and 4 s), no event after 6 s; one end screen starting in 6.0–6.6 s; `measuredSec` equal to its start |
+
+**Known limits (check on the owner's real videos).** The X fixtures pin what the rules do on synthetic clips; these
+cases are measured as described, not as a person would count them (numbers from the round-2 synthetic battery):
+
+- A title card from the very first frame is not detected (no earlier picture to compare it with). Left by a cut,
+  nothing stored changes (the title stays the first shot and the cut out of it is a join either way); a logo popping
+  onto it can read as a cut.
+- Slides and whips of about 0.1 s (3 frames at 30 fps) are shorter than a gradual window: they read as hard cuts (two
+  at 60 fps) or are missed.
+- A short (up to 0.5 s), bright and low-contrast shot cut softly (scene score below 0.18) into a white card is taken
+  into the screen and its cut is lost; the same for a dark shot before a black card.
+- A cut from a card into a shot that keeps the card's white (blown out) or black in at least half of its pixels, with
+  its detail in fewer than 90 % of the rows and not in 70 % of both the rows and the columns, is taken into the screen
+  and its cut is lost (held-out clips: a shot that is white above its lower 45 %, a lit doorway in a black frame).
+  Such cuts keep their cut when the shot's detail reaches every row (SMPTE bars brightened by 0.6, YAVG 224; a test
+  pattern brightened with more contrast, YAVG 215; a test pattern darkened to YAVG 16) or most rows and columns (the
+  Mandelbrot set brightened, YAVG 232: 77 % of the rows and 94 % of the columns), as do SMPTE bars brightened by 0.5
+  and ordinary shots: 11 of the 12 battery clips with a cut out of a card are right (the 12th loses a later cut
+  between two brightness versions of one test pattern, in every version of the code).
+- An overlay that reaches nearly every row of a card (a thick border drawn round it, a full-height side banner) ends
+  the screen as a cut would, and the rest of the card is measured as a shot after a cut or fade (held-out clips: 4 of
+  4, white and black). An overlay over more than about half of the card ends the screen too. Overlays of up to about
+  40 % with untouched rows above or below stay in the card: logos, banners, text lines, a price list and tall or wide
+  photo insets in 14 of 14 held-out layouts, small confetti over the whole card in 2 of 2; the battery's overlay
+  clips are right in 99 of 104 (the other five are wrong in every version: cards with a logo from their first frame,
+  a title from the first frame, a missed cross-fade).
+- A card left by a cross-fade (a title, or a card inside the video) loses that fade: its frames touch the screen and
+  are not tested as a join.
+- A slow fade into an end card starts the end screen where the fade starts: at the gradual join when step 4 found
+  one, otherwise where YAVG starts moving towards the card's white or black at 30 levels per second or more. A slower
+  fade (from a dark shot at YAVG 40 into black over 1.5 s, say) is not followed back to its start, and its first part
+  is measured with the last shot.
+- Zoom-ins read differently through the worker proxy: X4 gives 3 zooms plus 2 wipes on the CRF 26 proxy (4 or 5 zooms
+  on the CRF 18 fixture).
+- Coloured end and title cards (not white or black) are measured as shots, with their overlays. So is a white or
+  black card that carries a logo or text over more than about a tenth of the frame from its very first frame (it is
+  never uniform): the cut into it counts as a join.
+- Whip pans that move most of a frame cannot be told from a slide and stay slides or wipes; handheld pans with
+  parallax, rotation or heavy blur may not line up when moved and also stay joins.
 
 **Unit (vitest, no FFmpeg)**: `packages/media` frame maths on hand-built metric arrays and tiny frames (cut rule
 edges, flash run lengths, linearity residual, band centroid direction, scale fit on a synthetic 72 × 128 frame

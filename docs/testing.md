@@ -237,11 +237,17 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   and without a cut there, R6 slides and wipes (axis and direction, no cross-fades), R7 a busy single shot (no joins),
   R8 a 3 s dark end screen skipped (± 0.2 s), R9 talking (beat not measured, never "off the beat"), R10 a cut on every
   beat at 124 BPM, R11 random cuts (not reportable), the review edge cases X1–X11 (bright and dark shots, bright
-  inserts, dips, zooms, blurs, soft wipes, 60 and 25 fps, a cut into a smooth shot, a white end card), a proxy without
-  sound, numbers only (no array longer than 8) and the AbortSignal. Fixture builds are reproducible (every random
-  input pinned, x264 on fixed slice threads), so a failure repeats on the next run. The frame maths also has
-  FFmpeg-free unit tests (parser, scale fit on known zooms, cross-fade vs wipe, band direction, shifts and whether the
-  shifted frames really look alike).
+  inserts, dips, zooms, blurs, soft wipes, 60 and 25 fps, a cut into a smooth shot, a white end card left out of the
+  measurements), X12–X22 from the second review (steep fades into cards, cards entered on odd frames at 60 fps,
+  overlays that fade, pop, glitch or grow on a card, cuts from a card to bright or dark shots that keep most of its
+  white or black, 0.15 s slides next to smooth shots, camera pans inside one shot, slides between similar-looking
+  shots, slow fades into white and black end cards, one with a banner fading in after it), a proxy without sound,
+  numbers only (no array longer than 8) and the AbortSignal. Fixture builds are reproducible (every random input
+  pinned, x264 on fixed slice threads), so a failure repeats on the next run. The frame maths also has FFmpeg-free
+  unit tests (parser, scale fit on known zooms, cross-fade vs wipe, band direction, shifts, the wider shift search,
+  whether the shifted frames really look alike, and the measuring constants pinned to
+  `REFERENCE_STYLE_ANALYSIS_VERSION`, which must be bumped when they change). Design §4.3.1.10 lists the known limits to
+  check on the owner's real videos.
 - Unit: `packages/core/test/reference-style.test.ts` (binomial kMin table 15 → 10, 30 → 17, 8 → 7; reasons the beat was
   not measured; drop on a step, single knock rejected, click windows smoothed; every palette family and the worked
   example; v1 → v2 reads; summary 1 of 1, 1 of 2 differs, 3 of 4 pooled, octave-folded tempos, older profiles only for
