@@ -1186,9 +1186,9 @@ export function describeStyleSignals(style: ReferenceStyleSignals, colourLook?: 
   return `${parts.join(' · ')} (estimates)`;
 }
 
-/** "Skipped a dark end screen in the last 3 s." or null. */
+/** "Skipped an end screen in the last 3 s." or null (a white or black end card, or a dark end part). */
 export function describeEndScreen(style: ReferenceStyleSignals): string | null {
-  return style.endScreenTrimmedSec >= 1 ? `Skipped a dark end screen in the last ${Math.round(style.endScreenTrimmedSec)} s.` : null;
+  return style.endScreenTrimmedSec >= 1 ? `Skipped an end screen in the last ${Math.round(style.endScreenTrimmedSec)} s.` : null;
 }
 
 /** Shown on a reference measured before v2. */

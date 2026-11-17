@@ -6,7 +6,12 @@ import { z } from 'zod';
  * audio or frames are kept: only counts, ratios, quartiles, the 8-point energy shape and the drop position.
  */
 
-/** Version of the measuring code, stored with each profile so older measurements can be recognised. */
+/**
+ * Version of the measuring code, stored with each profile so older measurements can be recognised. Bump it whenever
+ * the measuring semantics change, constants or logic (`REFERENCE_STYLE_MEASURE` and `measureReferenceStyle` in
+ * packages/media/src/analysis/reference-style.ts): a media test pins the constants to this version and fails when one
+ * moves without the other.
+ */
 export const REFERENCE_STYLE_ANALYSIS_VERSION = 1;
 
 /** Kinds of join between two shots the measurement can tell apart. */

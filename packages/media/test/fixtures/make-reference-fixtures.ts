@@ -286,6 +286,26 @@ export async function zoomFixture(dir: string): Promise<{ file: string; truthPus
 }
 
 /**
+ * X19: slides between similar-looking shots, windows of one detailed still (the Mandelbrot set's seahorse valley), each
+ * 5–13 % of the frame from the one before: a slide moves the picture by a whole frame, a camera move by part of one.
+ */
+export async function similarShotsFixture(dir: string): Promise<{ file: string; motion: Array<{ axis: 'x' | 'y'; direction: string }> }> {
+  const still = await buildStill(dir, 'seahorse', 'mandelbrot=s=1620x2880:start_x=-0.743643887037151:start_y=0.131825904205330:start_scale=0.03:maxiter=400:end_pts=1');
+  const window = ([x, y]: readonly [number, number]): ShotSpec => ({ still, filter: `crop=w=540:h=960:x=${x}:y=${y},noise=alls=6:allf=t:all_seed=99` });
+  const transitions = ['slideup', 'slideleft', 'slidedown', 'slideright', 'wiperight'];
+  const motion = [{ axis: 'y' as const, direction: 'up' }, { axis: 'x' as const, direction: 'left' }, { axis: 'y' as const, direction: 'down' }, { axis: 'x' as const, direction: 'right' }, { axis: 'x' as const, direction: 'right' }];
+  const spec: FixtureSpec = {
+    name: 'x19-slides-between-similar-shots',
+    shots: ([[500, 800], [560, 800], [560, 900], [500, 900], [530, 850], [600, 850]] as const).map(window),
+    joins: transitions.map((transition, i): JoinSpec => ({ type: 'xfade', transition, atSec: 2 * (i + 1), durationSec: i === 1 ? 0.2 : 0.3 })),
+    totalSec: 12.4,
+    audio: PINK_NOISE,
+    truth: { motion },
+  };
+  return { file: await buildFixture(dir, spec), motion };
+}
+
+/**
  * Edge cases from review (all SYNTHETIC, ground truth beside each): bright and dark shots joined by hard cuts (not
  * flashes or screens), dips to black, FFmpeg's zoomin, a horizontal blur, soft-edged wipes and cross-fades at 60 and
  * 25 fps with hard cuts on the beat.
@@ -313,6 +333,41 @@ export function edgeFixtureSpecs(): Record<string, FixtureSpec> {
     bpm: 120,
   };
   const textured = [0, 1, 3, 7, 0, 2].map((source): ShotSpec => ({ source }));
+  // Cards (round 2): a black card and a white end card with text, as at the end of a phone edit.
+  const blackCard: ShotSpec = {
+    lavfi: `color=c=black:s=${W}x${H}:r=${FPS}`,
+    filter: `drawtext=fontfile='${FONT}':text='THANKS FOR WATCHING':fontsize=34:fontcolor=0xdddddd:x=(w-tw)/2:y=(h-th)/2,drawbox=x=230:y=380:w=80:h=80:color=0xc0c0c0:t=fill`,
+    noise: 20,
+    hue: 0,
+  };
+  const whiteCard: ShotSpec = {
+    lavfi: `color=c=white:s=${W}x${H}:r=${FPS}`,
+    filter: `drawtext=fontfile='${FONT}':text='BOOK NOW':fontsize=44:fontcolor=0x222222:x=(w-tw)/2:y=(h-th)/2,drawtext=fontfile='${FONT}':text='link in bio':fontsize=26:fontcolor=0x555555:x=(w-tw)/2:y=(h-th)/2+60`,
+    noise: 10,
+    hue: 0,
+  };
+  /** A card whose dark (or light) banner, 31 % of the frame, fades in over 0.4 s from `at` seconds into the card. */
+  const bannerCard = (colour: 'white' | 'black', at: number): ShotSpec => {
+    const [banner, text] = colour === 'white' ? ['0x303030', '0x222222'] : ['0xdddddd', '0xdddddd'];
+    return {
+      lavfi: `color=c=${colour}:s=${W}x${H}:r=${FPS}[c];color=c=${banner}:s=${W}x300:r=${FPS},format=rgba,fade=t=in:st=${at}:d=0.4:alpha=1[b];[c][b]overlay=x=0:y=300,drawtext=fontfile='${FONT}':text='BOOK NOW':fontsize=44:fontcolor=${text}:x=(w-tw)/2:y=(h-th)/2+260[out0]`,
+      noise: 4,
+      hue: 0,
+    };
+  };
+  const plainCard = (colour: 'white' | 'black', fps: number, filter = 'drawbox=x=220:y=440:w=100:h=60:color=0x303030:t=fill'): ShotSpec => ({ lavfi: `color=c=${colour}:s=${W}x${H}:r=${fps}`, filter, noise: 0, hue: 0 });
+  // A light square growing in 10 steps between `start` and `end` seconds into the card (drawbox has no time variable).
+  const growingSquare = (colour: string, start: number, end: number, final: number) =>
+    Array.from({ length: 10 }, (_, i) => {
+      const size = Math.round((final * (i + 1)) / 10);
+      const from = start + ((end - start) * i) / 10;
+      const to = i === 9 ? 999 : start + ((end - start) * (i + 1)) / 10;
+      return `drawbox=x=${(W - size) / 2}:y=${(H - size) / 2}:w=${size}:h=${size}:color=${colour}:t=fill:enable='between(t,${from.toFixed(4)},${to.toFixed(4)})'`;
+    }).join(',');
+  const smoothGradient: ShotSpec = { lavfi: `gradients=s=${W}x${H}:r=${FPS}:speed=0.02:seed=3:c0=0xd9c5b2:c1=0x7d5a50` };
+  /** A camera move of `by` pixels from `from` seconds, lasting `dur` seconds (linear), for a crop expression. */
+  const move = (from: number, dur: number, by: number) => `${by}*clip((t-${from})/${dur},0,1)`;
+  const greyWall: ShotSpec = { lavfi: `color=c=0x8a8a8a:s=${W}x${H}:r=${FPS}`, noise: 14, hue: 0 };
   // X2 with the last shot's gradient colours set to two pairs that lost a cut when FFmpeg still picked them at random.
   const x2LastShot = (c0: string, c1: string): ShotSpec[] => [
     { source: 0 },
@@ -364,6 +419,130 @@ export function edgeFixtureSpecs(): Record<string, FixtureSpec> {
       totalSec: 8,
       audio: PINK_NOISE,
       truth: { cuts: [2, 2.3, 5], endScreenStartSec: 5.3, flashes: 0 },
+    },
+    // FFmpeg's steep fadeblack/fadewhite into a card: the last steps of the ramp score like a cut but are the fade into
+    // the card (a mid-video black card: one dip; a white end card: an end screen from the fade).
+    x12: {
+      name: 'x12-steep-fades-into-cards',
+      shots: [{ source: 0 }, { source: 3 }, blackCard, { source: 1 }, { source: 3 }, whiteCard],
+      joins: [{ type: 'cut', atSec: 2 }, { type: 'xfade', transition: 'fadeblack', atSec: 4, durationSec: 0.5 }, ...cuts([6, 7.5]), { type: 'xfade', transition: 'fadewhite', atSec: 9, durationSec: 0.5 }],
+      totalSec: 11.5,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 6, 7.5], dip: { atSec: 4, durationSec: 0.5 }, endScreenStartSec: 9 },
+    },
+    // At 60 fps a cut on a Pass A frame k with k mod 6 = 5 is looked up on the grey frame before it: a mid-video card
+    // entered there, and an end card entered there.
+    x13: {
+      name: 'x13-cards-entered-on-odd-frames-60fps',
+      shots: [{ source: 0 }, { source: 3 }, plainCard('white', 60), { source: 6 }, { source: 3 }, plainCard('white', 60)],
+      joins: cuts([2, 305 / 60, 365 / 60, 8, 563 / 60]),
+      totalSec: 11.5,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 305 / 60, 365 / 60, 8], endScreenStartSec: 563 / 60 },
+      fps: 60,
+    },
+    // A white end card whose dark banner (27 % of the frame) fades in 0.4–0.8 s into it, as in CapCut-style outros.
+    x14: {
+      name: 'x14-end-card-banner-fades-in',
+      shots: [
+        { source: 0 },
+        { source: 1 },
+        { source: 3 },
+        { lavfi: `color=c=white:s=${W}x${H}:r=${FPS}[w];color=c=0x303030:s=540x260:r=${FPS},format=rgba,fade=t=in:st=0.4:d=0.4:alpha=1[b];[w][b]overlay=x=0:y=350[out0]`, noise: 0, hue: 0 },
+      ],
+      joins: cuts([2, 4, 5.3]),
+      totalSec: 8,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4], endScreenStartSec: 5.3 },
+    },
+    // A mid-video white card whose logo pops in 0.8 s into it (and a 1-frame glitch at 1.2 s), then a black end card
+    // whose light logo grows in 10 steps 0.2–0.7 s into it: one join into and one out of the mid card, an end screen.
+    x15: {
+      name: 'x15-cards-with-overlays',
+      shots: [
+        { source: 0 },
+        { source: 3 },
+        plainCard('white', FPS, "drawbox=x=140:y=270:w=260:h=260:color=0x303030:t=fill:enable='gte(t,0.8)',drawbox=x=0:y=600:w=540:h=200:color=0x8a8a8a:t=fill:enable='between(t,1.19,1.21)'"),
+        { source: 1 },
+        { source: 7 },
+        plainCard('black', FPS, growingSquare('0xdddddd', 0.2, 0.7, 300)),
+      ],
+      joins: cuts([2, 4, 6, 7.5, 9.3]),
+      totalSec: 12,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4, 6, 7.5], midCard: [4, 6], endScreenStartSec: 9.3 },
+    },
+    // Cuts from a card to a different shot inside the same white or black run: each ends the card and counts. After a
+    // white card: SMPTE bars brightened by 0.5 (more than half of the card's pixels change), and the Mandelbrot set
+    // brightened and contrasted (a quarter changes, but across most rows and columns); after a black card: a test
+    // pattern darkened to YAVG 16 (a sixth changes, in strips down every row).
+    x16: {
+      name: 'x16-cards-then-bright-or-dark-shots',
+      shots: [
+        { source: 0 },
+        { source: 3 },
+        whiteCard,
+        { source: 3, filter: 'eq=brightness=0.5' },
+        { source: 7 },
+        whiteCard,
+        { source: 1, filter: 'eq=brightness=0.5:contrast=1.5', hue: 141 },
+        { source: 0 },
+        blackCard,
+        { source: 0, filter: 'eq=brightness=-0.55', hue: 141 },
+        { source: 1 },
+      ],
+      joins: cuts([2, 4, 5.2, 6.4, 7.6, 8.8, 10, 11.2, 12.4, 13.6]),
+      totalSec: 15,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4, 5.2, 6.4, 7.6, 8.8, 10, 11.2, 12.4, 13.6], screens: 0 },
+    },
+    // 0.15 s slides between smooth and textured shots: the picture moves about half the frame between the frames the
+    // cut test compares, beyond a third of the frame.
+    x17: {
+      name: 'x17-fast-slides-smooth-and-textured',
+      shots: [{ source: 0 }, { source: 3 }, smoothGradient, { source: 1 }, greyWall, { source: 7 }],
+      joins: ['slideup', 'slideleft', 'slidedown', 'slideright', 'slideup'].map((transition, i): JoinSpec => ({ type: 'xfade', transition, atSec: 2 * (i + 1), durationSec: 0.15 })),
+      totalSec: 12.15,
+      audio: PINK_NOISE,
+      truth: { motion: [{ axis: 'y', direction: 'up' }, { axis: 'x', direction: 'left' }, { axis: 'y', direction: 'down' }, { axis: 'x', direction: 'right' }, { axis: 'y', direction: 'up' }] },
+    },
+    // One shot with camera pans and tilts (a 540 × 960 window moving over a 1080 × 1920 picture): 0.2–0.5 s moves of
+    // 31–56 % of the frame are the camera moving, not slides or wipes.
+    x18: {
+      name: 'x18-camera-pans-in-one-shot',
+      shots: [{ lavfi: `testsrc2=s=1080x1920:r=${FPS}`, filter: `crop=w=540:h=960:x='100+${move(1.5, 0.3, 250)}-${move(5.5, 0.5, 300)}':y='400+${move(3.5, 0.2, 300)}-${move(7.5, 0.4, 500)}'` }],
+      joins: [],
+      totalSec: 9,
+      audio: PINK_NOISE,
+      truth: { joins: 0, moves: [{ axis: 'x', atSec: 1.5 }, { axis: 'y', atSec: 3.5 }, { axis: 'x', atSec: 5.5 }, { axis: 'y', atSec: 7.5 }] },
+    },
+    // A white end card reached by a 1 s linear cross-fade (the 0.5 s brightness baseline follows the ramp).
+    x20: {
+      name: 'x20-slow-fade-into-white-end-card',
+      shots: [{ source: 0 }, { source: 1 }, { source: 3 }, whiteCard],
+      joins: [...cuts([2, 4]), { type: 'xfade', transition: 'fade', atSec: 6, durationSec: 1 }],
+      totalSec: 9.5,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4], endScreenStartSec: 6 },
+    },
+    // Slow fades into end cards whose banner fades in later: 1 s into a black card (its dark run starts late in the
+    // fade), and 1.2 s into a white card with the banner 0.6 s after the fade (the fade reads as nothing, the banner as
+    // a cross-fade).
+    x21: {
+      name: 'x21-slow-fade-into-black-end-card',
+      shots: [{ source: 0 }, { source: 1 }, { source: 3 }, bannerCard('black', 1.6)],
+      joins: [...cuts([2, 4]), { type: 'xfade', transition: 'fade', atSec: 6, durationSec: 1 }],
+      totalSec: 10,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4], endScreenStartSec: 6 },
+    },
+    x22: {
+      name: 'x22-slow-fade-into-white-end-card-with-banner',
+      shots: [{ source: 0 }, { source: 1 }, { source: 3 }, bannerCard('white', 1.8)],
+      joins: [...cuts([2, 4]), { type: 'xfade', transition: 'fade', atSec: 6, durationSec: 1.2 }],
+      totalSec: 10.2,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4], endScreenStartSec: 6 },
     },
   };
 }

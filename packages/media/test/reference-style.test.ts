@@ -2,7 +2,7 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { CancelledError, paletteFromCounts, type ReferenceStyleSignals } from '@studio/core';
+import { CancelledError, paletteFromCounts, REFERENCE_STYLE_ANALYSIS_VERSION, type ReferenceStyleSignals } from '@studio/core';
 import { probeMedia } from '../src/ffprobe.js';
 import {
   blendFits,
@@ -13,13 +13,15 @@ import {
   ncc,
   parseFrameScores,
   percentileSpread,
+  REFERENCE_STYLE_MEASURE,
   scaleFit,
   shiftedNcc,
   shiftFit,
+  shiftFitWide,
   type ReferenceStyleMeasurement,
 } from '../src/analysis/reference-style.js';
 import { hasFfmpeg } from './analysis-fixtures.js';
-import { buildFixture, edgeFixtureSpecs, fixtureSpecs, zoomFixture, type FixtureSpec } from './fixtures/make-reference-fixtures.js';
+import { buildFixture, edgeFixtureSpecs, fixtureSpecs, similarShotsFixture, zoomFixture, type FixtureSpec } from './fixtures/make-reference-fixtures.js';
 
 const W = 72;
 const H = 128;
@@ -59,6 +61,65 @@ function zoomed(src: Uint8Array, s: number): Uint8Array {
 }
 
 describe('reference style frame maths (no FFmpeg)', () => {
+  it('pins the measuring constants to the analysis version stored with each profile', () => {
+    // Stored profiles carry REFERENCE_STYLE_ANALYSIS_VERSION (packages/core/src/reference-signals.ts) so measurements
+    // made with other measuring semantics can be told apart. A change to these constants (or to the measuring logic)
+    // needs a new version: bump it and pin the new constants here under the new number.
+    const pinned: Record<number, Record<string, number>> = {
+      1: {
+        maxSpanSec: 120,
+        gridFps: 30,
+        gridWidth: 72,
+        gridHeight: 128,
+        cutMinScore: 0.18,
+        cutMedianFactor: 8,
+        cutMaxNcc: 0.5,
+        cutNccDrop: 0.25,
+        cutShiftNccDrop: 0.1,
+        cutWeakScore: 0.25,
+        flashWhiteMin: 200,
+        flashWhiteLift: 60,
+        flashBlackMax: 30,
+        flashUniformSpread: 24,
+        screenMinSec: 0.6,
+        screenEntrySec: 0.5,
+        screenCutMinSec: 0.1,
+        screenCardShare: 0.5,
+        screenChangeLine: 0.05,
+        screenCutRows: 0.9,
+        screenCutSpread: 0.7,
+        screenGlitchSec: 0.067,
+        screenFadeRate: 30,
+        flashSettle: 15,
+        gradualYdifFactor: 1.6,
+        gradualMinSec: 0.13,
+        gradualMaxSec: 1.5,
+        gradualTouchSec: 0.1,
+        panMinOverlap: 0.25,
+        panMinNcc: 0.6,
+        crossFadeResidual: 0.35,
+        crossFadeMaxSpread: 0.35,
+        blurTransitionRatio: 1.5,
+        punchMin: 1.08,
+        punchMax: 1.6,
+        punchResidualRatio: 0.4,
+        zoomMinShotSec: 0.6,
+        zoomMinChange: 0.04,
+        zoomResidualRatio: 0.5,
+        zoomMinTexture: 4,
+        endScreenMinSec: 1.5,
+        endScreenMaxSec: 5,
+        endScreenMaxLuma: 40,
+      },
+    };
+    const v = REFERENCE_STYLE_ANALYSIS_VERSION;
+    expect(pinned[v], `no measuring constants pinned for REFERENCE_STYLE_ANALYSIS_VERSION ${v}: add them to this test`).toBeDefined();
+    expect(
+      { ...REFERENCE_STYLE_MEASURE },
+      `REFERENCE_STYLE_MEASURE changed but REFERENCE_STYLE_ANALYSIS_VERSION is still ${v}: bump it in packages/core/src/reference-signals.ts and pin the new constants here`,
+    ).toEqual(pinned[v]);
+  });
+
   it('parses Pass A output, reading nan blur as null', () => {
     const frames = parseFrameScores(
       'frame:0    pts:0       pts_time:0\nlavfi.scene_score=0.000000\nlavfi.signalstats.YMIN=16\nlavfi.signalstats.YAVG=126.1\nlavfi.signalstats.YMAX=235\nlavfi.signalstats.YDIF=0\nlavfi.blur=nan\nframe:1    pts:1       pts_time:0.0333333\nlavfi.scene_score=0.42\nlavfi.signalstats.YAVG=90\nlavfi.signalstats.YDIF=12.5\nlavfi.blur=3.3\n',
@@ -130,6 +191,40 @@ describe('reference style frame maths (no FFmpeg)', () => {
     expect(shiftedNcc(a, up, W, H, 'y', 0)).toBeLessThan(0.9);
   });
 
+  it('searches shifts over half the frame, past where a third of the frame stops (a 0.15 s slide)', () => {
+    // Smooth random blobs (not periodic, so a shorter shift cannot line up the picture by chance), seeded.
+    let s = 7;
+    const rnd = () => {
+      s = (s * 1103515245 + 12345) % 2147483648;
+      return s / 2147483648;
+    };
+    const coarse = Array.from({ length: 12 * 12 }, () => 40 + 170 * rnd());
+    const tall = new Uint8Array(W * 2 * H);
+    for (let y = 0; y < 2 * H; y++) {
+      for (let x = 0; x < W; x++) {
+        const gx = (x / W) * 11;
+        const gy = (y / (2 * H)) * 11;
+        const ix = Math.min(10, Math.floor(gx));
+        const iy = Math.min(10, Math.floor(gy));
+        const fx = gx - ix;
+        const fy = gy - iy;
+        const at = (a: number, b: number) => coarse[b * 12 + a]!;
+        const top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * fx;
+        const bottom = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * fx;
+        tall[y * W + x] = Math.round(top + (bottom - top) * fy);
+      }
+    }
+    const a = tall.slice(0, W * H);
+    const moved = tall.slice(60 * W, 60 * W + W * H);
+    expect(Math.abs(shiftFit(a, moved, W, H, 'y', Math.round(H / 3)).shift)).toBe(43);
+    const r = shiftFitWide(a, moved, W, H, 'y');
+    expect(r.shift).toBe(60);
+    expect(r.error).toBeLessThan(0.5 * r.errorAtZero);
+    expect(shiftedNcc(a, moved, W, H, 'y', r.shift)).toBeGreaterThan(0.99);
+    // A short shift is found as before.
+    expect(shiftFitWide(a, tall.slice(20 * W, 20 * W + W * H), W, H, 'y').shift).toBe(20);
+  });
+
   it('a shift that only crops does not make two different pictures alike', () => {
     // A detailed frame (bright above, dark below) cut against a smooth dark-to-light ramp: shifting by a third of the
     // frame halves the difference just by cropping, but the overlap stays unlike (the false slide behind a lost cut).
@@ -176,6 +271,7 @@ describe.skipIf(!ffmpeg)('reference style on SYNTHETIC fixtures (FFmpeg)', () =>
     const zoom = await zoomFixture(dir);
     pushTruth = zoom.truthPushScale;
     await measure('r4', zoom.file);
+    await measure('x19', (await similarShotsFixture(dir)).file);
     const noAudio: FixtureSpec = { ...specs['r1']!, name: 'r1-no-audio', audio: null };
     await measure('silent', await buildFixture(dir, noAudio));
     const edge = edgeFixtureSpecs();
@@ -349,6 +445,113 @@ describe.skipIf(!ffmpeg)('reference style on SYNTHETIC fixtures (FFmpeg)', () =>
     for (const t of truth.cuts) expect(m.details.events.some((e) => e.kind === 'hard' && Math.abs(e.timeSec - t) <= 1 / 30 + 1e-6), `cut at ${t}`).toBe(true);
     expect(m.details.screens).toHaveLength(1);
     expect(Math.abs(m.details.screens[0]![0] - truth.endScreenStartSec)).toBeLessThanOrEqual(1 / 30 + 1e-6);
+  });
+
+  it('X11: the white end card is left out of the measurements', () => {
+    const s = sig('x11');
+    expect(Math.abs(s.measuredSec - 5.3)).toBeLessThanOrEqual(1 / 30 + 0.01);
+    expect(Math.abs(s.endScreenTrimmedSec - 2.7)).toBeLessThanOrEqual(1 / 30 + 0.01);
+    expect(s.shots.count).toBe(4);
+  });
+
+  const at = (key: string, kind: string, from: number, to: number) => results.get(key)!.details.events.filter((e) => e.kind === kind && e.timeSec >= from - 1e-6 && e.timeSec <= to + 1e-6);
+  const hardAt = (key: string, t: number, fps = 30) => results.get(key)!.details.events.some((e) => e.kind === 'hard' && Math.abs(e.timeSec - t) <= 1 / fps + 1e-6);
+
+  it('X12: a steep fade into a card is the fade into it, not a cut', () => {
+    const m = results.get('x12')!;
+    expect(count('x12', 'hard')).toBe(3);
+    for (const t of [2, 6, 7.5]) expect(hardAt('x12', t), `cut at ${t}`).toBe(true);
+    expect(at('x12', 'fade_black', 4, 4.65)).toHaveLength(1);
+    expect(at('x12', 'hard', 3.95, 4.65)).toHaveLength(0);
+    expect(m.details.screens).toHaveLength(1);
+    expect(m.details.screens[0]![0]).toBeGreaterThanOrEqual(9 - 1e-6);
+    expect(m.details.screens[0]![0]).toBeLessThanOrEqual(9.1);
+    expect(m.details.events.every((e) => e.timeSec < 9)).toBe(true);
+  });
+
+  it('X13: at 60 fps a cut into a card on an odd frame is counted once, at its frame', () => {
+    const m = results.get('x13')!;
+    expect(count('x13', 'hard')).toBe(4);
+    for (const t of [2, 305 / 60, 365 / 60, 8]) expect(hardAt('x13', t, 60), `cut at ${t}`).toBe(true);
+    expect(m.details.screens).toHaveLength(1);
+    expect(Math.abs(m.details.screens[0]![0] - 563 / 60)).toBeLessThanOrEqual(1 / 60 + 1e-6);
+    expect(m.details.events.every((e) => e.timeSec < 563 / 60 - 1 / 120)).toBe(true);
+  });
+
+  it.each([
+    ['x14', [2, 4], 5.3],
+    ['x15', [2, 4, 6, 7.5], 9.3],
+  ] as const)('%s: overlays on a card (fade, pop, glitch, growing logo) keep it one screen', (key, cuts, endAt) => {
+    const m = results.get(key)!;
+    expect(count(key, 'hard')).toBe(cuts.length);
+    for (const t of cuts) expect(hardAt(key, t), `cut at ${t}`).toBe(true);
+    expect(m.details.events.filter((e) => e.kind !== 'hard')).toEqual([]);
+    expect(m.details.screens).toHaveLength(1);
+    expect(Math.abs(m.details.screens[0]![0] - endAt)).toBeLessThanOrEqual(1 / 30 + 1e-6);
+    expect(Math.abs(sig(key).measuredSec - endAt)).toBeLessThanOrEqual(1 / 30 + 0.01);
+  });
+
+  it('X16: a cut from a card to a bright or dark shot in the same white or black run ends the card and counts', () => {
+    const cuts = [2, 4, 5.2, 6.4, 7.6, 8.8, 10, 11.2, 12.4, 13.6];
+    expect(count('x16', 'hard')).toBe(cuts.length);
+    for (const t of cuts) expect(hardAt('x16', t), `cut at ${t}`).toBe(true);
+    expect(results.get('x16')!.details.screens).toEqual([]);
+  });
+
+  it('X17: 0.15 s slides next to smooth shots stay slides', () => {
+    const truth = truths.get('x17')!['motion'] as Array<{ axis: 'x' | 'y'; direction: string }>;
+    const events = results.get('x17')!.details.events;
+    let right = 0;
+    truth.forEach((t, i) => {
+      const e = events.find((x) => Math.abs(x.timeSec - (2 * (i + 1) + 0.1)) <= 0.15);
+      const kind = t.axis === 'y' ? 'slide_vertical' : 'wipe_horizontal';
+      if (e && e.kind === kind && e.direction === t.direction) right++;
+    });
+    expect(right).toBeGreaterThanOrEqual(4);
+    expect(count('x17', 'hard')).toBe(0);
+  });
+
+  it('X18: camera pans and tilts inside one shot are not joins', () => {
+    expect(results.get('x18')!.details.events).toEqual([]);
+    expect(sig('x18').shots.count).toBe(1);
+  });
+
+  it('X19: slides between similar-looking shots stay slides', () => {
+    const truth = truths.get('x19')!['motion'] as Array<{ axis: 'x' | 'y'; direction: string }>;
+    const events = results.get('x19')!.details.events;
+    let right = 0;
+    truth.forEach((t, i) => {
+      const e = events.find((x) => Math.abs(x.timeSec - (2 * (i + 1) + 0.15)) <= 0.2);
+      const kind = t.axis === 'y' ? 'slide_vertical' : 'wipe_horizontal';
+      if (e && e.kind === kind && e.direction === t.direction) right++;
+    });
+    expect(right).toBeGreaterThanOrEqual(4);
+    expect(count('x19', 'hard')).toBe(0);
+  });
+
+  it('X20: a slow fade into a white end card is its entry, not a cross-fade', () => {
+    const m = results.get('x20')!;
+    expect(count('x20', 'hard')).toBe(2);
+    for (const t of [2, 4]) expect(hardAt('x20', t), `cut at ${t}`).toBe(true);
+    expect(count('x20', 'cross_fade')).toBe(0);
+    expect(m.details.screens).toHaveLength(1);
+    expect(m.details.screens[0]![0]).toBeGreaterThanOrEqual(6 - 1e-6);
+    expect(m.details.screens[0]![0]).toBeLessThanOrEqual(6.6);
+    expect(Math.abs(sig('x20').measuredSec - m.details.screens[0]![0])).toBeLessThanOrEqual(0.01);
+  });
+
+  it.each([
+    ['x21', 6.5],
+    ['x22', 6.6],
+  ] as const)('%s: a slow fade into an end card whose banner fades in later starts the end screen', (key, latest) => {
+    const m = results.get(key)!;
+    expect(count(key, 'hard')).toBe(2);
+    for (const t of [2, 4]) expect(hardAt(key, t), `cut at ${t}`).toBe(true);
+    expect(m.details.events.every((e) => e.timeSec < 6)).toBe(true);
+    expect(m.details.screens).toHaveLength(1);
+    expect(m.details.screens[0]![0]).toBeGreaterThanOrEqual(6 - 1e-6);
+    expect(m.details.screens[0]![0]).toBeLessThanOrEqual(latest);
+    expect(Math.abs(sig(key).measuredSec - m.details.screens[0]![0])).toBeLessThanOrEqual(0.01);
   });
 
   it('X3: dips to black are read as dips', () => {

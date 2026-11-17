@@ -50,8 +50,41 @@ export const REFERENCE_STYLE_MEASURE = {
    * at its extreme is at most this (a bright or dark shot keeps its picture detail and is joined by cuts instead).
    */
   flashUniformSpread: 24,
-  /** A run at the extreme for longer than this is a title or end screen, not a transition. */
+  /**
+   * A screen (title, end or mid-video card) lasts more than this; a white or black run this long with no screen in it
+   * is a shot, a shorter one can be a flash or dip.
+   */
   screenMinSec: 0.6,
+  /** Without a cut, a screen's uniform frames must start within this of the start of the bright or dark run. */
+  screenEntrySec: 0.5,
+  /**
+   * Uniform frames count as entered by a cut only this long after the start of the run: the last steps of a steep fade
+   * into a card score as high as a cut.
+   */
+  screenCutMinSec: 0.1,
+  /**
+   * A screen goes on while at least this share of its grey pixels stays within `flashSettle` of its last uniform frame
+   * and the pixels that changed stay in part of the frame (below): a logo, banner or text that pops, fades, scales or
+   * slides onto the card (up to about 40 % of the frame) keeps it one screen; a change that replaces most of the frame
+   * ends it.
+   */
+  screenCardShare: 0.5,
+  /** A row or column of the grey frame counts as changed when at least this share of its pixels changed… */
+  screenChangeLine: 0.05,
+  /**
+   * …and a change that reaches this share of the rows ends the screen: an overlay is a region with untouched rows above
+   * or below it, while a cut to another shot changes every row, also into a mostly blown-out (or mostly black) shot…
+   */
+  screenCutRows: 0.9,
+  /** …and so does a change that reaches this share of both the rows and the columns (the rest of a blown-out shot). */
+  screenCutSpread: 0.7,
+  /** The screen also goes on through a glitch of up to two frames (at 30 fps) after which the card is back. */
+  screenGlitchSec: 0.067,
+  /**
+   * An end screen reached without a cut starts where the fade into it starts: the frames before it whose YAVG moves
+   * towards the card's white or black by at least this many levels per second (for up to `gradualMaxSec`).
+   */
+  screenFadeRate: 30,
   flashSettle: 15,
   /** A frame is part of a gradual change when the grey picture changes this much more than its local median (per 1/30 s). */
   gradualYdifFactor: 1.6,
@@ -60,6 +93,13 @@ export const REFERENCE_STYLE_MEASURE = {
   gradualMaxSec: 1.5,
   /** A gradual window this close to a cut or flash is a busy shot next to it, not a transition. */
   gradualTouchSec: 0.1,
+  /**
+   * A gradual window is a camera move inside one shot when the frames 0.1 s either side of it, moved by the summed
+   * step-to-step shift, overlap by at least this share of the frame (a slide moves about a whole frame)…
+   */
+  panMinOverlap: 0.25,
+  /** …and the overlap correlates at least this well. */
+  panMinNcc: 0.6,
   crossFadeResidual: 0.35,
   /** A cross-fade changes the whole frame at once: per-column (and per-row) blend amounts spread at most this much. */
   crossFadeMaxSpread: 0.35,
@@ -317,6 +357,30 @@ export function shiftedNcc(a: Uint8Array, b: Uint8Array, w: number, h: number, a
   return da > 0 && db > 0 ? num / Math.sqrt(da * db) : 0;
 }
 
+/**
+ * {@link shiftFit} over half the frame along the axis: a 0.15 s slide moves about half the frame between frames 2/30 s
+ * apart, beyond a search over a third of the frame (which stopped at its edge, or at a closer minimum that does not
+ * explain the change, and left the slide to the cut test: X17).
+ */
+export function shiftFitWide(a: Uint8Array, b: Uint8Array, w: number, h: number, axis: 'x' | 'y'): { shift: number; error: number; errorAtZero: number } {
+  return shiftFit(a, b, w, h, axis, Math.round((axis === 'y' ? h : w) / 2));
+}
+
+/** Mean absolute difference of the overlap when `b(p) ≈ a(p + shift)` along one axis (no minimum overlap). */
+function shiftError(a: Uint8Array, b: Uint8Array, w: number, h: number, axis: 'x' | 'y', shift: number): number {
+  const dx = axis === 'x' ? shift : 0;
+  const dy = axis === 'y' ? shift : 0;
+  let sum = 0;
+  let n = 0;
+  for (let y = Math.max(0, -dy); y < Math.min(h, h - dy); y++) {
+    for (let x = Math.max(0, -dx); x < Math.min(w, w - dx); x++) {
+      sum += Math.abs(b[y * w + x]! - a[(y + dy) * w + x + dx]!);
+      n++;
+    }
+  }
+  return n ? sum / n : Number.POSITIVE_INFINITY;
+}
+
 function spearman(values: number[]): number {
   const n = values.length;
   if (n < 3) return 0;
@@ -529,9 +593,10 @@ export interface DetectionResult {
 }
 
 /**
- * Finds flashes, cuts, punch-in jumps and gradual joins on the Pass A scores and Pass B frames (design §4.3.1.3a),
- * in that order; each frame belongs to at most one event. Every duration limit is in seconds, so detection holds at
- * any proxy frame rate up to 60 fps.
+ * Finds screens (cards), flashes, cuts, punch-in jumps and gradual joins on the Pass A scores and Pass B frames (design
+ * §4.3.1.3a), in that order, then an end card reached by a slow fade; each frame belongs to at most one event or
+ * screen. Camera moves inside one shot are dropped. Every duration limit is in seconds, so detection holds at any proxy
+ * frame rate up to 60 fps.
  */
 export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps: number, signal?: AbortSignal): DetectionResult {
   const n = frames.length;
@@ -562,9 +627,75 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
   const uniformAt = (k: number) => percentileSpread(g(frames[k]!.t)) <= M.flashUniformSpread;
   /** The largest scene score within a frame of `k` (the grey frames are on a 1/30 s grid, the scores on the proxy's). */
   const sceneNear = (k: number) => Math.max(frames[k - 1]?.scene ?? 0, frames[k]!.scene, frames[k + 1]?.scene ?? 0);
+  /**
+   * Does frame `k` still show the card `ref`? At least half of its grey pixels stay within `flashSettle` of the card,
+   * and the pixels that changed stay in part of the frame: they reach fewer than `screenCutRows` of the rows, and not
+   * `screenCutSpread` of both the rows and the columns (a row or column is reached when `screenChangeLine` of it
+   * changed). An overlay changes a region; a cut to another shot changes the picture across the frame, also where that
+   * shot keeps most of the card's white (blown out) or black.
+   */
+  const showsCard = (ref: Uint8Array, k: number) => {
+    const f = g(frames[k]!.t);
+    const inColumn = new Uint16Array(w);
+    let changed = 0;
+    let rows = 0;
+    for (let r = 0; r < h; r++) {
+      let inRow = 0;
+      for (let x = 0; x < w; x++) {
+        if (Math.abs(f[r * w + x]! - ref[r * w + x]!) <= M.flashSettle) continue;
+        inRow++;
+        inColumn[x] = inColumn[x]! + 1;
+      }
+      changed += inRow;
+      if (inRow >= M.screenChangeLine * w) rows++;
+    }
+    if (f.length - changed < M.screenCardShare * f.length) return false;
+    let columns = 0;
+    for (let x = 0; x < w; x++) if (inColumn[x]! >= M.screenChangeLine * h) columns++;
+    return rows < M.screenCutRows * h && !(rows >= M.screenCutSpread * h && columns >= M.screenCutSpread * w);
+  };
+  const glitchFrames = sec(M.screenGlitchSec);
+  /**
+   * The last frame of a card whose uniform frames end at `e`: the card goes on while the frame still shows it
+   * (`showsCard`: an overlay that pops, fades, scales or slides in), also through a glitch of up to two frames after
+   * which the card is back, and ends at a change that replaces most of the frame or reaches across it (a cut, also into
+   * a mostly blown-out or mostly black shot, or a fade out of the card).
+   */
+  const cardEnd = (e: number) => {
+    const ref = g(frames[e]!.t);
+    let c = e;
+    while (c + 1 < n && !used[c + 1]) {
+      if (showsCard(ref, c + 1)) {
+        c++;
+        continue;
+      }
+      let back = -1;
+      for (let q = c + 2; q < n && q <= c + 1 + glitchFrames && !used[q]; q++) {
+        if (showsCard(ref, q)) {
+          back = q;
+          break;
+        }
+      }
+      if (back < 0) break;
+      c = back;
+    }
+    // The cut out of the card is the larger scene score of the last frame and the next: at 60 or 24 fps the cut frame
+    // can be looked up on the grey frame before it, which still shows the card.
+    if (c > e && c + 1 < n && frames[c]!.scene >= M.cutMinScore && frames[c]!.scene > frames[c + 1]!.scene) c--;
+    return c;
+  };
+  /** The first frame of the fade into an end card starting at frame `s` (YAVG moving towards it, `screenFadeRate`). */
+  const fadeStart = (s: number, kind: 'white' | 'black') => {
+    const step = M.screenFadeRate / fps;
+    let r = s;
+    while (r - 2 >= 0 && !used[r - 1] && s - r < sec(M.gradualMaxSec) && (kind === 'white' ? y[r - 1]! - y[r - 2]! : y[r - 2]! - y[r - 1]!) >= step) r--;
+    return r;
+  };
 
-  // 1. Flashes and dips: a nearly uniform white or black frame, entered from a steady picture or by a blend towards
-  //    the extreme. A bright or dark shot keeps its detail and is left to the cut test.
+  // 1. Screens, flashes and dips in each run of white or black frames (YAVG against the median of the 0.5 s before):
+  //    a screen (card) first; otherwise a run of up to 0.6 s is a flash or dip (a nearly uniform white or black frame,
+  //    entered from a steady picture or by a blend towards the extreme), and a longer run is a shot. A bright or dark
+  //    shot keeps its detail and is left to the cut test.
   for (let i = 1; i < n; i++) {
     if (used[i]) continue;
     if (i % 256 === 0) throwIfAborted(signal, 'Reference style');
@@ -578,25 +709,55 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     const test = kind === 'white' ? isWhite : isBlack;
     let runEnd = i;
     while (runEnd + 1 < n && test(y[runEnd + 1]!)) runEnd++;
-    if ((runEnd - i + 1) / fps > M.screenMinSec) {
-      // A title or end screen is nearly uniform frames at the extreme for more than 0.6 s, judged frame by frame (not by
-      // the brightest or darkest frame alone). Frames with picture detail are a shot and go to the cut test, also when
-      // a screen follows them in the same run: a cut into the uniform frames starts the screen there, so a bright shot
-      // before a white end card keeps its cut. Without a cut the uniform frames must come within 0.5 s of the start of
-      // the run (a cut or ramp into the screen); a shot that drifts towards white or black stays a shot.
-      for (let k = i; k <= runEnd; k++) {
-        if (!uniformAt(k)) continue;
-        let e = k;
-        while (e + 1 <= runEnd && uniformAt(e + 1)) e++;
-        const cutInto = k > i && sceneNear(k) >= M.cutMinScore;
-        if ((e - k + 1) / fps > M.screenMinSec && (cutInto || k - i <= sec(0.5))) {
-          let s = cutInto ? k : i;
-          if (!cutInto) while (s - 1 >= 0 && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(0.5)) s--;
-          screenRuns.push({ from: s, entry: cutInto ? k : i, to: e, kind });
-          for (let q = s; q <= e; q++) used[q] = 1;
-        }
+    // Title, end and mid-video screens (cards), judged frame by frame inside the run (not by its brightest or darkest
+    // frame). A screen starts at nearly uniform frames at the extreme:
+    // - right after a cut into them (a scene score of 0.18 or more within a frame, at least 0.1 s after the run start,
+    //   because the last steps of a steep fade into a card score as high): the screen starts at the cut frame, and the
+    //   frames with picture detail before it go to the cut test, so a bright shot before a white end card keeps its
+    //   cut;
+    // - otherwise only within 0.5 s of the start of the run, taking the run (and a ramp of up to 0.5 s before it) into
+    //   the screen: a cut or fade into the card, but also a short bright or dark shot softly cut into it. A shot that
+    //   drifts towards white or black later in the run stays a shot.
+    // The screen then goes on while the frame still shows the card (`cardEnd`), also after the run's brightness test
+    // fails (a dark banner on a white card), and must last more than 0.6 s from the cut into it or from its first
+    // uniform frame. A screen without a cut into it that goes on to the end of the span starts with the whole fade into
+    // it (`fadeStart`), as the run of a slow fade starts late.
+    let lastScreen = -1;
+    for (let k = i; k <= runEnd; k++) {
+      if (used[k] || !uniformAt(k)) continue;
+      let e = k;
+      while (e + 1 <= runEnd && uniformAt(e + 1)) e++;
+      const cutInto = k - i >= sec(M.screenCutMinSec) && sceneNear(k) >= M.cutMinScore;
+      if (!cutInto && k - i > sec(M.screenEntrySec)) {
         k = e;
+        continue;
       }
+      // The cut frame itself: at 60 or 24 fps a Pass A frame can be looked up on the grey frame before it.
+      let entry = i;
+      if (cutInto) {
+        entry = k;
+        for (const q of [k - 1, k + 1]) if (q >= i && q <= runEnd && !used[q] && frames[q]!.scene > frames[entry]!.scene) entry = q;
+      }
+      const c = cardEnd(e);
+      if ((c - (cutInto ? entry : k) + 1) / fps <= M.screenMinSec || entry > c) {
+        k = e;
+        continue;
+      }
+      let s = entry;
+      if (!cutInto) while (s - 1 >= 0 && !used[s - 1] && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(M.screenEntrySec)) s--;
+      // An end card reached by a slow fade: the run starts late in the fade (the 0.5 s baseline follows the ramp).
+      if (!cutInto && c === n - 1) s = fadeStart(s, kind);
+      screenRuns.push({ from: s, entry, to: c, kind });
+      for (let q = s; q <= c; q++) used[q] = 1;
+      lastScreen = c;
+      k = c;
+    }
+    if (lastScreen >= 0) {
+      i = Math.max(runEnd, lastScreen);
+      continue;
+    }
+    // A long bright or dark run with picture detail is just a shot.
+    if ((runEnd - i + 1) / fps > M.screenMinSec) {
       i = runEnd;
       continue;
     }
@@ -671,7 +832,7 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     const before = g(t - gs);
     const after = g(t + gs);
     const moving = (['y', 'x'] as const).some((axis) => {
-      const r = shiftFit(before, after, grey.width, grey.height, axis, Math.round((axis === 'y' ? grey.height : grey.width) / 3));
+      const r = shiftFitWide(before, after, grey.width, grey.height, axis);
       if (Math.abs(r.shift) < 2 || r.error > 0.5 * r.errorAtZero) return false;
       const alike = shiftedNcc(before, after, grey.width, grey.height, axis, r.shift);
       return alike >= M.cutMaxNcc && alike >= within - M.cutShiftNccDrop;
@@ -698,6 +859,50 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     return vals.length ? medianOf(vals) : null;
   };
   const touch = sec(M.gradualTouchSec);
+  /**
+   * Camera motion inside one shot (a pan or tilt, even a whip pan): the frame after the window is the frame before it,
+   * moved by the sum of the shifts from step to step (one before/after shift is searched over half the frame at most).
+   * A slide between two shots also moves the picture, but by about a whole frame, so the frames must still overlap by
+   * `panMinOverlap` of the frame; they are taken 0.1 s outside the window (no cut or flash lies that close), where a
+   * slide that eases in and out has finished. The moved frames must look alike (`panMinNcc`), and the move must explain
+   * the change (at most half the difference left).
+   */
+  const cameraMove = (tStart: number, tEnd: number): boolean => {
+    const t0 = tStart - M.gradualTouchSec;
+    const t1 = tEnd + M.gradualTouchSec;
+    const steps: Uint8Array[] = [];
+    for (let t = t0; t <= t1 + 1e-6; t += 1 / grey.fps) steps.push(g(t));
+    const a = steps[0]!;
+    const b = steps[steps.length - 1]!;
+    for (const axis of ['y', 'x'] as const) {
+      const dim = axis === 'y' ? h : w;
+      let sum = 0;
+      for (let k = 1; k < steps.length; k++) {
+        const r = shiftFitWide(steps[k - 1]!, steps[k]!, w, h, axis);
+        if (r.error <= 0.5 * r.errorAtZero) sum += r.shift;
+      }
+      // No measured motion (a wipe, a zoom), or about a whole frame of it (a slide, or a whip too fast to check).
+      if (Math.abs(sum) < 2 || dim - Math.abs(sum) < M.panMinOverlap * dim) continue;
+      // The move: the best shift near that sum, or the one before/after shift where it points the same way (slow steps
+      // of under a grey pixel each add up to less than the move).
+      const tol = Math.max(2, Math.round(0.15 * Math.abs(sum)));
+      const candidates: number[] = [];
+      let near = { shift: 0, error: Number.POSITIVE_INFINITY };
+      for (let d = sum - tol; d <= sum + tol; d++) {
+        if (d === 0 || dim - Math.abs(d) < M.panMinOverlap * dim) continue;
+        const e = shiftError(a, b, w, h, axis, d);
+        if (e < near.error) near = { shift: d, error: e };
+      }
+      if (Number.isFinite(near.error)) candidates.push(near.shift);
+      const direct = shiftFitWide(a, b, w, h, axis).shift;
+      if (Math.sign(direct) === Math.sign(sum) && Math.abs(direct) >= 2 && !candidates.includes(direct)) candidates.push(direct);
+      const still = shiftError(a, b, w, h, axis, 0);
+      for (const d of candidates) {
+        if (shiftError(a, b, w, h, axis, d) <= 0.5 * still && shiftedNcc(a, b, w, h, axis, d) >= M.panMinNcc) return true;
+      }
+    }
+    return false;
+  };
   for (let i = 0; i < n; i++) {
     if (!active[i]) continue;
     let j = i;
@@ -741,6 +946,8 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     const blurry = blurIn !== null && blurAround !== null && blurAround > 0 && blurIn >= M.blurTransitionRatio * blurAround;
     // A cross-fade blends the whole frame at once: a soft-edged wipe fits a blend on average but changes one side first.
     if (!blurry && crossFadeFit(before, after, inner).ok && blendSpread(before, after, inner, w, h) <= M.crossFadeMaxSpread) ev.kind = 'cross_fade';
+    // A pan or tilt inside one shot (the camera moving, not a join): neither a join nor a shot boundary.
+    else if (cameraMove(tStart, tEnd)) continue;
     else {
       const sy = consistent(shifts('y'));
       const sx = sy === 0 ? consistent(shifts('x')) : 0;
@@ -771,8 +978,57 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     for (let k = start; k <= j; k++) used[k] = 1;
   }
 
-  // Screens: only a screen at the very start or after the last join is a title or end screen; the cut (or fade) into a
-  // screen inside the video is a join, and the screen is not taken out of the shots around it.
+  // 5. An end card reached by a slow fade: from an ordinary shot, a fade of more than about 0.5 s into a white card
+  //    never makes a bright run (the 0.5 s baseline follows the ramp), so steps 1–4 read the fade as a gradual join, or
+  //    find nothing there when the card's overlay animates in soon after (the local median of the change rises). Among
+  //    the last three events, latest first, a gradual join (cross-fade or unclear) belongs to an end card when the card
+  //    goes on (as in step 1) to the end of the span for more than 0.6 s from uniform frames at the white or black
+  //    extreme that follow the join within 0.5 s (the join is the fade into it) or come right before it with no event
+  //    before them (the join is its overlay animating in; the screen then starts with the YAVG ramp into those frames,
+  //    `fadeStart`). Either way the join and any events after it inside the card are not joins.
+  const extremeAt = (u: number) => (y[u]! >= M.flashWhiteMin ? 'white' : y[u]! <= M.flashBlackMax ? 'black' : null);
+  const byTime = [...events].sort((a, b) => a.timeSec - b.timeSec);
+  for (let j = byTime.length - 1; j >= Math.max(0, byTime.length - 3); j--) {
+    const join = byTime[j]!;
+    if (join.kind !== 'cross_fade' && join.kind !== 'unclear') continue;
+    if (screenRuns.some((r) => r.from > join.to)) break;
+    const inside = byTime.slice(j + 1);
+    for (const ev of inside) for (let q = ev.from; q <= ev.to; q++) used[q] = 0;
+    let screen: { from: number; kind: 'white' | 'black' } | null = null;
+    for (let u = join.to + 1; u < n && u <= join.to + sec(M.screenEntrySec); u++) {
+      if (used[u] || !uniformAt(u)) continue;
+      const kind = extremeAt(u);
+      if (kind && (n - u) / fps > M.screenMinSec) {
+        let e = u;
+        while (e + 1 < n && uniformAt(e + 1)) e++;
+        if (cardEnd(e) === n - 1) screen = { from: join.from, kind };
+      }
+      break;
+    }
+    if (!screen) {
+      for (let q = join.from; q <= join.to; q++) used[q] = 0;
+      const u = join.from - 1;
+      const kind = u > 0 && !used[u] && uniformAt(u) ? extremeAt(u) : null;
+      if (kind && cardEnd(u) === n - 1) {
+        let u0 = u;
+        while (u0 - 1 >= 0 && !used[u0 - 1] && uniformAt(u0 - 1)) u0--;
+        // Not when an earlier event runs into those frames (the fade into the card, found when its turn comes).
+        if ((n - u0) / fps > M.screenMinSec && (u0 === 0 || !used[u0 - 1])) screen = { from: fadeStart(u0, kind), kind };
+      }
+      if (!screen) for (let q = join.from; q <= join.to; q++) used[q] = 1;
+    }
+    if (screen) {
+      for (const ev of [join, ...inside]) events.splice(events.indexOf(ev), 1);
+      screenRuns.push({ from: screen.from, entry: screen.from, to: n - 1, kind: screen.kind });
+      for (let q = screen.from; q < n; q++) used[q] = 1;
+      break;
+    }
+    for (const ev of inside) for (let q = ev.from; q <= ev.to; q++) used[q] = 1;
+  }
+
+  // Screens: only a screen at the very start or after the last join is a title or end screen, and the cut or fade into
+  // it is not a join (measureReferenceStyle leaves an end screen out of every measurement; a title stays the first
+  // shot). The cut (or fade) into a screen inside the video is a join, and the screen stays in the shots around it.
   for (const r of screenRuns) {
     const startT = frames[r.from]!.t;
     const endT = frames[r.to]!.t + dt;
@@ -908,13 +1164,21 @@ export async function measureReferenceStyle(proxyPath: string, opts: MeasureRefe
   const lastT = frames[frames.length - 1]!.t + 1 / fps;
   const fullSpan = Math.min(span, lastT);
 
-  // End screen: a dark part after the last boundary, 1.5–5 s long.
+  // End screen, left out of every measurement (shots, zooms, beat, drop, music): a white or black end screen found
+  // after the last join that runs to the end of the span (design §4.3.1.3a), or else a dark part after the last
+  // boundary, 1.5–5 s long. A screen that stops earlier is followed by a shot whose cut was not found, so nothing is
+  // trimmed then.
+  const lastJoin = Math.max(0, ...detected.events.map((e) => e.timeSec));
+  const endScreen = detected.screens.find(([a, b]) => a > lastJoin && a > 0.1 && a < fullSpan && b >= fullSpan - 0.25);
   const boundaries = [0, ...detected.events.map((e) => e.timeSec), ...detected.screens.map((s) => s[0])].filter((t) => t < fullSpan);
   const lastBoundary = Math.max(...boundaries);
   const tail = fullSpan - lastBoundary;
   let measuredSec = fullSpan;
   let trimmed = 0;
-  if (tail >= M.endScreenMinSec && tail <= M.endScreenMaxSec) {
+  if (endScreen) {
+    measuredSec = endScreen[0];
+    trimmed = fullSpan - endScreen[0];
+  } else if (tail >= M.endScreenMinSec && tail <= M.endScreenMaxSec) {
     const ys = frames.filter((f) => f.t >= lastBoundary + 1 / fps).map((f) => f.yavg);
     if (ys.length && ys.reduce((a, b) => a + b, 0) / ys.length <= M.endScreenMaxLuma) {
       measuredSec = lastBoundary;
