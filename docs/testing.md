@@ -301,10 +301,11 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   read-only), `POST …/summary/decide` (owner-only, CSRF, stale `valueKey` → 409 with nothing written, accept writes
   `editingStyle` + `sources` + `summaryDecisions` and the audit rows), Settings refusing `sources`/`summaryDecisions`
   and recording owner changes, `…/summary/reset`, a SYNTHETIC profile from another measuring version (listed with
-  `olderVersion`, rows exactly as without it, its own suggestions refused with 409 and nothing written), a
-  transitions value accepted from the videos that stays in use and stoppable once the stored profiles are moved to
-  another measuring version, and `PUT /api/settings` refusing a reversed `musicFit` tempo range
-  (400 on `preferences.editingStyle.musicFit.bpmLow`, nothing stored). `apps/web/test/studio-access.integration.test.ts`
+  `olderVersion`, rows exactly as without it, its own suggestions refused with 409 and nothing written, still counted
+  after the same video is uploaded again, until the old copy is removed), a transitions value accepted from the
+  videos that stays in use and stoppable once the stored profiles are moved to another measuring version, and
+  `PUT /api/settings` refusing a reversed `musicFit` tempo range (400 on
+  `preferences.editingStyle.musicFit.bpmLow`, nothing stored). `apps/web/test/studio-access.integration.test.ts`
   checks generation start with the music start on automatic: a 50 s edit with a 40 s track is refused with the
   planners' message, a 45 s edit is accepted, and the track's music option carries its first beat (`firstBeatSec`).
   `apps/web/test/music-routes.integration.test.ts` checks that "Suggested for you" offers that 40 s track for a 45 s

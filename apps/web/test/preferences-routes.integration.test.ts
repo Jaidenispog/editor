@@ -422,6 +422,33 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     expect((await settingsRow()).preferences).toEqual(prefsBefore);
     const stored = await db.query.mediaAssets.findFirst({ where: (t, { eq }) => eq(t.id, id) });
     expect((stored?.referenceProfile as ReferenceStyleProfile).decisions).toEqual({});
+
+    // Uploading the same video again adds a new, current copy and keeps the old one, which is still listed and counted:
+    // the wording therefore says to remove the old copy, and removing it clears the count.
+    const againId = randomUUID();
+    const again = profileReference(
+      { assetId: againId, sourceFilename: 'synthetic-other-version.mp4', durationSec: 16, shotDurationsSec: [], look: { meanLuma: 0.5, meanSaturation: 0.4, contrast: 0.3 }, text: null, measuredAt: new Date(Date.now() + 120_000), style },
+      { defaultDurationSec: 30, pacing: 'balanced', colour: 'natural', textDensity: 'light' },
+    );
+    await db.insert(schema.mediaAssets).values({ id: againId, projectId: ids.project, kind: 'reference_video', originalFilename: 'synthetic-other-version.mp4', mimeType: 'video/mp4', byteSize: 1, originalKey: `projects/${ids.project}/assets/${againId}/original.mp4`, status: 'ready', referenceProfile: { ...again, originalsDeletedAt: new Date().toISOString() } });
+    const { eq } = await import('drizzle-orm');
+    try {
+      const uploadedAgain = await call(summaryRoute.GET, 'GET', '/api/references/summary', {});
+      expect(uploadedAgain.json.summary).toMatchObject({ total: before.json.summary.total + 1, olderVersion: 1 });
+      expect(uploadedAgain.json.summary.referenceAssetIds).toContain(againId);
+      const copies = uploadedAgain.json.list.filter((v: { filename: string }) => v.filename === 'synthetic-other-version.mp4');
+      expect(copies.map((v: { id: string; olderVersion: boolean }) => [v.id, v.olderVersion])).toEqual([
+        [againId, false],
+        [id, true],
+      ]);
+      // "Remove" on the old copy (as on its Studio reference card) leaves nothing measured with an older version.
+      const removeRoute = await import('../src/app/api/assets/[id]/route');
+      expect((await call(removeRoute.DELETE, 'DELETE', `/api/assets/${id}`, { id })).status).toBe(200);
+      expect((await call(summaryRoute.GET, 'GET', '/api/references/summary', {})).json.summary.olderVersion).toBe(0);
+    } finally {
+      // The later tests expect only the two current videos with flashes.
+      await db.update(schema.mediaAssets).set({ deletedAt: new Date() }).where(eq(schema.mediaAssets.id, againId));
+    }
   });
 
   it('keeps a style accepted from the videos in use, and stoppable, when no current video backs it any more', async () => {
@@ -438,7 +465,7 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     expect(accepted.status).toBe(200);
 
     // The measuring version is raised (simulated on the stored profiles): no video of the current version is left.
-    const current = (await db.query.mediaAssets.findMany({ where: (t, { eq: is }) => is(t.kind, 'reference_video') })).filter(
+    const current = (await db.query.mediaAssets.findMany({ where: (t, { and: all, eq: is, isNull }) => all(is(t.kind, 'reference_video'), isNull(t.deletedAt)) })).filter(
       (a) => (a.referenceProfile as { style?: { analysisVersion?: number } | null } | null)?.style?.analysisVersion === REFERENCE_STYLE_ANALYSIS_VERSION,
     );
     expect(current.length).toBe(2);
@@ -449,7 +476,8 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     for (const a of current) await db.update(schema.mediaAssets).set({ referenceProfile: withVersion(a.referenceProfile, REFERENCE_STYLE_ANALYSIS_VERSION + 1) }).where(eq(schema.mediaAssets.id, a.id));
     try {
       const bumped = await palette();
-      expect(bumped.summary).toMatchObject({ measured: 0, olderVersion: 3 });
+      // The two moved here (the copy from another version was removed in the test before).
+      expect(bumped.summary).toMatchObject({ measured: 0, olderVersion: 2 });
       // The planners still use the cross-fades accepted earlier, so the row says so and can stop them.
       const row = bumped.suggestions.find((r) => r.field === 'transitionPalette')!;
       expect(row).toMatchObject({ state: 'not_measured', value: null, inUse: true });
