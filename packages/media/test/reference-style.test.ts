@@ -16,12 +16,14 @@ import {
   REFERENCE_STYLE_MEASURE,
   scaleFit,
   shiftedNcc,
+  shiftedNcc2d,
   shiftFit,
+  shiftFit2d,
   shiftFitWide,
   type ReferenceStyleMeasurement,
 } from '../src/analysis/reference-style.js';
 import { hasFfmpeg } from './analysis-fixtures.js';
-import { buildFixture, edgeFixtureSpecs, fixtureSpecs, similarShotsFixture, zoomFixture, type FixtureSpec } from './fixtures/make-reference-fixtures.js';
+import { buildFixture, edgeFixtureSpecs, fixtureSpecs, reviewFixtureSpecs, similarShotsFixture, zoomFixture, type FixtureSpec } from './fixtures/make-reference-fixtures.js';
 
 const W = 72;
 const H = 128;
@@ -89,6 +91,9 @@ describe('reference style frame maths (no FFmpeg)', () => {
         screenCutRows: 0.9,
         screenCutSpread: 0.7,
         screenGlitchSec: 0.067,
+        screenMarksMin: 0.005,
+        screenMarksGone: 0.5,
+        screenMarksErased: 0.1,
         screenFadeRate: 30,
         flashSettle: 15,
         gradualYdifFactor: 1.6,
@@ -225,6 +230,53 @@ describe('reference style frame maths (no FFmpeg)', () => {
     expect(shiftFitWide(a, tall.slice(20 * W, 20 * W + W * H), W, H, 'y').shift).toBe(20);
   });
 
+  it('finds a diagonal shift (a pan and a tilt together) that no shift along one axis explains', () => {
+    // Smooth random blobs over a field twice the frame each way (seeded), and two windows of it 9 pixels apart across and
+    // 14 down, as a handheld camera moves.
+    let s = 11;
+    const rnd = () => {
+      s = (s * 1103515245 + 12345) % 2147483648;
+      return s / 2147483648;
+    };
+    const cells = 16;
+    const coarse = Array.from({ length: (cells + 1) * (cells + 1) }, () => 40 + 170 * rnd());
+    const FW = 2 * W;
+    const FH = 2 * H;
+    const field = new Uint8Array(FW * FH);
+    for (let y = 0; y < FH; y++) {
+      for (let x = 0; x < FW; x++) {
+        const gx = (x / FW) * cells;
+        const gy = (y / FH) * cells;
+        const ix = Math.min(cells - 1, Math.floor(gx));
+        const iy = Math.min(cells - 1, Math.floor(gy));
+        const fx = gx - ix;
+        const fy = gy - iy;
+        const at = (a: number, b: number) => coarse[b * (cells + 1) + a]!;
+        const top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * fx;
+        const bottom = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * fx;
+        field[y * FW + x] = Math.round(top + (bottom - top) * fy);
+      }
+    }
+    const window = (x0: number, y0: number) => {
+      const f = new Uint8Array(W * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) f[y * W + x] = field[(y0 + y) * FW + x0 + x]!;
+      return f;
+    };
+    const a = window(30, 40);
+    const b = window(39, 54);
+    const r = shiftFit2d(a, b, W, H);
+    expect([r.dx, r.dy]).toEqual([9, 14]);
+    expect(r.error).toBeLessThan(0.1 * r.errorAtZero);
+    expect(shiftedNcc2d(a, b, W, H, r.dx, r.dy)).toBeGreaterThan(0.99);
+    // Along one axis the other axis stays out of line: no single-axis shift explains the move.
+    for (const axis of ['x', 'y'] as const) {
+      const one = shiftFitWide(a, b, W, H, axis);
+      expect(one.error).toBeGreaterThan(0.5 * one.errorAtZero);
+    }
+    // A still pair stays still.
+    expect(shiftFit2d(a, a, W, H)).toMatchObject({ dx: 0, dy: 0, error: 0 });
+  });
+
   it('a shift that only crops does not make two different pictures alike', () => {
     // A detailed frame (bright above, dark below) cut against a smooth dark-to-light ramp: shifting by a third of the
     // frame halves the difference just by cropping, but the overlap stays unlike (the false slide behind a lost cut).
@@ -274,12 +326,12 @@ describe.skipIf(!ffmpeg)('reference style on SYNTHETIC fixtures (FFmpeg)', () =>
     await measure('x19', (await similarShotsFixture(dir)).file);
     const noAudio: FixtureSpec = { ...specs['r1']!, name: 'r1-no-audio', audio: null };
     await measure('silent', await buildFixture(dir, noAudio));
-    const edge = edgeFixtureSpecs();
+    const edge = { ...edgeFixtureSpecs(), ...(await reviewFixtureSpecs(dir)) };
     const edgeKeys = Object.keys(edge);
     for (let i = 0; i < edgeKeys.length; i += 3) {
       await Promise.all(edgeKeys.slice(i, i + 3).map(async (key) => measure(key, await buildFixture(dir, edge[key]!))));
     }
-  }, 600_000);
+  }, 900_000);
 
   afterAll(async () => {
     if (dir) await rm(dir, { recursive: true, force: true });
@@ -552,6 +604,76 @@ describe.skipIf(!ffmpeg)('reference style on SYNTHETIC fixtures (FFmpeg)', () =>
     expect(m.details.screens[0]![0]).toBeGreaterThanOrEqual(6 - 1e-6);
     expect(m.details.screens[0]![0]).toBeLessThanOrEqual(latest);
     expect(Math.abs(sig(key).measuredSec - m.details.screens[0]![0])).toBeLessThanOrEqual(0.01);
+  });
+
+  it('X23: a cut from a card with a title into a shot on the same white or black ends the card, and the reveal on the drop is a cut', () => {
+    const cuts = [2, 4, 6, 8, 9.5, 11.5];
+    expect(count('x23', 'hard')).toBe(cuts.length);
+    for (const t of cuts) expect(hardAt('x23', t), `cut at ${t}`).toBe(true);
+    expect(results.get('x23')!.details.screens).toEqual([]);
+    expect(sig('x23').shots.count).toBe(7);
+    const d = sig('x23').drop;
+    expect(d.status).toBe('found');
+    expect(Math.abs(d.atSec! - 6)).toBeLessThanOrEqual(0.15);
+    expect(d.visualEvent).toBe('cut');
+  });
+
+  it('X24: jump cuts between still framings a third to half a frame apart stay cuts; a 0.15 s slide stays a slide', () => {
+    expect(count('x24', 'hard')).toBe(3);
+    for (const t of [2, 4, 6]) expect(hardAt('x24', t), `cut at ${t}`).toBe(true);
+    expect(at('x24', 'slide_vertical', 7.85, 8.3).filter((e) => e.direction === 'up')).toHaveLength(1);
+    expect(sig('x24').shots.count).toBe(5);
+  });
+
+  it('X25: a white end card that fades out to black is one end screen, left out from where the card starts', () => {
+    const m = results.get('x25')!;
+    expect(count('x25', 'hard')).toBe(2);
+    for (const t of [2, 4]) expect(hardAt('x25', t), `cut at ${t}`).toBe(true);
+    expect(m.details.events.every((e) => e.timeSec < 6)).toBe(true);
+    expect(Math.abs(m.details.screens[0]![0] - 6)).toBeLessThanOrEqual(1 / 30 + 1e-6);
+    expect(Math.abs(sig('x25').measuredSec - 6)).toBeLessThanOrEqual(1 / 30 + 0.01);
+    expect(Math.abs(sig('x25').endScreenTrimmedSec - 4)).toBeLessThanOrEqual(1 / 30 + 0.01);
+  });
+
+  it('X26: a slow fade from a dim, tilting shot into a black end card starts the end screen', () => {
+    const m = results.get('x26')!;
+    expect(count('x26', 'hard')).toBe(2);
+    for (const t of [2, 4]) expect(hardAt('x26', t), `cut at ${t}`).toBe(true);
+    expect(m.details.events.every((e) => e.timeSec < 6)).toBe(true);
+    expect(m.details.screens).toHaveLength(1);
+    expect(m.details.screens[0]![0]).toBeGreaterThanOrEqual(6 - 1e-6);
+    expect(m.details.screens[0]![0]).toBeLessThanOrEqual(6.3);
+    expect(Math.abs(sig('x26').measuredSec - m.details.screens[0]![0])).toBeLessThanOrEqual(0.01);
+  });
+
+  it('X27: diagonal camera moves inside one shot are not joins', () => {
+    expect(results.get('x27')!.details.events).toEqual([]);
+    expect(sig('x27').shots.count).toBe(1);
+  });
+
+  it('X28: at 60 fps a card left on an odd frame into a shot that stays in its white run keeps that cut', () => {
+    const cuts = [2, 305 / 60, 365 / 60, 8];
+    expect(count('x28', 'hard')).toBe(cuts.length);
+    for (const t of cuts) expect(hardAt('x28', t, 60), `cut at ${t}`).toBe(true);
+    expect(results.get('x28')!.details.screens).toEqual([]);
+  });
+
+  it('X29: at 60 fps slides between similar framings of one scene stay slides', () => {
+    const truth = truths.get('x29')!['motion'] as Array<{ atSec: number; axis: 'x' | 'y'; direction: string }>;
+    const events = results.get('x29')!.details.events;
+    for (const t of truth) {
+      const kind = t.axis === 'y' ? 'slide_vertical' : 'wipe_horizontal';
+      expect(events.some((e) => e.kind === kind && e.direction === t.direction && e.timeSec >= t.atSec - 0.05 && e.timeSec <= t.atSec + 0.4), `slide at ${t.atSec}`).toBe(true);
+    }
+    expect(count('x29', 'hard')).toBe(0);
+  });
+
+  it('X30: a shot that brightens before a cut into a white end card keeps its length: the end screen starts at the cut', () => {
+    const m = results.get('x30')!;
+    expect(count('x30', 'hard')).toBe(2);
+    expect(m.details.screens).toHaveLength(1);
+    expect(Math.abs(m.details.screens[0]![0] - 6)).toBeLessThanOrEqual(1 / 30 + 1e-6);
+    expect(Math.abs(sig('x30').measuredSec - 6)).toBeLessThanOrEqual(1 / 30 + 0.01);
   });
 
   it('X3: dips to black are read as dips', () => {

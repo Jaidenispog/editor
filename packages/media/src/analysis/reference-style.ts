@@ -73,13 +73,27 @@ export const REFERENCE_STYLE_MEASURE = {
   screenChangeLine: 0.05,
   /**
    * …and a change that reaches this share of the rows ends the screen: an overlay is a region with untouched rows above
-   * or below it, while a cut to another shot changes every row, also into a mostly blown-out (or mostly black) shot…
+   * or below it, while a cut to another shot changes nearly every row, also into a mostly blown-out (or mostly black)
+   * shot…
    */
   screenCutRows: 0.9,
   /** …and so does a change that reaches this share of both the rows and the columns (the rest of a blown-out shot). */
   screenCutSpread: 0.7,
   /** The screen also goes on through a glitch of up to two frames (at 30 fps) after which the card is back. */
   screenGlitchSec: 0.067,
+  /**
+   * A card's own marks (its title, logo or button: the grey pixels more than `flashSettle` from its background, the
+   * median of its last uniform frame) are judged when they cover at least this share of the frame…
+   */
+  screenMarksMin: 0.005,
+  /** …and a cut (a scene score of `cutMinScore` or more within a frame) that changes more than this share of them… */
+  screenMarksGone: 0.5,
+  /**
+   * …and leaves at least this share of them showing the card's plain background (the marks were taken away, not covered
+   * by an overlay popping over them) ends the screen, whatever the rest of the frame does: a cut to another shot that
+   * keeps the card's white or black in most pixels (a product on a white backdrop, a low-key portrait on black).
+   */
+  screenMarksErased: 0.1,
   /**
    * An end screen reached without a cut starts where the fade into it starts: the frames before it whose YAVG moves
    * towards the card's white or black by at least this many levels per second (for up to `gradualMaxSec`).
@@ -323,8 +337,11 @@ export function shiftFit(a: Uint8Array, b: Uint8Array, w: number, h: number, axi
 
 /** NCC of the parts of two frames that overlap when `b(p) ≈ a(p + shift)` along one axis (as in {@link shiftFit}). */
 export function shiftedNcc(a: Uint8Array, b: Uint8Array, w: number, h: number, axis: 'x' | 'y', shift: number): number {
-  const dx = axis === 'x' ? shift : 0;
-  const dy = axis === 'y' ? shift : 0;
+  return shiftedNcc2d(a, b, w, h, axis === 'x' ? shift : 0, axis === 'y' ? shift : 0);
+}
+
+/** NCC of the parts of two frames that overlap when `b(p) ≈ a(p + (dx, dy))` (as in {@link shiftFit2d}). */
+export function shiftedNcc2d(a: Uint8Array, b: Uint8Array, w: number, h: number, dx: number, dy: number): number {
   const x0 = Math.max(0, -dx);
   const x1 = Math.min(w, w - dx);
   const y0 = Math.max(0, -dy);
@@ -368,8 +385,14 @@ export function shiftFitWide(a: Uint8Array, b: Uint8Array, w: number, h: number,
 
 /** Mean absolute difference of the overlap when `b(p) ≈ a(p + shift)` along one axis (no minimum overlap). */
 function shiftError(a: Uint8Array, b: Uint8Array, w: number, h: number, axis: 'x' | 'y', shift: number): number {
-  const dx = axis === 'x' ? shift : 0;
-  const dy = axis === 'y' ? shift : 0;
+  return shiftError2d(a, b, w, h, axis === 'x' ? shift : 0, axis === 'y' ? shift : 0);
+}
+
+/**
+ * Mean absolute difference of the overlap when `b(p) ≈ a(p + (dx, dy))`; with `minOverlap`, infinite unless more than
+ * that many pixels overlap.
+ */
+function shiftError2d(a: Uint8Array, b: Uint8Array, w: number, h: number, dx: number, dy: number, minOverlap = 0): number {
   let sum = 0;
   let n = 0;
   for (let y = Math.max(0, -dy); y < Math.min(h, h - dy); y++) {
@@ -378,7 +401,84 @@ function shiftError(a: Uint8Array, b: Uint8Array, w: number, h: number, axis: 'x
       n++;
     }
   }
-  return n ? sum / n : Number.POSITIVE_INFINITY;
+  return n > minOverlap ? sum / n : Number.POSITIVE_INFINITY;
+}
+
+/** A frame averaged over blocks of 4 × 4 pixels (the last partial row or column of blocks left out). */
+interface CoarseFrame {
+  data: Float32Array;
+  width: number;
+  height: number;
+}
+const COARSE = 4;
+
+function shrink(a: Uint8Array, w: number, h: number): CoarseFrame {
+  const width = Math.floor(w / COARSE);
+  const height = Math.floor(h / COARSE);
+  const data = new Float32Array(width * height);
+  for (let y = 0; y < height * COARSE; y++) {
+    for (let x = 0; x < width * COARSE; x++) {
+      const p = Math.floor(y / COARSE) * width + Math.floor(x / COARSE);
+      data[p] = data[p]! + a[y * w + x]!;
+    }
+  }
+  for (let p = 0; p < data.length; p++) data[p] = data[p]! / (COARSE * COARSE);
+  return { data, width, height };
+}
+
+/** {@link shiftError2d} on coarse frames, with more than a third of the frame overlapping. */
+function coarseError(a: CoarseFrame, b: CoarseFrame, dx: number, dy: number): number {
+  const { width: w, height: h } = a;
+  let sum = 0;
+  let n = 0;
+  for (let y = Math.max(0, -dy); y < Math.min(h, h - dy); y++) {
+    for (let x = Math.max(0, -dx); x < Math.min(w, w - dx); x++) {
+      sum += Math.abs(b.data[y * w + x]! - a.data[(y + dy) * w + x + dx]!);
+      n++;
+    }
+  }
+  return n > (w * h) / 3 ? sum / n : Number.POSITIVE_INFINITY;
+}
+
+/** The best shift along one axis between two coarse frames, up to half the frame, in full-size pixels (a rough measure). */
+function roughShift(a: CoarseFrame, b: CoarseFrame, axis: 'x' | 'y'): number {
+  const max = Math.round((axis === 'y' ? a.height : a.width) / 2);
+  let best = { shift: 0, error: coarseError(a, b, 0, 0) };
+  for (let d = -max; d <= max; d++) {
+    if (d === 0) continue;
+    const e = coarseError(a, b, axis === 'x' ? d : 0, axis === 'y' ? d : 0);
+    if (e < best.error) best = { shift: d, error: e };
+  }
+  return best.shift * COARSE;
+}
+
+/**
+ * Best integer shift in both axes at once, `b(p) ≈ a(p + (dx, dy))`, up to half the frame each way (a diagonal camera
+ * move, a pan and a tilt together): every shift on frames averaged over 4 × 4 pixels, then refined within 2 pixels at
+ * full size. As in {@link shiftFit}, more than a third of the frame must overlap.
+ */
+export function shiftFit2d(a: Uint8Array, b: Uint8Array, w: number, h: number): { dx: number; dy: number; error: number; errorAtZero: number } {
+  const sa = shrink(a, w, h);
+  const sb = shrink(b, w, h);
+  const mx = Math.round(sa.width / 2);
+  const my = Math.round(sa.height / 2);
+  let coarse = { dx: 0, dy: 0, error: coarseError(sa, sb, 0, 0) };
+  for (let dy = -my; dy <= my; dy++) {
+    for (let dx = -mx; dx <= mx; dx++) {
+      const e = coarseError(sa, sb, dx, dy);
+      if (e < coarse.error) coarse = { dx, dy, error: e };
+    }
+  }
+  const errorAtZero = shiftError2d(a, b, w, h, 0, 0, (w * h) / 3);
+  let best = { dx: 0, dy: 0, error: errorAtZero };
+  for (let dy = coarse.dy * COARSE - 2; dy <= coarse.dy * COARSE + 2; dy++) {
+    for (let dx = coarse.dx * COARSE - 2; dx <= coarse.dx * COARSE + 2; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const e = shiftError2d(a, b, w, h, dx, dy, (w * h) / 3);
+      if (e < best.error) best = { dx, dy, error: e };
+    }
+  }
+  return { ...best, errorAtZero };
 }
 
 function spearman(values: number[]): number {
@@ -656,22 +756,61 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
   };
   const glitchFrames = sec(M.screenGlitchSec);
   /**
-   * The last frame of a card whose uniform frames end at `e`: the card goes on while the frame still shows it
-   * (`showsCard`: an overlay that pops, fades, scales or slides in), also through a glitch of up to two frames after
-   * which the card is back, and ends at a change that replaces most of the frame or reaches across it (a cut, also into
-   * a mostly blown-out or mostly black shot, or a fade out of the card).
+   * The card's own marks in `ref` (its title, logo or button): the grey pixels more than `flashSettle` from the card's
+   * background (the median of `ref`), or null when they cover less than `screenMarksMin` of the frame (a plain card).
    */
-  const cardEnd = (e: number) => {
+  const cardMarks = (ref: Uint8Array): { pixels: Uint32Array; background: number } | null => {
+    const hist = new Uint32Array(256);
+    for (let p = 0; p < ref.length; p++) hist[ref[p]!] = hist[ref[p]!]! + 1;
+    let background = 0;
+    for (let v = 0, acc = 0; v < 256; v++) {
+      acc += hist[v]!;
+      if (2 * acc >= ref.length) {
+        background = v;
+        break;
+      }
+    }
+    const pixels: number[] = [];
+    for (let p = 0; p < ref.length; p++) if (Math.abs(ref[p]! - background) > M.flashSettle) pixels.push(p);
+    return pixels.length >= M.screenMarksMin * ref.length ? { pixels: Uint32Array.from(pixels), background } : null;
+  };
+  /**
+   * The card's marks were taken away in frame `k`: more than `screenMarksGone` of them changed by more than
+   * `flashSettle`, and at least `screenMarksErased` of them now show the card's background.
+   */
+  const marksTaken = (ref: Uint8Array, marks: { pixels: Uint32Array; background: number }, k: number) => {
+    const f = g(frames[k]!.t);
+    let changed = 0;
+    let erased = 0;
+    for (const p of marks.pixels) {
+      if (Math.abs(f[p]! - ref[p]!) <= M.flashSettle) continue;
+      changed++;
+      if (Math.abs(f[p]! - marks.background) <= M.flashSettle) erased++;
+    }
+    return changed > M.screenMarksGone * marks.pixels.length && erased >= M.screenMarksErased * marks.pixels.length;
+  };
+  /**
+   * The last frame of a card whose uniform frames run from `from` to `e`: the card goes on while the frame still shows
+   * it (`showsCard`: an overlay that pops, fades, scales or slides in), also through a glitch of up to two frames after
+   * which the card is back, and ends at a change that replaces most of the frame or reaches across it (a cut, also into
+   * a mostly blown-out or mostly black shot, or a fade out of the card), or at a cut that takes the card's own marks
+   * away (`marksTaken`; an overlay adds to them or covers them), whatever the rest of the frame does.
+   */
+  const cardEnd = (e: number, from = e) => {
     const ref = g(frames[e]!.t);
+    const marks = cardMarks(ref);
+    const goesOn = (k: number) => showsCard(ref, k) && !(marks && sceneNear(k) >= M.cutMinScore && marksTaken(ref, marks, k));
+    /** After a glitch the card is back with its own marks. */
+    const isBack = (k: number) => showsCard(ref, k) && !(marks && marksTaken(ref, marks, k));
     let c = e;
     while (c + 1 < n && !used[c + 1]) {
-      if (showsCard(ref, c + 1)) {
+      if (goesOn(c + 1)) {
         c++;
         continue;
       }
       let back = -1;
       for (let q = c + 2; q < n && q <= c + 1 + glitchFrames && !used[q]; q++) {
-        if (showsCard(ref, q)) {
+        if (isBack(q)) {
           back = q;
           break;
         }
@@ -680,15 +819,26 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
       c = back;
     }
     // The cut out of the card is the larger scene score of the last frame and the next: at 60 or 24 fps the cut frame
-    // can be looked up on the grey frame before it, which still shows the card.
-    if (c > e && c + 1 < n && frames[c]!.scene >= M.cutMinScore && frames[c]!.scene > frames[c + 1]!.scene) c--;
+    // can be looked up on the grey frame before it, which still shows the card (also when that is the last uniform
+    // frame `e`, the next shot staying in the white or black run).
+    if (c > from && c + 1 < n && frames[c]!.scene >= M.cutMinScore && frames[c]!.scene > frames[c + 1]!.scene) c--;
     return c;
   };
-  /** The first frame of the fade into an end card starting at frame `s` (YAVG moving towards it, `screenFadeRate`). */
+  /**
+   * The first frame of the fade into an end card starting at frame `s`: going back (up to `gradualMaxSec`, never over an
+   * event) while YAVG moves towards the card's white or black at `screenFadeRate` or more, from the frame before, or on
+   * average over the last 0.2 s (a slow fade at 60 fps moves half a level per frame, about as much as the noise).
+   */
   const fadeStart = (s: number, kind: 'white' | 'black') => {
     const step = M.screenFadeRate / fps;
+    const span = sec(0.2);
+    const towards = (a: number, b: number) => (kind === 'white' ? y[b]! - y[a]! : y[a]! - y[b]!);
+    const free = (a: number, b: number) => {
+      for (let q = a; q <= b; q++) if (used[q]) return false;
+      return true;
+    };
     let r = s;
-    while (r - 2 >= 0 && !used[r - 1] && s - r < sec(M.gradualMaxSec) && (kind === 'white' ? y[r - 1]! - y[r - 2]! : y[r - 2]! - y[r - 1]!) >= step) r--;
+    while (r - 2 >= 0 && !used[r - 1] && s - r < sec(M.gradualMaxSec) && (towards(r - 2, r - 1) >= step || (r - 1 - span >= 0 && free(r - 1 - span, r - 1) && towards(r - 1 - span, r - 1) >= step * span))) r--;
     return r;
   };
 
@@ -738,15 +888,17 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
         entry = k;
         for (const q of [k - 1, k + 1]) if (q >= i && q <= runEnd && !used[q] && frames[q]!.scene > frames[entry]!.scene) entry = q;
       }
-      const c = cardEnd(e);
+      const c = cardEnd(e, k);
       if ((c - (cutInto ? entry : k) + 1) / fps <= M.screenMinSec || entry > c) {
         k = e;
         continue;
       }
       let s = entry;
       if (!cutInto) while (s - 1 >= 0 && !used[s - 1] && Math.abs(y[s - 1]! - yb) >= M.flashSettle && i - s < sec(M.screenEntrySec)) s--;
-      // An end card reached by a slow fade: the run starts late in the fade (the 0.5 s baseline follows the ramp).
-      if (!cutInto && c === n - 1) s = fadeStart(s, kind);
+      // An end card reached by a slow fade: the run starts late in the fade (the 0.5 s baseline follows the ramp). Not
+      // past a cut on the screen's first frame: a shot that brightens or darkens before a cut into the card (a camera
+      // turning towards a window) is not a fade into it.
+      if (!cutInto && c === n - 1 && sceneNear(s) < M.cutMinScore) s = fadeStart(s, kind);
       screenRuns.push({ from: s, entry, to: c, kind });
       for (let q = s; q <= c; q++) used[q] = 1;
       lastScreen = c;
@@ -804,6 +956,25 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
   const scene = frames.map((f) => f.scene);
   const thresholds = scene.map((_, i) => Math.max(M.cutMinScore, M.cutMedianFactor * localMedian(scene, i, sec(1))));
   const near = sec(0.1);
+  /**
+   * Does the picture move along `axis` (`sign` the way, at least 2 grey pixels, the shift explaining the step) on the
+   * Pass B step just before the grey frame 1/30 s before time `t`, or on the step just after the one 1/30 s after it? A
+   * fast slide moves the picture next to the spike as well; a jump cut between two still framings changes it in one
+   * step, with the picture still on both sides.
+   */
+  const movesBeside = (t: number, axis: 'x' | 'y', sign: number) => {
+    const at = (u: number) => Math.min(grey.count - 1, Math.max(0, Math.round((u - grey.t0) * grey.fps)));
+    const ib = at(t - 1 / grey.fps);
+    const ia = at(t + 1 / grey.fps);
+    return [
+      [ib - 1, ib],
+      [ia, ia + 1],
+    ].some(([p, q]) => {
+      if (p! < 0 || q! >= grey.count) return false;
+      const r = shiftFitWide(frameAt(grey, p!), frameAt(grey, q!), w, h, axis);
+      return Math.sign(r.shift) === sign && Math.abs(r.shift) >= 2 && r.error <= 0.5 * r.errorAtZero;
+    });
+  };
   for (let i = 1; i < n; i++) {
     if (used[i]) continue;
     if (i % 256 === 0) throwIfAborted(signal, 'Reference style');
@@ -835,7 +1006,11 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
       const r = shiftFitWide(before, after, grey.width, grey.height, axis);
       if (Math.abs(r.shift) < 2 || r.error > 0.5 * r.errorAtZero) return false;
       const alike = shiftedNcc(before, after, grey.width, grey.height, axis, r.shift);
-      return alike >= M.cutMaxNcc && alike >= within - M.cutShiftNccDrop;
+      if (alike < M.cutMaxNcc || alike < within - M.cutShiftNccDrop) return false;
+      if (Math.abs(r.shift) <= Math.round((axis === 'y' ? grey.height : grey.width) / 3)) return true;
+      // Beyond a third of the frame, only when the picture moves the same way next to the spike as well (a fast slide):
+      // a jump cut between two still framings of one scene, a third to half a frame apart, stays a cut.
+      return movesBeside(t, axis, Math.sign(r.shift));
     });
     if (moving) continue;
     // Frames either side that still look alike rule out a cut (fast motion, a camera flash), unless they look clearly
@@ -860,29 +1035,71 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
   };
   const touch = sec(M.gradualTouchSec);
   /**
+   * The Pass B frames from 0.1 s before a gradual window to 0.1 s after it (no cut or flash lies that close; a slide
+   * that eases in and out has finished there), and how far the picture moves over them along each axis: the shifts from
+   * step to step (searched over half the frame), counted where the shift explains the step (at most half the difference
+   * left), summed (`sum`) and summed as distances (`path`: a step that lines up the wrong way, as one can across a
+   * slide's seam, adds to it). Worked out once per window, when needed.
+   */
+  const windowMotion = (tStart: number, tEnd: number) => {
+    const steps: Uint8Array[] = [];
+    for (let t = tStart - M.gradualTouchSec; t <= tEnd + M.gradualTouchSec + 1e-6; t += 1 / grey.fps) steps.push(g(t));
+    const moves = new Map<'x' | 'y', { sum: number; path: number }>();
+    const motionAlong = (axis: 'x' | 'y') => {
+      let m = moves.get(axis);
+      if (m === undefined) {
+        m = { sum: 0, path: 0 };
+        for (let k = 1; k < steps.length; k++) {
+          const r = shiftFitWide(steps[k - 1]!, steps[k]!, w, h, axis);
+          if (r.error <= 0.5 * r.errorAtZero) {
+            m.sum += r.shift;
+            m.path += Math.abs(r.shift);
+          }
+        }
+        moves.set(axis, m);
+      }
+      return m;
+    };
+    const sum = (axis: 'x' | 'y') => motionAlong(axis).sum;
+    const path = (axis: 'x' | 'y') => motionAlong(axis).path;
+    /** The same sum, roughly and cheaply: the best shift of each step on frames averaged over 4 × 4 pixels. */
+    let coarse: CoarseFrame[] | null = null;
+    const roughSum = (axis: 'x' | 'y') => {
+      coarse ??= steps.map((s) => shrink(s, w, h));
+      let s = 0;
+      for (let k = 1; k < coarse.length; k++) s += roughShift(coarse[k - 1]!, coarse[k]!, axis);
+      return s;
+    };
+    return { steps, sum, path, roughSum };
+  };
+  /**
+   * The picture moves about a whole frame along one axis over the window, less than `panMinOverlap` of it still in view
+   * (a slide). Checked roughly first, which is enough to rule it out in a shot that only moves a little.
+   */
+  const slidesAWholeFrame = (motion: ReturnType<typeof windowMotion>) =>
+    (['y', 'x'] as const).some((axis) => {
+      const dim = axis === 'y' ? h : w;
+      if (Math.abs(motion.roughSum(axis)) < 0.5 * dim) return false;
+      return dim - Math.abs(motion.sum(axis)) < M.panMinOverlap * dim;
+    });
+  /**
    * Camera motion inside one shot (a pan or tilt, even a whip pan): the frame after the window is the frame before it,
    * moved by the sum of the shifts from step to step (one before/after shift is searched over half the frame at most).
    * A slide between two shots also moves the picture, but by about a whole frame, so the frames must still overlap by
-   * `panMinOverlap` of the frame; they are taken 0.1 s outside the window (no cut or flash lies that close), where a
-   * slide that eases in and out has finished. The moved frames must look alike (`panMinNcc`), and the move must explain
-   * the change (at most half the difference left).
+   * `panMinOverlap` of the frame; they are taken 0.1 s outside the window (`windowMotion`). The moved frames must look
+   * alike (`panMinNcc`), and the move must explain the change (at most half the difference left). A diagonal move (a
+   * pan and a tilt together, as a handheld phone moves) is checked the same way in both axes at once.
    */
-  const cameraMove = (tStart: number, tEnd: number): boolean => {
-    const t0 = tStart - M.gradualTouchSec;
-    const t1 = tEnd + M.gradualTouchSec;
-    const steps: Uint8Array[] = [];
-    for (let t = t0; t <= t1 + 1e-6; t += 1 / grey.fps) steps.push(g(t));
+  const cameraMove = (motion: ReturnType<typeof windowMotion>): boolean => {
+    const { steps } = motion;
     const a = steps[0]!;
     const b = steps[steps.length - 1]!;
     for (const axis of ['y', 'x'] as const) {
       const dim = axis === 'y' ? h : w;
-      let sum = 0;
-      for (let k = 1; k < steps.length; k++) {
-        const r = shiftFitWide(steps[k - 1]!, steps[k]!, w, h, axis);
-        if (r.error <= 0.5 * r.errorAtZero) sum += r.shift;
-      }
-      // No measured motion (a wipe, a zoom), or about a whole frame of it (a slide, or a whip too fast to check).
-      if (Math.abs(sum) < 2 || dim - Math.abs(sum) < M.panMinOverlap * dim) continue;
+      const sum = motion.sum(axis);
+      // No measured motion (a wipe, a zoom), or about a whole frame of it step by step (a slide, also one between two
+      // framings of one scene, which the before/after shift alone would line up; or a whip too fast to check).
+      if (Math.abs(sum) < 2 || dim - motion.path(axis) < M.panMinOverlap * dim) continue;
       // The move: the best shift near that sum, or the one before/after shift where it points the same way (slow steps
       // of under a grey pixel each add up to less than the move).
       const tol = Math.max(2, Math.round(0.15 * Math.abs(sum)));
@@ -901,7 +1118,39 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
         if (shiftError(a, b, w, h, axis, d) <= 0.5 * still && shiftedNcc(a, b, w, h, axis, d) >= M.panMinNcc) return true;
       }
     }
-    return false;
+    // A diagonal move: no shift along one axis lines the steps up, so each step, the sum and the before/after shift are
+    // fitted in both axes at once, with the same tests.
+    let sx = 0;
+    let sy = 0;
+    let px = 0;
+    let py = 0;
+    for (let k = 1; k < steps.length; k++) {
+      const r = shiftFit2d(steps[k - 1]!, steps[k]!, w, h);
+      if (r.error <= 0.5 * r.errorAtZero) {
+        sx += r.dx;
+        sy += r.dy;
+        px += Math.abs(r.dx);
+        py += Math.abs(r.dy);
+      }
+    }
+    const inView = (dx: number, dy: number) => w - Math.abs(dx) >= M.panMinOverlap * w && h - Math.abs(dy) >= M.panMinOverlap * h;
+    if (Math.max(Math.abs(sx), Math.abs(sy)) < 2 || !inView(px, py)) return false;
+    const tx = Math.max(2, Math.round(0.15 * Math.abs(sx)));
+    const ty = Math.max(2, Math.round(0.15 * Math.abs(sy)));
+    const candidates: Array<{ dx: number; dy: number }> = [];
+    let near = { dx: 0, dy: 0, error: Number.POSITIVE_INFINITY };
+    for (let dy = sy - ty; dy <= sy + ty; dy++) {
+      for (let dx = sx - tx; dx <= sx + tx; dx++) {
+        if ((dx === 0 && dy === 0) || !inView(dx, dy)) continue;
+        const e = shiftError2d(a, b, w, h, dx, dy);
+        if (e < near.error) near = { dx, dy, error: e };
+      }
+    }
+    if (Number.isFinite(near.error)) candidates.push(near);
+    const direct = shiftFit2d(a, b, w, h);
+    if (direct.dx * sx + direct.dy * sy > 0 && Math.max(Math.abs(direct.dx), Math.abs(direct.dy)) >= 2 && inView(direct.dx, direct.dy)) candidates.push(direct);
+    const still = shiftError2d(a, b, w, h, 0, 0);
+    return candidates.some(({ dx, dy }) => shiftError2d(a, b, w, h, dx, dy) <= 0.5 * still && shiftedNcc2d(a, b, w, h, dx, dy) >= M.panMinNcc);
   };
   for (let i = 0; i < n; i++) {
     if (!active[i]) continue;
@@ -924,7 +1173,10 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     const tEnd = frames[j]!.t;
     const before = g(tStart - 2 / grey.fps);
     const after = g(tEnd + 2 / grey.fps);
-    if (ncc(before, after) >= 0.6) continue;
+    const motion = windowMotion(tStart, tEnd);
+    // Frames just outside the window that look alike: the same shot, unless the picture moved about a whole frame on
+    // the way (a slide between two similar framings of one scene).
+    if (ncc(before, after) >= 0.6 && !slidesAWholeFrame(motion)) continue;
     throwIfAborted(signal, 'Reference style');
     const inner: Uint8Array[] = [];
     for (let t = tStart; t <= tEnd + 1e-6; t += 1 / grey.fps) inner.push(g(t));
@@ -947,7 +1199,7 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
     // A cross-fade blends the whole frame at once: a soft-edged wipe fits a blend on average but changes one side first.
     if (!blurry && crossFadeFit(before, after, inner).ok && blendSpread(before, after, inner, w, h) <= M.crossFadeMaxSpread) ev.kind = 'cross_fade';
     // A pan or tilt inside one shot (the camera moving, not a join): neither a join nor a shot boundary.
-    else if (cameraMove(tStart, tEnd)) continue;
+    else if (cameraMove(motion)) continue;
     else {
       const sy = consistent(shifts('y'));
       const sx = sy === 0 ? consistent(shifts('x')) : 0;
@@ -1024,6 +1276,32 @@ export function detectJoins(frames: readonly FrameScore[], grey: GreyFrames, fps
       break;
     }
     for (const ev of inside) for (let q = ev.from; q <= ev.to; q++) used[q] = 1;
+  }
+
+  // 6. An end card reached by a slow fade that steps 1–5 did not see: when the last shot pans, tilts or is dim, the fade
+  //    makes no white or black run (the baseline follows the ramp, or the ramp stops short of half of it) and no gradual
+  //    join (the shot's own motion keeps the change usual). The video then ends on the card: its last uniform frame at
+  //    the white (YAVG ≥ 200) or black (YAVG ≤ 30) extreme, before any overlay that comes later, goes on as the card (as
+  //    in step 1) to the end of the span, its uniform frames at that extreme last more than 0.6 s, and no event runs into
+  //    them. The screen starts with the fade into them (`fadeStart`), which must bring the picture to the card's level as
+  //    a white or black run would (by 60 levels to white, or by half of its level to black): a light shot that drifts
+  //    into a nearly uniform frame stays a shot.
+  if (!screenRuns.some((r) => r.to === n - 1)) {
+    let u = n - 1;
+    while (u > 0 && !used[u] && !(uniformAt(u) && extremeAt(u))) u--;
+    const kind = u > 0 && !used[u] ? extremeAt(u) : null;
+    if (kind && cardEnd(u) === n - 1) {
+      let u0 = u;
+      while (u0 - 1 >= 0 && !used[u0 - 1] && uniformAt(u0 - 1) && extremeAt(u0 - 1) === kind) u0--;
+      if ((n - u0) / fps > M.screenMinSec && u0 > 0 && !used[u0 - 1]) {
+        const s = fadeStart(u0, kind);
+        const level = medianOf(y.slice(u0, u + 1));
+        if (kind === 'white' ? level - y[s]! >= M.flashWhiteLift : y[s]! - level >= 0.5 * y[s]!) {
+          screenRuns.push({ from: s, entry: s, to: n - 1, kind });
+          for (let q = s; q < n; q++) used[q] = 1;
+        }
+      }
+    }
   }
 
   // Screens: only a screen at the very start or after the last join is a title or end screen, and the cut or fade into
@@ -1165,19 +1443,27 @@ export async function measureReferenceStyle(proxyPath: string, opts: MeasureRefe
   const fullSpan = Math.min(span, lastT);
 
   // End screen, left out of every measurement (shots, zooms, beat, drop, music): a white or black end screen found
-  // after the last join that runs to the end of the span (design §4.3.1.3a), or else a dark part after the last
-  // boundary, 1.5–5 s long. A screen that stops earlier is followed by a shot whose cut was not found, so nothing is
-  // trimmed then.
+  // after the last join that runs to the end of the span (design §4.3.1.3a), together with the screens after the last
+  // join that run into it (within a frame: a white card that fades out to black, a second card), or else a dark part
+  // after the last boundary, 1.5–5 s long. A screen that stops earlier is followed by a shot whose cut was not found, so
+  // nothing is trimmed then.
   const lastJoin = Math.max(0, ...detected.events.map((e) => e.timeSec));
-  const endScreen = detected.screens.find(([a, b]) => a > lastJoin && a > 0.1 && a < fullSpan && b >= fullSpan - 0.25);
+  const afterLastJoin = detected.screens.filter(([a]) => a > lastJoin && a > 0.1 && a < fullSpan);
+  let endStart = afterLastJoin.find(([, b]) => b >= fullSpan - 0.25)?.[0] ?? null;
+  for (let joined = true; endStart !== null && joined; ) {
+    const start: number = endStart;
+    const before = afterLastJoin.find(([a, b]) => a < start && b >= start - 1.5 / fps);
+    joined = before !== undefined;
+    if (before) endStart = before[0];
+  }
   const boundaries = [0, ...detected.events.map((e) => e.timeSec), ...detected.screens.map((s) => s[0])].filter((t) => t < fullSpan);
   const lastBoundary = Math.max(...boundaries);
   const tail = fullSpan - lastBoundary;
   let measuredSec = fullSpan;
   let trimmed = 0;
-  if (endScreen) {
-    measuredSec = endScreen[0];
-    trimmed = fullSpan - endScreen[0];
+  if (endStart !== null) {
+    measuredSec = endStart;
+    trimmed = fullSpan - endStart;
   } else if (tail >= M.endScreenMinSec && tail <= M.endScreenMaxSec) {
     const ys = frames.filter((f) => f.t >= lastBoundary + 1 / fps).map((f) => f.yavg);
     if (ys.length && ys.reduce((a, b) => a + b, 0) / ys.length <= M.endScreenMaxLuma) {

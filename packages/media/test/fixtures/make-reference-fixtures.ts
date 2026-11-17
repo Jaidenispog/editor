@@ -546,3 +546,165 @@ export function edgeFixtureSpecs(): Record<string, FixtureSpec> {
     },
   };
 }
+
+/**
+ * Two stills of seeded noise (1620 × 2880, so a 540 × 960 window can move over them): smooth blobs, like an
+ * out-of-focus shop interior, and a finer, darker texture, like a wall.
+ */
+const SMOOTH_STILL =
+  "color=c=0x7a6a5a:s=9x16,format=yuv444p,noise=c0s=100:c1s=50:c2s=50:allf=u:all_seed=3101,scale=1620:2880:flags=bicubic,format=yuv444p[a];" +
+  "color=c=0x808080:s=27x48,format=yuv444p,noise=c0s=80:c1s=24:c2s=24:allf=u:all_seed=3102,scale=1620:2880:flags=bicubic,format=yuv444p[b];" +
+  "[a][b]blend=all_expr='clip(A+0.5*(B-128),0,255)',format=rgb24," +
+  'drawbox=x=180:y=420:w=520:h=880:color=0xd8dde0@0.45:t=fill,drawbox=x=900:y=300:w=600:h=40:color=0x5a4030@0.8:t=fill,' +
+  'drawbox=x=700:y=1500:w=380:h=700:color=0x1e1e1e@0.7:t=fill,drawbox=x=300:y=2500:w=1100:h=60:color=0xcaa47e@0.7:t=fill';
+const TEXTURED_STILL =
+  "color=c=0x3a3530:s=54x96,format=yuv444p,noise=c0s=90:c1s=30:c2s=30:allf=u:all_seed=4101,scale=1620:2880:flags=bicubic,format=yuv444p[a];" +
+  "color=c=0x808080:s=108x192,format=yuv444p,noise=c0s=70:c1s=10:c2s=10:allf=u:all_seed=4102,scale=1620:2880:flags=bicubic,format=yuv444p[b];" +
+  "color=c=0x808080:s=9x16,format=yuv444p,noise=c0s=60:c1s=6:c2s=6:allf=u:all_seed=4103,scale=1620:2880:flags=bicubic,format=yuv444p[c];" +
+  "[a][b]blend=all_expr='clip(A+0.5*(B-128),0,255)'[ab];[ab][c]blend=all_expr='clip(A+0.4*(B-128),0,255)',format=rgb24," +
+  'drawbox=x=400:y=900:w=300:h=300:color=0xe0d0b0@0.5:t=fill,drawbox=x=1100:y=2000:w=250:h=500:color=0x303840@0.6:t=fill';
+
+/**
+ * Third review round (all SYNTHETIC, ground truth beside each), partly on the two stills above, held like a phone (a
+ * little shake, grain): cards whose own title is replaced by a cut into a shot that keeps the card's white or black, the
+ * reveal on the music's drop; jump cuts between framings of one scene a third to half a frame apart; an end card that
+ * fades out to black; a slow fade from a dim, tilting shot into a black end card; diagonal camera moves; a 60 fps card
+ * left on an odd frame into a shot that stays in the white run; slides between similar framings at 60 fps; a shot that
+ * brightens before a cut into a white end card.
+ */
+export async function reviewFixtureSpecs(dir: string): Promise<Record<string, FixtureSpec>> {
+  const smooth = await buildStill(dir, 'smooth', SMOOTH_STILL);
+  const textured = await buildStill(dir, 'textured', TEXTURED_STILL);
+  const shake = (a: number, f: number, ph: number) => `${a}*sin(2*PI*${f}*t+${ph})`;
+  /** A 540 × 960 window of a still at (`x`, `y`) (expressions of the shot's time `t`), shaking a little, with grain. */
+  const held = (still: string, x: string, y: string, extra = ''): ShotSpec => ({
+    still,
+    filter: `crop=w=540:h=960:x='${x}+${shake(2.5, 3.7, 0.3)}':y='${y}+${shake(2.5, 2.9, 1.1)}'${extra ? `,${extra}` : ''},noise=alls=8:allf=t:all_seed=99`,
+  });
+  const move = (from: number, dur: number, by: number) => `${by}*clip((t-${from})/${dur},0,1)`;
+  const text = (t: string, size: number, colour: string, y: number, enable?: string) =>
+    `drawtext=fontfile='${FONT}':text='${t}':fontsize=${size}:fontcolor=${colour}:x=(w-tw)/2:y=${y}${enable ? `:enable='${enable}'` : ''}`;
+  const card = (colour: 'white' | 'black', filter: string, fps = FPS): ShotSpec => ({ lavfi: `color=c=${colour}:s=${W}x${H}:r=${fps}`, filter, noise: 6, hue: 0 });
+  // A product close-up on a seamless white backdrop (a jar, its lid and label, a soft shadow: about a quarter of the
+  // frame), and a low-key portrait on black (a lit face, dim shoulders: about a third of the frame).
+  const product: ShotSpec = {
+    lavfi: `color=c=white:s=${W}x${H}:r=${FPS}`,
+    filter: 'drawbox=x=90:y=690:w=360:h=40:color=0xc8c8c8:t=fill,drawbox=x=120:y=360:w=300:h=330:color=0x2a2a2a:t=fill,drawbox=x=110:y=320:w=320:h=50:color=0x8a6a3a:t=fill,drawbox=x=160:y=470:w=220:h=120:color=0xd8c8a0:t=fill',
+    noise: 8,
+    hue: 0,
+  };
+  const portrait: ShotSpec = {
+    lavfi: `color=c=black:s=${W}x${H}:r=${FPS},drawbox=x=110:y=520:w=320:h=440:color=0x505050:t=fill,drawbox=x=170:y=440:w=200:h=100:color=0x6a5040:t=fill,drawbox=x=185:y=150:w=170:h=70:color=0x2a2018:t=fill[p];color=c=0xd09a7a:s=190x240:r=${FPS},format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='255*lt(hypot((X-95)/95,(Y-120)/120),1)'[f];[p][f]overlay=x=175:y=190[out0]`,
+    noise: 8,
+    hue: 0,
+  };
+  /** A subject in the middle of a framing (a different colour in each take). */
+  const subject = (colour: string) => `drawbox=x=200:y=380:w=140:h=200:color=${colour}:t=fill`;
+  return {
+    // A white card whose title is there from its first frame, cut to a product on a white backdrop on the music's drop
+    // (most of the frame stays the card's white), and a black card whose title pops in, cut to a low-key portrait.
+    x23: {
+      name: 'x23-cards-cut-to-shots-on-the-same-white-or-black',
+      shots: [
+        { source: 0 },
+        { source: 3 },
+        card('white', text('NEW IN STORE', 56, '0x1a1a1a', 430)),
+        product,
+        card('black', text('AFTER', 96, '0xeeeeee', 420, 'gte(t,0.2)')),
+        portrait,
+        { source: 1 },
+      ],
+      joins: cuts([2, 4, 6, 8, 9.5, 11.5]),
+      totalSec: 13,
+      audio: clickTrack(120, 'if(lt(t\\,6)\\,0.126\\,1)'),
+      truth: { cuts: [2, 4, 6, 8, 9.5, 11.5], dropSec: 6, screens: 0 },
+    },
+    // Jump cuts between still framings of one scene 40 %, 38 % and 45 % of the frame apart (the subject's colour changes
+    // with each take), then a 0.15 s slide.
+    x24: {
+      name: 'x24-jump-cuts-between-framings',
+      shots: [
+        held(smooth, '500', '900', subject('0x5a3a2a')),
+        held(smooth, '500', '1284', subject('0x6a4a3a')),
+        held(smooth, '705', '1284', subject('0x4a3020')),
+        held(smooth, '705', '852', subject('0x7a5a40')),
+        { source: 7 },
+      ],
+      joins: [...cuts([2, 4, 6]), { type: 'xfade', transition: 'slideup', atSec: 8, durationSec: 0.15 }],
+      totalSec: 10,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4, 6], motion: [{ atSec: 8, axis: 'y', direction: 'up' }] },
+    },
+    // A white end card for 2.4 s that fades out to black (0.6 s) and holds black to the end: one end screen.
+    x25: {
+      name: 'x25-white-end-card-fades-to-black',
+      shots: [{ source: 0 }, { source: 1 }, { source: 3 }, card('white', `${text('BOOK NOW', 48, '0x222222', 420)},${text('link in bio', 28, '0x555555', 490)},fade=t=out:st=2.4:d=0.6:color=black`)],
+      joins: cuts([2, 4, 6]),
+      totalSec: 10,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4], endScreenStartSec: 6 },
+    },
+    // A 1 s fade from a dim handheld shot that tilts down through it (YAVG about 60, so about 40 levels/s; 500 px over
+    // 2.3 s) into a black end card: no black run forms (the ramp stops short of half the baseline) and no gradual join
+    // is found (the tilt keeps the change usual).
+    x26: {
+      name: 'x26-slow-fade-from-dim-tilting-shot-into-black-end-card',
+      shots: [{ source: 0 }, { source: 3 }, held(textured, '400', `700+${move(0.5, 2.3, 500)}`), card('black', text('THANKS FOR WATCHING', 34, '0xdddddd', 430))],
+      joins: [...cuts([2, 4]), { type: 'xfade', transition: 'fade', atSec: 6, durationSec: 1 }],
+      totalSec: 9.5,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4], endScreenStartSec: 6 },
+    },
+    // One handheld shot with three diagonal moves (a pan and a tilt together): (150, 200) px in 0.5 s, (−200, 250) px in
+    // 0.35 s and (100, −350) px in 0.6 s.
+    x27: {
+      name: 'x27-diagonal-camera-moves-in-one-shot',
+      shots: [held(textured, `500+${move(1.5, 0.5, 150)}-${move(3.5, 0.35, 200)}+${move(5.5, 0.6, 100)}`, `900+${move(1.5, 0.5, 200)}+${move(3.5, 0.35, 250)}-${move(5.5, 0.6, 350)}`)],
+      joins: [],
+      totalSec: 7.5,
+      audio: PINK_NOISE,
+      truth: { joins: 0, moves: [{ atSec: 1.5 }, { atSec: 3.5 }, { atSec: 5.5 }] },
+    },
+    // At 60 fps a white card left on frame 365 (k mod 6 = 5, looked up on the grey frame before it) into SMPTE HD bars
+    // brightened by 0.5, which stay in the card's white run.
+    x28: {
+      name: 'x28-card-left-on-an-odd-frame-into-a-bright-shot-60fps',
+      shots: [
+        { source: 0 },
+        { lavfi: `smptehdbars=s=${W}x${H}:r=60` },
+        card('white', text('FRESH FADE', 64, '0x1a1a1a', 430), 60),
+        { lavfi: `smptehdbars=s=${W}x${H}:r=60`, filter: 'eq=brightness=0.5', hue: 0 },
+        { source: 0, hue: 90 },
+      ],
+      joins: cuts([2, 305 / 60, 365 / 60, 8]),
+      totalSec: 9.5,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 305 / 60, 365 / 60, 8] },
+      fps: 60,
+    },
+    // At 60 fps, 0.15–0.3 s slides between framings of one smooth scene 7–9 % apart (the frames either side look alike).
+    x29: {
+      name: 'x29-slides-between-similar-framings-60fps',
+      shots: [held(smooth, '600', '1000'), held(smooth, '600', '1070'), held(smooth, '660', '1070'), held(smooth, '660', '980')],
+      joins: [
+        { type: 'xfade', transition: 'slideup', atSec: 2, durationSec: 0.15 },
+        { type: 'xfade', transition: 'slideleft', atSec: 4, durationSec: 0.2 },
+        { type: 'xfade', transition: 'slidedown', atSec: 6, durationSec: 0.3 },
+      ],
+      totalSec: 8,
+      audio: PINK_NOISE,
+      truth: { motion: [{ atSec: 2, axis: 'y', direction: 'up' }, { atSec: 4, axis: 'x', direction: 'left' }, { atSec: 6, axis: 'y', direction: 'down' }] },
+      fps: 60,
+    },
+    // The last shot brightens for 1.2 s (a camera turning towards a window, about 55 levels/s), then a hard cut into a
+    // white end card: the end screen starts at the cut, not where the shot starts to brighten.
+    x30: {
+      name: 'x30-brightening-shot-then-cut-to-white-end-card',
+      shots: [{ source: 0 }, { source: 3 }, held(textured, '900', '500', "eq=brightness='0.3*clip((t-0.8)/1.2,0,1)':eval=frame"), card('white', `${text('BOOK NOW', 48, '0x222222', 420)},${text('link in bio', 28, '0x555555', 490)}`)],
+      joins: cuts([2, 4, 6]),
+      totalSec: 9,
+      audio: PINK_NOISE,
+      truth: { cuts: [2, 4], endScreenStartSec: 6 },
+    },
+  };
+}
