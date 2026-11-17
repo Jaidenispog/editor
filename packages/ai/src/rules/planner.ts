@@ -23,7 +23,7 @@ import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '..
 import { fitDuration, play, startTimes, totalDuration, grow, shrink, type Draft } from './draft.js';
 import { collectFootage, type Candidate, type Footage } from './footage.js';
 import { MUSIC_END_GAP_SEC, NO_CLEAR_BEAT_NOTES, alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
-import { alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, feltJoinTimes, notePalette, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
+import { PALETTE_NOTE_SLOT, alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, feltJoinTimes, notePalette, paletteNoteFor, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
 import { clamp, hashString, round, seededRandom } from './random.js';
 import { beatSyncFor, effectiveSettings, plannedLength, tameTransition, type EffectiveSettings, type ResolvedEditingStyle, type StyleFallbackStep } from './settings.js';
 import { STYLE_BUILDERS, applyOpening, type BuildContext, type Recipe } from './styles.js';
@@ -731,6 +731,9 @@ function compose(
   const overlays = textFor(drafts).filter((o) => !state.bannedText.has(o.text));
   const captions = state.captionsOn ? buildCaptions(drafts, footage.transcripts) : [];
   if (!music && !originalEnabled && !keep.some(Boolean)) ctx.notes.push('This edit has no sound: there is no music and the original sound is switched off.');
+  // The note for the transitions from the owner's videos says what this plan has: the accents it really places, where.
+  const paletteNote = s.styleFromVideos && ctx.notes.includes(PALETTE_NOTE_SLOT) ? paletteNoteFor(s.styleFromVideos, input.styleId, segments, revealIndex(input.styleId, drafts), grid) : null;
+  const notes = ctx.notes.flatMap((n) => (n !== PALETTE_NOTE_SLOT ? [n] : paletteNote ? [paletteNote] : []));
 
   const title = previous?.title ?? `${style.name}${s.attempt > 0 ? ` · take ${s.attempt + 1}` : ''}`;
   return {
@@ -738,7 +741,7 @@ function compose(
     styleId: input.styleId,
     title: title.slice(0, 80),
     description: describe(ctx, drafts, total, music?.title ?? null, originalEnabled || keep.some(Boolean)),
-    rationale: [...new Set(ctx.notes)].join(' ').slice(0, 2000),
+    rationale: [...new Set(notes)].join(' ').slice(0, 2000),
     output: VERTICAL_1080,
     targetDurationSec: round(clamp(s.target, 5, 90), 2),
     segments,

@@ -126,7 +126,7 @@ describe('editing style from your videos in the rules planner', () => {
     expect(signatures.size).toBe(5);
   });
 
-  it('beat montage: hard cuts except accents, white flashes peaking on every 4th beat, 2-beat shots', () => {
+  it('beat montage: hard cuts except accents, white flashes peaking on 4th beats, 2-beat shots', () => {
     const plan = accepted.get('beat_montage')!;
     const js = joins(plan);
     expect(js.every((j) => j.type === null || j.type === 'fadewhite')).toBe(true);
@@ -141,7 +141,10 @@ describe('editing style from your videos in the rules planner', () => {
     const median = plays[Math.floor(plays.length / 2)]!;
     expect(median / 0.5).toBeGreaterThanOrEqual(1.5);
     expect(median / 0.5).toBeLessThanOrEqual(2.5);
-    expect(plan.rationale).toContain('white flash on every 4th beat, from your style');
+    // The note says what the plan has: each of its flashes on a 4th beat, with 4th beats between them that have none
+    // (the footage decides where one fits), so not "on every 4th beat".
+    expect(flashes.length).toBe(5);
+    expect(plan.rationale).toContain('Straight cuts with 5 white flashes, each on a 4th beat, from your style.');
   });
 
   it('process story: at least 70 % of cuts land within 40 ms of a beat', () => {

@@ -699,7 +699,19 @@ apart from the cut times listed as on the beat, which both planners now take fro
   ≡ 0 (mod `everyBeats`) counted from where the music starts (the grid's bar convention), at most one per 2 s. The
   transition starts at `beat − 0.2 × duration`, so its white or black peak lands on the beat (§4.3.1.3a), and the
   segments either side are lengthened so the total length stays the same. `audio.beatAlignment.alignedCutTimesSec`
-  reports the peak time.
+  reports the peak time. In practice only the beat montage places accents by the beat, where the footage leaves room
+  for one (so not on every such beat); the other styles place one, at the reveal (table below).
+- **The plan note for the accepted transitions** says what the finished plan has (`paletteNoteFor`,
+  `packages/ai/src/rules/editing-style.ts`): it is written when the plan is composed, from its segments as they play,
+  since fitting, the beat, the reveal and repairs can still move or drop an accent. "Straight cuts", "Cross-fades as in
+  your videos" or "Transitions as in your videos", then the accents the plan really has: "with a white flash at the
+  reveal" (the four fitted styles, or nothing about a flash when none was placed), and for the beat montage "with a
+  white flash on every 4th beat from 0:04 to 0:12" only when its flashes fall on every 4th beat between those two (at
+  least three), otherwise "with 3 white flashes, each on a 4th beat", then "and one at the reveal" for the one into the
+  final shot ("dips to black" and "8th" alike). A beat montage with no accent left has no note for its transitions.
+  Before, the note repeated the palette ("a white flash on every 4th beat") whatever the plan had: one flash at the
+  reveal in the cinematic reveal, before & after and process story, and in the montage flashes with gaps between them
+  (for example on beats 12, 20 and 24 and into the final shot), or only two in a 30 s montage.
 - **Beat sync**: `PlannerInput.beatSync` defaults to `editingStyle.beatSync` when neither the form, the Sound
   panel nor a revision ("ignore the beat") set it — the same order in the rules planner and the AI brief
   (`beatSyncFor`). `on` runs `snapCutsToBeats` for styles that do not cut on the beat by themselves (existing).
@@ -885,7 +897,7 @@ choices do not raise `OFF_STYLE_TRANSITION` warnings; errors are unchanged.
 | Accepted value with no video behind it now | The row's line ends "What you accepted earlier from your videos is still in use." (with "In use: from your videos" and **Change: use each style's own**) |
 | Accepted value the videos now differ from | The new suggestion, its "Seen in …", then "What you accepted earlier from your videos is still in use." (with "In use: from your videos", the suggestion's buttons, and **Change: use each style's own** on an editing-style row) |
 | End screen | "Skipped a dark end screen in the last 3 s." |
-| Plan note (rules planner) | "Straight cuts with a white flash on every 4th beat, from your style." / "The finished look lands on the biggest lift in 'Track' (estimate)." |
+| Plan note (rules planner) | From what the plan has (§4.3.1.6): "Straight cuts with a white flash at the reveal, from your style." / "Cross-fades as in your videos, with a white flash at the reveal, from your style." / beat montage: "Straight cuts with a white flash on every 4th beat from 0:04 to 0:12, from your style." (only for flashes on every 4th beat between the two) or "Straight cuts with 3 white flashes, each on a 4th beat, and one at the reveal, from your style." / "The finished look lands on the biggest lift in 'Track' (estimate)." |
 | Plan note (editing style left out) | The three step-down notes and their revision wordings, word for word in §4.3.1.6 ("Never worse than the defaults") |
 | Plan note (trimmed to the music) | "The edit was trimmed to 39.8 s so it ends before the music does." |
 | Plan note (track with no clear beat, §4.3.1.6) | Beat montage: `"Ambient" has no clear beat, so the cuts follow a steady 120 BPM rhythm.` (opening "… cuts through the work to a steady rhythm …"). Other styles, only when a beat option was asked for or accepted: "This track has no clear beat, so shot lengths follow the footage." / "This track has no clear beat, so the reveal stays where the cut works best." / both: "This track has no clear beat, so shot lengths follow the footage and the reveal stays where the cut works best." Reveal on the biggest lift out of reach: "The reveal could not be moved onto the biggest lift with this footage, so it stays where the cut works best." Never "on the beat", "a beat of" or "downbeat" for such a track |

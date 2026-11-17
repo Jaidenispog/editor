@@ -1,4 +1,4 @@
-import { computeTimeline, hasBeatGrid, type Segment, type StyleId, type TransitionType } from '@studio/core';
+import { computeTimeline, formatSeconds, hasBeatGrid, type Segment, type StyleId, type TransitionType } from '@studio/core';
 import { extension, freeIntervals, play, startTimes, type Draft } from './draft.js';
 import { NO_CLEAR_BEAT_NOTES, cutTime, landRevealOnBeat, nearestBeatIndex, shiftCut, strongestBeat, startBeatsThatFit, type BeatGrid } from './music.js';
 import { round } from './random.js';
@@ -153,16 +153,16 @@ export function applyMontagePalette(ctx: BuildContext, drafts: Draft[], grid: Be
       if (type && placeAroundCut(drafts, j, type, Math.min(palette.durationSec, 0.4), 0.5)) others++;
     }
   }
-  if (accents > 0 && es.accent) ctx.notes.push(paletteNote(es));
+  // The note describes the accents the finished plan has (see paletteNoteFor), so it is written once the plan is final.
+  if (accents > 0 && es.accent) ctx.notes.push(PALETTE_NOTE_SLOT);
 }
 
-/** Plain plan note for the accepted transitions. */
-function paletteNote(es: ResolvedEditingStyle): string {
-  const p = es.palette!;
-  const accent = es.accent ? `${es.accent.type === 'fadewhite' ? 'a white flash' : 'a dip to black'}${es.accent.everyBeats ? ` on every ${es.accent.everyBeats === 4 ? '4th' : '8th'} beat` : ' at the reveal'}` : null;
-  if (p.types.length === 0) return accent ? `Straight cuts with ${accent}, from your style.` : 'Straight cuts, from your style.';
-  return `${p.types.includes('fade') ? 'Cross-fades' : 'Transitions'} as in your videos${accent ? `, with ${accent}` : ''}, from your style.`;
-}
+/**
+ * Where the plan note for the accepted transitions goes among the plan notes. The note is written from the finished
+ * plan ({@link paletteNoteFor}) when the plan is composed, since later steps (fitting, the beat, the reveal, repairs) can
+ * still move or drop an accent; a plan never says it has a flash it does not have.
+ */
+export const PALETTE_NOTE_SLOT = '\u0000accepted transitions';
 
 /** Notes for fitted styles once the palette has shaped the joins. */
 export function notePalette(ctx: BuildContext): void {
@@ -172,7 +172,83 @@ export function notePalette(ctx: BuildContext): void {
     ctx.notes.push(es.accent ? 'Clean promo stays calm, so it keeps straight cuts but no flashes.' : 'Straight cuts and cross-fade lengths follow your style.');
     return;
   }
-  ctx.notes.push(paletteNote(es));
+  ctx.notes.push(PALETTE_NOTE_SLOT);
+}
+
+/** The accents of the owner's palette in a finished plan, by where they are (see {@link placedAccents}). */
+export interface PlacedAccents {
+  type: 'fadewhite' | 'fadeblack';
+  /** The beat montage's accents on a beat whose index from where the grid starts is a multiple of `everyBeats`. */
+  onBeats: Array<{ beatIndex: number; atSec: number }>;
+  everyBeats: number | null;
+  /** True when the join into the reveal (the finished look) is an accent. */
+  atReveal: boolean;
+  /** Any other accent (for example one kept by a revision from where the earlier version had it). */
+  other: number;
+}
+
+/**
+ * Finds the accents (the accepted accent type) in a finished plan's segments, timed as the renderer plays them: the one
+ * into the reveal (`revealAt`, the segment index of the finished look), the beat montage's on every `everyBeats`-th beat
+ * of `grid` (peak within 40 ms of a beat whose index is a multiple of it), and the rest. Pure.
+ */
+export function placedAccents(styleId: StyleId, segments: readonly Segment[], revealAt: number, grid: BeatGrid | null, accent: NonNullable<ResolvedEditingStyle['accent']>): PlacedAccents {
+  const placed: PlacedAccents = { type: accent.type, onBeats: [], everyBeats: accent.everyBeats, atReveal: false, other: 0 };
+  computeTimeline({ segments: [...segments] }).segments.forEach((p, i) => {
+    const t = p.segment.transitionIn;
+    if (i === 0 || !t || t.type !== accent.type) return;
+    if (i === revealAt) return void (placed.atReveal = true);
+    const peak = p.startSec + ACCENT_PEAK_FRACTION * t.durationSec;
+    if (styleId === 'beat_montage' && grid && accent.everyBeats) {
+      const k = nearestBeatIndex(grid, peak);
+      const beat = grid.beats[k];
+      if (beat !== undefined && k % accent.everyBeats === 0 && Math.abs(beat - peak) <= 0.04 + 1e-9) return void placed.onBeats.push({ beatIndex: k, atSec: peak });
+    }
+    placed.other++;
+  });
+  return placed;
+}
+
+const ACCENT_WORDS: Record<PlacedAccents['type'], { one: string; many: string }> = {
+  fadewhite: { one: 'white flash', many: 'white flashes' },
+  fadeblack: { one: 'dip to black', many: 'dips to black' },
+};
+
+/**
+ * The accents a plan has, in plain words, or null when it has none: "a white flash on every 4th beat from 0:04 to 0:12"
+ * only for an unbroken run of at least three (every 4th beat between them has one), otherwise how many there are on such
+ * beats ("3 white flashes, each on a 4th beat"); then the one at the reveal and any other. Pure.
+ */
+export function describeAccents(p: PlacedAccents): string | null {
+  const w = ACCENT_WORDS[p.type];
+  const nth = p.everyBeats === 8 ? '8th' : '4th';
+  const aNth = p.everyBeats === 8 ? 'an 8th' : 'a 4th';
+  const parts: string[] = [];
+  const beats = [...p.onBeats].sort((a, b) => a.beatIndex - b.beatIndex);
+  const unbroken = beats.length >= 3 && beats.every((b, i) => i === 0 || b.beatIndex - beats[i - 1]!.beatIndex === p.everyBeats);
+  if (unbroken) parts.push(`a ${w.one} on every ${nth} beat from ${formatSeconds(beats[0]!.atSec)} to ${formatSeconds(beats[beats.length - 1]!.atSec)}`);
+  else if (beats.length === 1) parts.push(`a ${w.one} on ${aNth} beat`);
+  else if (beats.length > 1) parts.push(`${beats.length} ${w.many}, each on ${aNth} beat`);
+  if (p.atReveal) parts.push(parts.length ? 'one at the reveal' : `a ${w.one} at the reveal`);
+  if (p.other > 0) parts.push(parts.length ? (p.other === 1 ? 'one more' : `${p.other} more`) : p.other === 1 ? `a ${w.one}` : `${p.other} ${w.many}`);
+  if (parts.length === 0) return null;
+  return parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * The plan note for the accepted transitions, written from the finished plan (design §4.3.1.6): the joins as accepted
+ * ("Straight cuts", "Cross-fades as in your videos" or "Transitions as in your videos") and the accents the plan really
+ * has, where it has them. Fitted styles place one accent, at the reveal; the beat montage places them on every
+ * `everyBeats`-th beat where the footage allows, and at the reveal. Null for a beat montage with no accent left, which
+ * has no note (as when none could be placed).
+ */
+export function paletteNoteFor(es: ResolvedEditingStyle, styleId: StyleId, segments: readonly Segment[], revealAt: number, grid: BeatGrid | null): string | null {
+  const p = es.palette;
+  if (!p) return null;
+  const accents = es.accent ? describeAccents(placedAccents(styleId, segments, revealAt, grid, es.accent)) : null;
+  if (styleId === 'beat_montage' && !accents) return null;
+  if (p.types.length === 0) return accents ? `Straight cuts with ${accents}, from your style.` : 'Straight cuts, from your style.';
+  return `${p.types.includes('fade') ? 'Cross-fades' : 'Transitions'} as in your videos${accents ? `, with ${accents}` : ''}, from your style.`;
 }
 
 /** Moves each accent so its peak lands on the nearest beat (fitted styles with music). */
