@@ -241,10 +241,15 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   measurements), X12–X22 from the second review (steep fades into cards, cards entered on odd frames at 60 fps,
   overlays that fade, pop, glitch or grow on a card, cuts from a card to bright or dark shots that keep most of its
   white or black, 0.15 s slides next to smooth shots, camera pans inside one shot, slides between similar-looking
-  shots, slow fades into white and black end cards, one with a banner fading in after it), a proxy without sound,
-  numbers only (no array longer than 8) and the AbortSignal. Fixture builds are reproducible (every random input
-  pinned, x264 on fixed slice threads), so a failure repeats on the next run. The frame maths also has FFmpeg-free
-  unit tests (parser, scale fit on known zooms, cross-fade vs wipe, band direction, shifts, the wider shift search,
+  shots, slow fades into white and black end cards, one with a banner fading in after it), X23–X30 from the third
+  review (cuts from a card with a title into a product on a white backdrop and a low-key portrait on black, with the
+  reveal on the music's drop; jump cuts a third to half a frame apart and a fast slide; a white end card that fades out
+  to black; a slow fade from a dim shot into a black end card; diagonal camera moves; a 60 fps card left on an odd
+  frame into a shot that stays in its white run; slides between similar framings at 60 fps; a shot that brightens
+  before a cut into a white end card), a proxy without sound, numbers only (no array longer than 8) and the
+  AbortSignal. Fixture builds are reproducible (every random input pinned, x264 on fixed slice threads), so a failure
+  repeats on the next run. The frame maths also has FFmpeg-free unit tests (parser, scale fit on known zooms,
+  cross-fade vs wipe, band direction, shifts, the wider shift search, the 2-D shift search for diagonal moves,
   whether the shifted frames really look alike, and the measuring constants pinned to
   `REFERENCE_STYLE_ANALYSIS_VERSION`, which must be bumped when they change). Design §4.3.1.10 lists the known limits to
   check on the owner's real videos.
