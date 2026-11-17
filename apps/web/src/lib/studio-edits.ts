@@ -9,6 +9,7 @@ import {
   STYLES,
   clearanceSummary,
   computeTimeline,
+  earliestMusicStartSec,
   editLengthForTrack,
   effectivePreferences,
   formatSeconds,
@@ -69,13 +70,14 @@ export function assertMusicStartFits(startSec: number, editSec: number, trackSec
 }
 
 /**
- * With the music start on automatic the planners trim an edit to a chosen track that is a little shorter (the shared
- * rule, `editLengthForTrack` in @studio/core: a 45-second edit with a 40-second track becomes 39.8 s). A track too short
- * for that would fail every edit in the worker, so it is refused here, before anything is queued, with the same message.
+ * The planners trim an edit to the music a chosen track leaves from its first beat when that is a little short (the
+ * shared rule, `editLengthForTrack` in @studio/core: a 45-second edit with a 40-second track becomes 39.8 s when the
+ * first beat is at 0 s). A track too short for that would fail every edit in the worker, so it is refused here, before
+ * anything is queued, with the same message. `firstBeatSec` is `earliestMusicStartSec` of the track's beats.
  */
-export function assertTrackLongEnough(editSec: number, trackSec: number | null): void {
+export function assertTrackLongEnough(editSec: number, trackSec: number | null, firstBeatSec = 0): void {
   if (trackSec === null || !(trackSec > 0)) return;
-  const length = editLengthForTrack(editSec, trackSec);
+  const length = editLengthForTrack(editSec, trackSec, firstBeatSec);
   if (!length.ok) throw new AppError('VALIDATION', length.message, { details: [{ path: 'musicTrackId', message: length.message }] });
 }
 
@@ -113,7 +115,8 @@ export async function startGeneration(projectId: string, user: SessionUser, raw:
     if (track.status !== 'ready') throw new AppError('CONFLICT', 'That music track is still being analysed. Wait for it to finish or choose another one.');
     if (!track.licence.confirmedByOwnerAt) throw new AppError('VALIDATION', 'Confirm the licence for that track in Settings → Music before using it.');
     if (settings.musicStartSec !== null) assertMusicStartFits(settings.musicStartSec, settings.durationSec, track.durationSec);
-    else assertTrackLongEnough(settings.durationSec, track.durationSec);
+    // The length rule applies with a chosen start too (the planners measure the music from the track's first beat).
+    assertTrackLongEnough(settings.durationSec, track.durationSec, track.beats && track.durationSec ? earliestMusicStartSec(track.beats.beatTimesSec, track.durationSec) : 0);
   } else if (settings.musicStartSec !== null) {
     throw new AppError('VALIDATION', 'Choose a music track before picking where the music starts.', { details: [{ path: 'musicStartSec', message: 'No music chosen' }] });
   }

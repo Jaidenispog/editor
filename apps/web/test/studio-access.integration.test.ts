@@ -329,7 +329,8 @@ suite('access rules, clip order, shot tags, music library and music start (datab
     const statusRoute = await import('../src/app/api/projects/[id]/status/route');
     const status = await call(statusRoute.GET, 'GET', `/api/projects/${ownerProjectId}/status`, { id: ownerProjectId });
     const option = status.json.music.find((m: { id: string }) => m.id === trackId);
-    expect(option).toMatchObject({ bpm: 120, licenceConfirmed: true, durationSec: 40 });
+    // Its first beat (0.05 s in) is where the planners can start the music at the earliest; the form's length rule measures from it.
+    expect(option).toMatchObject({ bpm: 120, licenceConfirmed: true, durationSec: 40, firstBeatSec: 0.05 });
     expect(option.energy.values.length).toBeLessThanOrEqual(120);
     expect(option.energy.stepSec).toBeGreaterThan(0);
   }, 60_000);

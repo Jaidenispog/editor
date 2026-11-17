@@ -92,6 +92,11 @@ export interface MusicOptionDto {
   licenceSummary: string;
   /** Loudness over the track for the start-point picker (shrunk to a few hundred points), once analysed. */
   energy: EnergyCurve | null;
+  /**
+   * Where the music can start at the earliest (seconds into the track): its first beat, as the planners start the music
+   * on a beat (`earliestMusicStartSec`); 0 before it is analysed. The form's length rule measures the music from here.
+   */
+  firstBeatSec: number;
   /** Genres the owner tagged (filled where the status payload provides them). */
   genres?: string[];
   /** Moods the owner tagged (filled where the status payload provides them). */

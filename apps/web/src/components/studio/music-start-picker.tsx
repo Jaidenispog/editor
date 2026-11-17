@@ -2,7 +2,7 @@
 
 import { useId } from 'react';
 import { formatSeconds } from '@/lib/format';
-import { automaticStartNote, latestMusicStart } from '@/lib/shared/music-curve';
+import { automaticStartNote, latestMusicStart, musicLengthNote } from '@/lib/shared/music-curve';
 import type { MusicOptionDto } from '@/lib/shared/studio-dto';
 
 const CURVE_WIDTH = 600;
@@ -11,7 +11,8 @@ const CURVE_HEIGHT = 64;
 /**
  * Where the chosen track starts in the edit: "Automatic" (the editor picks a part that fits) or a start point
  * picked on a slider over the track's loudness curve, shown as mm:ss. The highlighted band is the part of the
- * track the edit will use. The editor snaps the start to the next beat.
+ * track the edit will use. The editor snaps the start to the next beat. Whenever the track trims the edit (the
+ * planners' length rule, automatic or chosen start), it says so.
  */
 export function MusicStartPicker({
   track,
@@ -32,6 +33,7 @@ export function MusicStartPicker({
   const manual = value !== null && canChoose;
   const start = manual ? Math.min(value, latest) : 0;
   const energy = track.energy;
+  const lengthNote = musicLengthNote(track.durationSec, editSec, track.firstBeatSec);
 
   const bars = energy?.values ?? [];
   const barWidth = bars.length ? CURVE_WIDTH / bars.length : 0;
@@ -69,7 +71,7 @@ export function MusicStartPicker({
         </label>
       </div>
       {!canChoose ? (
-        <p className="text-xs text-charcoal-500">{automaticStartNote(track.durationSec, editSec)}</p>
+        <p className="text-xs text-charcoal-500">{automaticStartNote(track.durationSec, editSec, track.firstBeatSec)}</p>
       ) : manual ? (
         <div>
           <div className="flex items-baseline justify-between gap-2">
@@ -92,8 +94,11 @@ export function MusicStartPicker({
           />
           <p id={`${id}-hint`} className="mt-1 text-xs text-charcoal-500">
             The edit plays {formatSeconds(start)}–{formatSeconds(start + editSec)} of the track. The music starts on the next beat from this point.
+            {lengthNote ? ` ${lengthNote}` : ''}
           </p>
         </div>
+      ) : lengthNote ? (
+        <p className="text-xs text-charcoal-500">{lengthNote}</p>
       ) : null}
     </fieldset>
   );

@@ -126,9 +126,10 @@ export function StyleControls({
   const musicValid = !musicTrackId || (musicChoice?.status === 'ready' && musicChoice.licenceConfirmed);
   // The chosen start always leaves room for the whole edit, even after the length slider moves.
   const effectiveMusicStart = musicChoice && musicStartSec !== null && latestMusicStart(musicChoice.durationSec, durationSec) > 0 ? Math.min(musicStartSec, latestMusicStart(musicChoice.durationSec, durationSec)) : null;
-  // With the start on automatic a track a little shorter than the edit trims it (the shared rule the planners use);
-  // a track too short for that would fail every edit, so Generate waits for a longer track or a shorter length.
-  const musicLength = musicChoice?.status === 'ready' && musicChoice.durationSec && effectiveMusicStart === null ? editLengthForTrack(durationSec, musicChoice.durationSec) : null;
+  // A track whose music (from its first beat) is a little shorter than the edit trims it, with the start on automatic
+  // or chosen (the shared rule the planners use); a track too short for that would fail every edit, so Generate waits
+  // for a longer track or a shorter length.
+  const musicLength = musicChoice?.status === 'ready' && musicChoice.durationSec ? editLengthForTrack(durationSec, musicChoice.durationSec, musicChoice.firstBeatSec) : null;
 
   const titles = useMemo(() => new Map(status.music.map((m) => [m.id, m.artist ? `${m.title} – ${m.artist}` : m.title])), [status.music]);
   const musicOptions = useMemo(
