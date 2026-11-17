@@ -174,13 +174,32 @@ History of the background runs:
       browser tests (about 35 minutes). Stage C scripts take `E2E_SKIP_BUILD=1` after Stage A has built.
     - **What remains:** WP10 Zernio (blocked on docs access), and everything that needs the owner's real accounts and
       footage (README "Not yet done").
+16. WP10 TikTok via Zernio built, reviewed and pushed (1,478 unit tests, integration 12/12, Stage A 51/51, Stage B
+    77/77, Stage C bookings 124/124, website 114/114, **TikTok 105/105**):
+    - The owner approved a personal cloud environment "editor" for this repository that allows docs.zernio.com and
+      zernio.com (plus package registries); this session uses it. Its one-line setup script (`pnpm install`) has not
+      run in a fresh session yet.
+    - Research: `docs/research/zernio-api.md` (dated 15 Nov 2026, every fact quoted with its page) and publishing §7.2
+      rewritten from the docs, checked by an adversarial verifier (176 claims; 13 corrected). Open items only block
+      the first live verification post, not the code.
+    - Review: 7 issues (incl. a draft that could show as published, Zernio wording with the flag off, rate limits read
+      as "reconnect") and the poll safety-net follow-up, all fixed; round 2 fixed forged hints displacing genuine ones
+      and an orphaned poll row keeping a target on "Checking…"; the lead kept verified hints across key refusals.
+    - New browser test `apps/web/e2e/run-stage-c-tiktok.sh` (port 4300, `studio_e2e_c3`; flag on, then off).
+    - **Lesson recorded:** a push once went out while the TikTok browser test had 2 failures (the test still expected
+      wording the review had removed). Push only through `scratchpad/push-if-green.sh <verify output> 5`, which
+      refuses unless every step exited 0 and all five browser tests report 0 failures.
+    - In progress: reference style v2 (run `wf_d3892033-bcb`): measure transitions, beat-synced cuts, tempo and
+      drop-timed reveals from the owner's own videos. The owner asked to base the edits on their TikTok
+      (@jc_chopz); TikTok is not reachable from here and must not be scraped, so they were asked for 3–5 of their
+      own videos (attached here or via Google Drive) to calibrate the editor and decide which effects to add.
       **WP10 Zernio stays blocked:** the plan requires docs.zernio.com to be read first; this environment's proxy
       refuses docs.zernio.com and zernio.com (CONNECT 403) and WebFetch cannot resolve them. Needs the owner to
       allow those hosts (a network change) before WP10 can start.
     - The preview/showcase restart is scripted: `scratchpad/restart-preview.sh` (stops by pgid, copies the
       standalone build, migrates both databases, restarts, records new pgids). Run it without a pipe to `tail`.
 
-16. 2026-11-15, branch `worktree-wf_d3892033-bcb-1`: **reference style v2 — "your style from your videos"** (owner's
+17. 2026-11-15 to 17, merged into `claude/blissful-lamport-f1lndn`: **reference style v2 — "your style from your videos"** (owner's
     request to base the edits on their TikTok: animations, transitions, music; preferences design §4.3.1). TikTok is
     never read or scraped; the owner uploads their own posted videos as reference videos. Built: measuring in
     `packages/media/src/analysis/reference-style.ts` (transitions, beat sync with a chance correction, drop, zooms,
@@ -206,8 +225,38 @@ History of the background runs:
     alike), and a long bright run counted as a white screen because its brightest frame was uniform (now frame by
     frame). The planner's last resort steps down: first without the transitions from the owner's videos (keeping the
     beat, beats per cut, the reveal and zooms), then without the editing style, each with its own plan note.
-    **Next:** run it on 3–5 of the owner's real posted videos and tune the thresholds (design §4.3.1.10); every
-    threshold is a starting value from synthetic clips.
+    Review round 2 (independent review of that fix-up: 43 agents, 15 confirmed findings) and its fix-ups, in two
+    tracks, each independently verified and rechecked:
+    - Measuring: cards (white or black screens) are judged frame by frame and continue while the frame still shows
+      the card, so logos, banners and text animating in stay in the card while a cut that takes the card's marks
+      away ends it; steep fades into cards are not cuts; the cut into a card is anchored at its own frame (no double
+      count at 60/24 fps); white and black end screens are left out of every measurement; slow fades into end cards
+      start the end screen; the cut test searches shifts up to half the frame only when the picture is moving beside
+      the spike (fast slides stay slides, jump cuts stay cuts); pans and tilts (also diagonal) inside one shot are
+      not joins. Regression fixtures X12-X30; the measuring constants are pinned to REFERENCE_STYLE_ANALYSIS_VERSION
+      (still 1: no real profile exists yet; bump it whenever measuring semantics change). On a 525-clip SYNTHETIC
+      battery measured on identical bytes: 485 right (403b68e 314, 258cadc 287), no clip right before and wrong now
+      except the two trade-offs listed under "Known limits" in design §4.3.1.10.
+    - Planner, worker and core: one shared length rule (packages/core edit-length.ts, measured from the first usable
+      beat) for both planners, the worker, the route and the form, which also fixes a live bug where a 45 s edit with
+      a slightly shorter track failed in the worker; the music starts on the beat the cuts snap to and beatAlignment
+      reports only beats a plan really hits (none for tracks without a clear beat); fallback, revision and palette
+      notes describe what the finished plan does; musicFit only ranks tracks; the worker refuses a too-short track
+      before any planner call; the Your style summary combines only the current measuring version and keeps accepted
+      values visible and stoppable; a reversed tempo range is refused (400).
+    **Next:** run it on 3–5 of the owner's real posted videos and tune the thresholds (design §4.3.1.10, including the
+    known limits there); every threshold is a starting value from synthetic clips.
+18. 2026-11-17: **CI fixed** (GitHub Actions had failed on all 93 runs). No assertion had ever failed: fresh runners have
+    no data/samples (git-ignored), and (A) the media tests' footage lock was taken before its folder existed, so they
+    waited out a 240 s timeout; (B) render.test.ts never generated the footage and logo/look skipped silently; (C)
+    four worker DB tests ran scripts/make-sample-footage.sh at once and broke each other's files. Now one coordinated
+    generator (a portable mkdir lock with an exclusively created owner record and stale-lock takeover, a re-check
+    under the lock, a per-run temporary folder, a completion marker; macOS bash 3.2 compatible) serves every caller,
+    every synthetic source is deterministic, and square-changes-db.test.ts books at 10:00 Melbourne time (it failed
+    whenever the suite ran after about 22:00 Melbourne). The whole CI sequence passes on a fresh checkout with no
+    data/ folder (also on 2 CPUs); a faketime audit (app and Postgres on the same fake clock) found no other
+    time-of-day dependence. Check GitHub's CI result after every push (the local verify-all.sh does not run on a
+    fresh checkout).
 
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead

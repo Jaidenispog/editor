@@ -14,7 +14,6 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import pino from 'pino';
-import { execa } from 'execa';
 import { eq } from 'drizzle-orm';
 import { loadEnv } from '@studio/config';
 import { DEFAULT_SETTINGS, newId, readReferenceProfile, type AppSettings, type EditPlan, type JobType, type PlanFacts } from '@studio/core';
@@ -22,6 +21,7 @@ import { schema, type DatabaseHandle } from '@studio/db';
 import { LocalDiskStore, storageKeys } from '@studio/storage';
 import { createAiProviders, type OnScreenTextEstimator } from '@studio/ai';
 import { runFfmpeg, runFfmpegToBuffer } from '@studio/media';
+import { ensureSamples, SAMPLES_DIR as SAMPLES } from '@studio/media/test/sample-footage';
 import type { WorkerContext } from '../src/context.js';
 import type { TrackedRun } from '../src/lib/job-tracker.js';
 import { handleIngestAsset, refreshProjectReadiness } from '../src/handlers/ingest.js';
@@ -36,7 +36,6 @@ import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 import { fakeRun } from './helpers/fakes.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..', '..');
-const SAMPLES = path.join(REPO, 'data', 'samples');
 const skip = !testDatabaseUrl();
 
 function runWith(onProgress: (message: string | undefined) => Promise<void>): TrackedRun {
@@ -110,8 +109,10 @@ describe.skipIf(skip)('preferences, reference videos and brand (database-backed)
   const asset = async (id: string) => (await handle.db.query.mediaAssets.findFirst({ where: eq(schema.mediaAssets.id, id) }))!;
   const storedSettings = async () => (await handle.db.query.settings.findFirst({ where: eq(schema.settings.id, 'default') }))!.data as AppSettings;
 
+  // Generates the synthetic footage when it is missing (first test file to ask does it; the others wait for it).
+  beforeAll(ensureSamples, 300_000);
+
   beforeAll(async () => {
-    if (!existsSync(path.join(SAMPLES, 'sample_c_noaudio_scenes.mp4'))) await execa('bash', [path.join(REPO, 'scripts', 'make-sample-footage.sh'), SAMPLES]);
     const t = await createTestDatabase();
     handle = t.handle;
     drop = t.drop;
@@ -197,8 +198,8 @@ describe.skipIf(skip)('preferences, reference videos and brand (database-backed)
   }, 600_000);
 
   afterAll(async () => {
-    await drop();
-    await rm(root, { recursive: true, force: true });
+    await drop?.();
+    if (root) await rm(root, { recursive: true, force: true });
   });
 
   it('measures a reference video, stores the profile and deletes the original, proxy and frames', async () => {

@@ -5,7 +5,6 @@
  * references never reach the planner. Skipped unless TEST_DATABASE_URL is set.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,6 +17,7 @@ import { schema, type DatabaseHandle } from '@studio/db';
 import { LocalDiskStore, storageKeys } from '@studio/storage';
 import { probeMedia } from '@studio/media';
 import { createAiProviders } from '@studio/ai';
+import { ensureSamples, SAMPLES_DIR as SAMPLES } from '@studio/media/test/sample-footage';
 import type { WorkerContext } from '../src/context.js';
 import type { TrackedRun } from '../src/lib/job-tracker.js';
 import { handleIngestAsset, refreshProjectReadiness } from '../src/handlers/ingest.js';
@@ -28,7 +28,6 @@ import { loadMusic, loadProjectFootage, loadSettings } from '../src/lib/plan-con
 import { createTestDatabase, testDatabaseUrl } from './helpers/db.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..', '..');
-const SAMPLES = path.join(REPO, 'data', 'samples');
 const skip = !testDatabaseUrl();
 
 function fakeRun(): TrackedRun {
@@ -71,8 +70,10 @@ describe.skipIf(skip)('music controls on synthetic footage', () => {
   const resolve = (key: string) => (ctx.store as LocalDiskStore).resolvePath(key);
   const version = async (id: string) => (await handle.db.query.editVersions.findFirst({ where: eq(schema.editVersions.id, id) }))!;
 
+  // Generates the synthetic footage when it is missing (first test file to ask does it; the others wait for it).
+  beforeAll(ensureSamples, 300_000);
+
   beforeAll(async () => {
-    if (!existsSync(path.join(SAMPLES, 'sample_music_120bpm.mp3'))) await execa('bash', [path.join(REPO, 'scripts', 'make-sample-footage.sh'), SAMPLES]);
     const t = await createTestDatabase();
     handle = t.handle;
     drop = t.drop;
@@ -148,8 +149,8 @@ describe.skipIf(skip)('music controls on synthetic footage', () => {
   }, 600_000);
 
   afterAll(async () => {
-    await drop();
-    await rm(root, { recursive: true, force: true });
+    await drop?.();
+    if (root) await rm(root, { recursive: true, force: true });
   });
 
   it('plans the first version with music', async () => {

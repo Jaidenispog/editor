@@ -1,6 +1,6 @@
 import { TARGET_PLATFORM_NAMES, formatSeconds } from '@studio/core';
 import type { PublishPostDto } from '@/lib/shared/publishing-dto';
-import { methodLabel } from './labels';
+import { methodLabel, verificationNotice } from './labels';
 
 /**
  * The review step's summary of one saved draft, per destination: account, method, the exact file, the final caption
@@ -24,7 +24,7 @@ export function ReviewCard({ post }: { post: PublishPostDto }) {
             </p>
             {t.isVerification ? (
               <p className="mt-1 rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
-                {t.method === 'zernio' && t.delivery === 'draft' ? `This sends a real draft to the TikTok inbox of ${t.handle}.` : `This is a real, public post on ${t.handle}.`} Choose an edit you&apos;re happy to share.
+                {verificationNotice(t.method, t.delivery, t.handle)} Choose an edit you&apos;re happy to share.
               </p>
             ) : null}
             {t.method === 'zernio' && t.delivery === 'publish' ? <p className="mt-1 text-charcoal-700">Public immediately on TikTok. Cover at the frame you chose.</p> : null}

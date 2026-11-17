@@ -498,7 +498,9 @@ export function targetActionsFor(t: TargetActionFacts): TargetAction[] {
           break;
         case 'review_copyright_match':
         case 'music_licence_changed':
-          if (t.variant === 'standard') out.push('post_without_music');
+          // A Zernio approval binds the exact file (plan §10.3), so a music-free swap could only fail at send time:
+          // the owner makes the post again without music instead (or posts it themselves).
+          if (t.variant === 'standard' && t.method !== 'zernio') out.push('post_without_music');
           out.push('post_manually', 'cancel');
           break;
         default:

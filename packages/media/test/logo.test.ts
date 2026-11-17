@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,7 +21,7 @@ import {
   type RenderInputs,
   type RenderLogo,
 } from '../src/render/index.js';
-import { ASSET_IDS, FONTS_DIR, MUSIC_TRACK_ID, SAMPLE_FILES, TEST_BRAND, fakeProbe, samplePlan } from './render-fixtures.js';
+import { ASSET_IDS, FONTS_DIR, MUSIC_TRACK_ID, SAMPLE_FILES, TEST_BRAND, ensureSamples, fakeProbe, hasFfmpeg, samplePlan } from './render-fixtures.js';
 
 const RENDER_TIMEOUT = 240_000;
 const logo = (overrides: Partial<RenderLogo> = {}): RenderLogo => ({ path: '/tmp/logo.png', width: 300, height: 200, placement: 'both', corner: 'top_left', opacity: 0.85, ...overrides });
@@ -154,11 +153,15 @@ describe('logo geometry', () => {
   });
 });
 
-const haveSamples = existsSync(SAMPLE_FILES.c) && existsSync(SAMPLE_FILES.music);
+const ffmpegAvailable = await hasFfmpeg();
+if (!ffmpegAvailable) console.warn('ffmpeg/ffprobe not found on PATH: skipping the logo pixel tests that need them.');
 
-describe.skipIf(!haveSamples)('logo pixels', () => {
+describe.skipIf(!ffmpegAvailable)('logo pixels', () => {
   let dir: string;
   let logoPath: string;
+
+  // Generates the synthetic footage when it is missing (first test file to ask does it; the others wait for it).
+  beforeAll(ensureSamples, 300_000);
 
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), 'studio-logo-'));

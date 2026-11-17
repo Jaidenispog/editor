@@ -266,7 +266,7 @@ publishing §7.2.
 
 | Method | Route | Notes |
 | --- | --- | --- |
-| GET | `/api/integrations/zernio` | Session. `ZernioConnectionDto`: `enabled`, `configured`, `missingEnv`, `connectionStatus`, `keyHint` (last four characters only; never the key), `lastError`, `lastCheckedAt`, `candidates` (TikTok accounts Zernio listed, each with a plain `problem` or null), `account` (lane, verified, draft verified, both switches, `last24h`), `webhookSigning`, `webhookUrl`, `canManage` |
+| GET | `/api/integrations/zernio` | Session. `ZernioConnectionDto`: `enabled`, `configured`, `missingEnv`, `connectionStatus`, `keyHint` (last four characters only; never the key), `lastError`, `lastCheckedAt`, `candidates` (TikTok accounts Zernio listed, each with a plain `problem` or null), `account` (lane, verified, draft verified, both switches, `last24h`), `webhookSigning`, `webhookUrl`, `canManage`. With `TIKTOK_PUBLISH_PROVIDER` not `zernio` only `{ enabled: false, canManage }` carries information: no key hint, candidates, account, last error or webhook address (`webhookUrl` null) |
 | POST | `/api/integrations/zernio` | Owner. `{ apiKey: 10–200 characters }` (no prefix check: `sk_` and `zrk_` keys) → `{ status, keyHint, jobId }`. Key encrypted on the `zernio` connection, audit `integration.zernio.connected`, read-only `social.check` queued |
 | POST | `/api/integrations/zernio/account` | Owner. `{ zernioAccountId }`, one of the listed candidates (400 otherwise). Keeps one Zernio TikTok row: choosing again replaces its Zernio id; a different handle starts unverified with both switches off. Audit `social_account.selected`; check queued |
 | POST | `/api/integrations/zernio/check` | Owner. → `{ jobId }` of a read-only `social.check`. Never posts |
@@ -275,9 +275,10 @@ publishing §7.2.
 
 Worker: `publish.target` runs the Zernio state machine (health → account list and cooldown → creator info → presign →
 `PUT` upload → `submitted_at` → `POST /v1/posts` with `Idempotency-Key` = target id and `metadata.studioTargetId`);
-`publish.poll` reads `GET /v1/posts/{id}` at 1, 2, 5 and 10 minutes, every 15 minutes to 6 hours, then every 50
-minutes to 50 hours, or after an unclear create looks the post up (`GET /v1/posts?updatedSince&accountId&fields`) four
-times before "check before retry"; a Retry of a failed post calls `POST /v1/posts/{id}/retry`; `webhook.process`'s
+`publish.poll` reads `GET /v1/posts/{id}` at 1, 2, 5 and 10 minutes, every 15 minutes to 6 hours, then hourly to
+exactly 50 hours (a post still waiting then becomes "check before retry"), or after an unclear create looks the post up
+(`GET /v1/posts?updatedSince&accountId&fields`, following `pagination.nextCursor` for up to 10 pages) four times before
+"check before retry"; a webhook hint only reads (it never uses up a lookup); a Retry of a failed post calls `POST /v1/posts/{id}/retry`; `webhook.process`'s
 `zernio` handler only queues a read (`account.disconnected` queues the check). No new job types.
 
 ## Square appointments (Stage C, WP6 and WP6b)

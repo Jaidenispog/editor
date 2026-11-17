@@ -35,6 +35,14 @@ export function methodLabel(method: PublishMethod, delivery: 'publish' | 'draft'
   return isVerification ? 'First verification post (publish from Studio Assistant)' : METHOD_LABELS[method];
 }
 
+/**
+ * The warning on a first verification post (composer, review step and the destination card): a Zernio draft goes to
+ * the TikTok inbox and is not public, everything else is a real, public post.
+ */
+export function verificationNotice(method: PublishMethod, delivery: 'publish' | 'draft' | undefined, handle: string): string {
+  return method === 'zernio' && delivery === 'draft' ? `This sends a real draft to the TikTok inbox of ${handle}.` : `This is a real, public post on ${handle}.`;
+}
+
 /** Numbered manual steps per platform (design §4.4). */
 export const MANUAL_STEPS_TEXT = {
   instagram: ['Open Instagram and tap +', 'Choose Reel, then the video you downloaded', "Cover: pick the frame, or 'Add from camera roll' with the cover image", 'Paste the caption', 'Tap Share'],

@@ -17,7 +17,7 @@ export async function handlePublishPoll(ctx: WorkerContext, run: TrackedRun, pay
   const target = await ctx.db.query.publishTargets.findFirst({ where: eq(schema.publishTargets.id, payload.targetId) });
   const post = target ? await ctx.db.query.publishPosts.findFirst({ where: eq(schema.publishPosts.id, target.postId) }) : null;
   if (!target || !post) return;
-  if (target.method === 'zernio') return runZernioPoll(ctx, run, target, payload.pollNo);
+  if (target.method === 'zernio') return runZernioPoll(ctx, run, target, payload.pollNo, { hint: payload.hint === true });
   if (target.status !== 'processing') return;
   if (target.method === 'instagram_api') await runInstagramPoll(ctx, run, target, post, payload.pollNo);
 }

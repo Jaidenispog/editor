@@ -10,7 +10,7 @@ coverage/
 .env.*
 !.env.example
 # local runtime data (media, database, temp renders)
-/data/
+/data
 /tmp/
 /.pg/
 .DS_Store

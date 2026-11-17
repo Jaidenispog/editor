@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, lte, lt, ne, or } from 'drizzle-orm';
-import { manualStepMessage, melbourneScheduleLabel, type JobPayload, type TargetPlatform } from '@studio/core';
+import { ZERNIO_LONG_POLL_INTERVAL_SEC, manualStepMessage, melbourneScheduleLabel, type JobPayload, type TargetPlatform } from '@studio/core';
 import { schema } from '@studio/db';
 import type { WorkerContext } from '../context.js';
 import { enqueueTracked } from '../lib/jobs.js';
@@ -8,6 +8,14 @@ import { refreshPostStatus, toManualStep, updateTarget } from '../publishing/pos
 
 /** A `processing` target untouched for this long has lost its job (its attempts ran out or the worker died). */
 export const STALLED_TARGET_MINUTES = 60;
+
+/**
+ * A Zernio target with a post id is read at least hourly, and every read touches the row. So while one of its reads
+ * is queued or running it is left alone only if it was touched within two long-poll gaps plus a margin (2 h 15 min).
+ * Beyond that the tracking row is not trusted (an orphaned `queued` row, say, left when pg-boss gave up while the
+ * worker was down) and the plain net settles the target, so it never shows "Checking…" for ever.
+ */
+export const ZERNIO_LIVE_POLL_MAX_SILENCE_MINUTES = (2 * ZERNIO_LONG_POLL_INTERVAL_SEC) / 60 + 15;
 
 /** True when a job of this type for this target is still queued or running (its tracking row). */
 async function hasActiveJob(ctx: WorkerContext, type: string, refId: string): Promise<boolean> {
@@ -55,12 +63,17 @@ export async function handlePublishDispatch(ctx: WorkerContext, run: TrackedRun,
     handed++;
   }
 
-  // Safety net: a processing target nobody has touched for an hour lost its job.
+  // Safety net: a processing target nobody has touched for an hour lost its job. A Zernio target that already has its
+  // post id is read on its own schedule (hourly between 6 h and 50 h, design §7.2.4 step 6), so it is skipped while a
+  // read of it is queued or running, but only until it has been silent for ZERNIO_LIVE_POLL_MAX_SILENCE_MINUTES;
+  // Instagram targets and Zernio targets without a post id keep the plain net.
+  const liveSince = now.getTime() - ZERNIO_LIVE_POLL_MAX_SILENCE_MINUTES * 60_000;
   const stalled = await ctx.db
     .select()
     .from(t)
     .where(and(eq(t.status, 'processing'), lt(t.updatedAt, new Date(now.getTime() - STALLED_TARGET_MINUTES * 60_000)), ne(t.method, 'manual')));
   for (const s of stalled) {
+    if (s.method === 'zernio' && s.externalPostId && s.updatedAt.getTime() > liveSince && (await hasActiveJob(ctx, 'publish.poll', s.id))) continue;
     if (s.submittedAt && !s.externalPostId) {
       await toManualStep(ctx.db, s.id, ['processing'], 'check_before_retry', manualStepMessage('check_before_retry', s.platform as TargetPlatform));
     } else {

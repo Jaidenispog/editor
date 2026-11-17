@@ -1,15 +1,17 @@
 import { fileURLToPath } from 'node:url';
 import { VERTICAL_1080, type AssetProbe, type EditPlan } from '@studio/core';
 import type { RenderBrand } from '../src/render/index.js';
+import { samplePath } from './sample-footage.js';
 
-export const SAMPLES_DIR = fileURLToPath(new URL('../../../data/samples/', import.meta.url));
+export { ensureSamples, hasFfmpeg } from './sample-footage.js';
 export const FONTS_DIR = fileURLToPath(new URL('../../../assets/fonts/', import.meta.url));
 
+/** Paths of the synthetic samples; call ensureSamples() before using them. */
 export const SAMPLE_FILES = {
-  a: `${SAMPLES_DIR}sample_a_portrait_sdr.mp4`,
-  b: `${SAMPLES_DIR}sample_b_rotated_hevc_hlg.mov`,
-  c: `${SAMPLES_DIR}sample_c_noaudio_scenes.mp4`,
-  music: `${SAMPLES_DIR}sample_music_120bpm.mp3`,
+  a: samplePath('sample_a_portrait_sdr.mp4'),
+  b: samplePath('sample_b_rotated_hevc_hlg.mov'),
+  c: samplePath('sample_c_noaudio_scenes.mp4'),
+  music: samplePath('sample_music_120bpm.mp3'),
 } as const;
 
 export const ASSET_IDS = { a: 'asset-a', b: 'asset-b', c: 'asset-c' } as const;

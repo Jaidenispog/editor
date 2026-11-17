@@ -77,7 +77,7 @@ function tiktokStatus(env: Parameters<IntegrationBuilder>[0], facts: Parameters<
       configured: false,
       connected: false,
       missingEnv: [],
-      message: `${TIKTOK_MANUAL_LINE} Automatic TikTok posting isn't switched on: TikTok doesn't allow it for a private app, and the optional route through Zernio is off on this server.`,
+      message: `${TIKTOK_MANUAL_LINE} Automatic TikTok posting isn't available: TikTok doesn't allow it for a private app.`,
       state: 'unavailable',
       liveMode: null,
       verified: false,

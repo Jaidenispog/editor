@@ -16,8 +16,11 @@ import { loadEnv } from '@studio/config';
 import {
   SQUARE_READ_SCOPES,
   SQUARE_WRITE_SCOPES,
+  addDaysToDate,
   bookingChangeIdempotencyKey,
   classifyVariation,
+  melbourneDateOf,
+  melbourneLocalToUtc,
   newId,
   parseSquareConfig,
   selfTestChangeId,
@@ -54,8 +57,14 @@ describe.skipIf(skip)('Square booking changes (Tier 1) with a fake Square API', 
   let fake: FakeSquareServer;
   let ctx: WorkerContext;
   const queue: Queued[] = [];
-  // A Melbourne-morning instant three days ahead, on a whole quarter hour.
-  const base = new Date(Math.ceil((Date.now() + 3 * DAY) / (15 * 60_000)) * 15 * 60_000);
+  // 10:00 in Melbourne three days ahead, whatever time the tests run: slots are searched within the Melbourne day of
+  // the requested one, so a base that followed the clock (now + 3 days) put the later slots past midnight when the
+  // suite ran in the Melbourne evening, and five tests failed.
+  const base = (() => {
+    const local = melbourneLocalToUtc(addDaysToDate(melbourneDateOf(new Date()), 3), '10:00');
+    if (!local.ok) throw new Error(`10:00 in Melbourne is always a valid local time (${local.reason})`);
+    return local.instant;
+  })();
   const at = (offsetMs: number) => new Date(base.getTime() + offsetMs).toISOString();
 
   const conn = async () => (await handle.db.query.integrationConnections.findFirst({ where: eq(schema.integrationConnections.provider, 'square') }))!;
