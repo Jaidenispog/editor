@@ -246,17 +246,23 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   not measured; drop on a step, single knock rejected, click windows smoothed; every palette family and the worked
   example; v1 → v2 reads; summary 1 of 1, 1 of 2 differs, 3 of 4 pooled, octave-folded tempos, older profiles only for
   v1 rows, profiles from an older measuring version (a simulated bump to version 2) combined into no row, the pace
-  included, and counted with the "measured with an older version of the measuring" wording; `alsoChanges`,
+  included, and counted with the "measured with an older version of the measuring" wording, still counted after the
+  same videos are uploaded again (so the wording says to remove the old copies); a transitions value accepted from
+  three videos stays in use, with the "still in use" line and stoppable, after a version bump and with no videos;
+  `alsoChanges`,
   `valueKey` stability and conflicts; no "exact/precise/detected/trending/viral" wording),
   `packages/core/test/editing-style.test.ts` (an accepted music fit alone is not a planning value; `MusicFitSchema`
   accepts an ordered range and a single tempo and refuses `bpmLow` above `bpmHigh`, nested too),
   `packages/core/test/music-ranking.test.ts` (fit: in-range above out-of-range, half time +1, drop +1, unusable last,
-  no fit = unchanged order), `packages/ai/test/rules-editing-style.test.ts` (defaults: a stored hash of 40 plans equal
-  to the commit before this feature; accepted style: all five plans valid with no errors and still different, beat
-  montage accents on every 4th beat within ±40 ms, 2-beat shots, process story ≥ 70 % of cuts on the beat, the reveal
-  on the strongest beat within ±0.1 s, punch-ins continuing the same shot at 1.2× and never above 1.25, clean promo
-  calm, "remove the flashy transitions" removes every accent, dismissed = defaults, a music fit alone = defaults in
-  every style and take with no `editingStyle` in the AI brief, deterministic; AI brief and `extraStyleTransitions`).
+  no fit = unchanged order; a 40 s track for a 45 s edit is suggested with "Trims the edit to 39.8 s", 39.4 s from a
+  first beat at 0.45 s), `packages/ai/test/rules-editing-style.test.ts` (defaults: 40 plans equal to the commit before
+  this feature apart from the cut times listed as on the beat, which now come from each plan as it plays (one hash
+  with those times emptied, one of the whole plans); accepted style: all five plans valid with no errors and still
+  different, beat montage accents on every 4th beat within ±40 ms, 2-beat shots, process story ≥ 70 % of cuts on the
+  beat, the reveal on the strongest beat within ±0.1 s, punch-ins continuing the same shot at 1.2× and never above
+  1.25, clean promo calm, "remove the flashy transitions" removes every accent, dismissed = defaults, a music fit
+  alone = defaults in every style and take with no `editingStyle` in the AI brief, deterministic; AI brief and
+  `extraStyleTransitions`).
 - Planner step-down and plan notes: `packages/ai/test/rules-editing-style-sweep.test.ts` (design §4.3.1.6 "Never
   worse than the defaults"): every N, cross-fades of 0.3–1 s alone and with the beat, the reveal and punch-ins, at
   15/30/45/60 s × five styles × four music cases (70 s tracks at 60 s) × three takes, each judged by the worker's
@@ -268,24 +274,41 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
   edit when the earlier clips are gone.
 - Edit length and the chosen track (design §4.7 item 5): `packages/core/test/edit-length.test.ts` (`durationBoundsFor`
   and `editLengthForTrack`: kept, trimmed to 39.8 s for 45 s with a 40 s track, the 88 % and 5 s limits, the refusal
-  message), `packages/ai/test/planned-length.test.ts` (the rules plan, the AI brief's `target` and the AI plan's
+  message; no tenth lost to binary rounding (16 s with 16.15 s kept, 74/65.35, 90/79.35 and 10/8.95 trimmed); the
+  music measured from the first beat (45/40 → 39.5 s from 0.3 s, 39.4 s from 0.45 s; 30/30 → 29.5 s from 0.3 s),
+  whether a track is long enough judged on its length alone; `earliestMusicStartSec` and `usableBeats`),
+  `packages/ai/test/planned-length.test.ts` (the rules plan, the AI brief's `target` and the AI plan's
   `targetDurationSec` all 39.8 s; music switched off by an instruction keeps 45 s; a revised length is trimmed too; a
-  30 s track is refused with the shared message), `apps/worker/test/plan-length.test.ts` (no database: the worker's
-  own `planWithFallback` + `planningContextFor` on the planner fixtures with 40 s tracks; 0 of 315 edits fail across
-  the default and six accepted styles × five styles × three tracks × three takes, where the window around the
-  requested 45 s refused 9 default-style plans; the step-down still runs; a revision asking for 45 s; a 30 s track
-  refused), `apps/web/test/music-curve.test.ts` (what the music start picker says when the edit is trimmed or the
-  track is too short).
+  30 s track is refused with the shared message; the AI brief's reveal on the biggest lift worked out for the trimmed
+  length, with the music where the rules planner starts it), `packages/ai/test/rules-music-start.test.ts` (first beats
+  at 0.3 and 0.45 s with a 40 s track for 45 s, and 30 s and 30.2 s tracks for 30 s, every style, default and every
+  2 beats, two takes: the music starts on a beat, every cut listed as on the beat is within 40 ms of one as the plan
+  plays, the music lasts 0.1 s past the edit, the montage's cuts are all on beats, the trimmed note; an AI plan built
+  from the same cuts reports exactly the same beats, and its list follows where its music actually starts, not the
+  model's own list; the AI brief's target and fixed start leave room from the first beat),
+  `apps/worker/test/plan-length.test.ts` (no database: the worker's own `planWithFallback` + `planningContextFor` on
+  the planner fixtures with 40 s tracks; 0 of 315 edits fail across the default and six accepted styles × five styles
+  × three tracks × three takes, where the window around the requested 45 s refuses 15 default-style plans (9 before
+  the beat montage stopped running to the end of the music); the step-down still runs; a revision asking for 45 s; a
+  30 s track refused, and refused before the AI planner is asked, for a first plan and a revision; first beats at 0.3
+  and 0.45 s through the worker: music on a beat, no false beat claims, music to the end),
+  `apps/web/test/music-curve.test.ts` (what the music start picker says when the edit is trimmed, also with a start
+  that can be chosen, when the track is as long as the edit or its first beat is late, or the track is too short;
+  `latestMusicStart` without the binary rounding loss).
 - Database + ffmpeg: `apps/worker/test/preferences-db.test.ts` ingests a SYNTHETIC R2 reference: a version 2 profile
   with flashes on the beat, no array longer than 8 numbers, no AI call, and only the thumbnail left under the asset's
   storage prefix. `apps/web/test/preferences-routes.integration.test.ts` covers `GET /api/references/summary` (staff
   read-only), `POST …/summary/decide` (owner-only, CSRF, stale `valueKey` → 409 with nothing written, accept writes
   `editingStyle` + `sources` + `summaryDecisions` and the audit rows), Settings refusing `sources`/`summaryDecisions`
   and recording owner changes, `…/summary/reset`, a SYNTHETIC profile from another measuring version (listed with
-  `olderVersion`, rows exactly as without it) and `PUT /api/settings` refusing a reversed `musicFit` tempo range
+  `olderVersion`, rows exactly as without it, its own suggestions refused with 409 and nothing written), a
+  transitions value accepted from the videos that stays in use and stoppable once the stored profiles are moved to
+  another measuring version, and `PUT /api/settings` refusing a reversed `musicFit` tempo range
   (400 on `preferences.editingStyle.musicFit.bpmLow`, nothing stored). `apps/web/test/studio-access.integration.test.ts`
   checks generation start with the music start on automatic: a 50 s edit with a 40 s track is refused with the
-  planners' message, a 45 s edit is accepted.
+  planners' message, a 45 s edit is accepted, and the track's music option carries its first beat (`firstBeatSec`).
+  `apps/web/test/music-routes.integration.test.ts` checks that "Suggested for you" offers that 40 s track for a 45 s
+  edit with "Trims the edit to 39.8 s".
 - Only with the owner's real videos (design §4.3.1.10): 3–5 of their own posted videos, cuts and flashes counted by a
   person on a 15 s excerpt of each (cut count ± 10 %, flash count ± 1, tempo ± 2 BPM or an octave). Thresholds are
   starting values from synthetic clips until then.

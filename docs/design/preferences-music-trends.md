@@ -512,10 +512,21 @@ latest 12 ready reference profiles (all projects). Each video counts once.
 - **Measuring version**: only v2 profiles whose `style.analysisVersion` is the current
   `REFERENCE_STYLE_ANALYSIS_VERSION` are combined (`isOlderMeasuringVersion`). A profile measured by an older version
   is left out of every row, the pace included (its shot lengths came from that measuring too), and counted in
-  `summary.olderVersion`; the card says "2 videos were measured with an older version of the measuring. Upload them
-  again to include them." The originals were deleted after measuring, so uploading the video again is the only way to
-  measure it afresh. Raising the version (when the measuring changes what it measures) therefore takes the earlier
-  profiles out of "your style" until those videos are uploaded again; they stay in the videos list with a chip.
+  `summary.olderVersion`; the card says "2 videos were measured with an older version of the measuring and are not
+  used. Upload them again, then remove the old copies from their projects." The originals were deleted after
+  measuring, so uploading the video again is the only way to measure it afresh. Uploading again adds a new copy and
+  keeps the old one (still counted, still in the latest 12), so the wording says to remove the old copy: the notice and
+  each copy's own note ("Measured with an older version of the measuring, so it is not used. Upload the video again,
+  then remove this copy.") stay true until then, and **Remove** on the project's reference card clears them. Raising
+  the version (when the measuring changes what it measures) therefore takes the earlier profiles out of "your style"
+  until those videos are uploaded again; they stay in the videos list with a chip. Such a video's own suggestions
+  (its pace, length and colour came from that measuring too) are not offered on its Studio reference card, and
+  `POST /api/references/[assetId]/decide` refuses them (409).
+- **Accepted values stay in use**: an editing-style value accepted from the videos stays in use until the owner
+  changes it, also when no combined video backs it any more (they were removed, or measured with an older version):
+  its row then has no suggestion, keeps `inUse` ("In use: from your videos" with **Change: use each style's own**)
+  and says "What you accepted earlier from your videos is still in use." (`STILL_IN_USE_LINE`), and the card keeps
+  **Go back to each style's own**, even when no video is combined at all.
 
 #### 4.3.1.5 Schemas (Zod 4, `packages/core`, no migration)
 
@@ -608,6 +619,9 @@ export const ZoomUseSchema = z.discriminatedUnion('mode', [
 export const MusicFitSchema = z.object({
   bpmLow: z.number().min(40).max(220), bpmHigh: z.number().min(40).max(220),
   prefersClearDrop: z.boolean(), dynamicRangeDb: z.number().nullable(),
+}).refine((fit) => fit.bpmLow <= fit.bpmHigh, {             // a single tempo (bpmLow = bpmHigh) is fine
+  path: ['bpmLow'],
+  message: 'The music tempo range is the wrong way round: the lower BPM (bpmLow) must not be above the higher BPM (bpmHigh).',
 });
 export const REFERENCE_SUMMARY_FIELDS = [...REFERENCE_SUGGESTION_FIELDS, ...EDITING_STYLE_FIELDS] as const;
 
@@ -653,7 +667,8 @@ records the decision and `valueKey`. The owner can change any of them later in S
 Precedence, unchanged in spirit: a revision request (for example "remove the flashy transitions", "ignore the
 beat") > this generation's form and the Sound panel > standing instructions > `editingStyle` > the style's
 defaults. `effectiveSettings` (`packages/ai/src/rules/settings.ts`) gains `editingStyle`, resolved from the
-effective preferences; with the defaults every plan is byte-identical to today's (tested).
+effective preferences; with the defaults every plan is byte-identical to before the editing style existed (tested),
+apart from the cut times listed as on the beat, which both planners now take from the plan as it plays (below).
 
 **Rules planner** (`packages/ai/src/rules/editing-style.ts`, called from the style builders and `planner.ts`):
 
@@ -741,13 +756,29 @@ effective preferences; with the defaults every plan is byte-identical to today's
   other fallback plan is that plan, and none mentions the transitions from the owner's videos. A revision case (the
   before & after at 30 s with 0.6 s cross-fades, then "Make it 60 seconds.") checks the revision wording, that every
   kept join is unchanged and that the added shots are joined as without the editing style.
-- **Length and the music** (§4.7): with the music start on automatic, a chosen track a little shorter than the edit
-  trims it by one shared rule (`editLengthForTrack`, `packages/core/src/edit-length.ts`), and both planners aim for
-  that length (`plannedTargetSec`, `packages/ai/src/rules/settings.ts`): the rules planner (`capTargetToMusic` and its
-  last-chance window), the AI brief's `target` and the AI plan's `targetDurationSec`. The worker validates every plan
-  against `durationBoundsFor` (±12 %, at least ±2 s) around the same length (`planningContextFor` in
-  `apps/worker/src/handlers/generate.ts`, first plans and revisions alike), so an edit trimmed to its music is never
-  refused for being shorter than the music allows, and an accepted editing style is judged by the same window.
+- **Length and the music** (§4.7 item 5): a chosen track whose music, from its first beat, leaves less than the edit
+  trims it by one shared rule (`editLengthForTrack`, `packages/core/src/edit-length.ts`), with the music start on
+  automatic or chosen, and both planners aim for that length (`plannedTargetSec`, `packages/ai/src/rules/settings.ts`):
+  the rules planner (`capTargetToMusic` and its last-chance window), the AI brief's `target`, reveal time and fixed
+  start (all worked out for that length), and the AI plan's `targetDurationSec`. The worker refuses a track too short
+  for that before either planner is asked (`planWithFallback`, with the rule's message, first plans and revisions
+  alike) and validates every plan against `durationBoundsFor` (±12 %, at least ±2 s) around the same length
+  (`planningContextFor` in `apps/worker/src/handlers/generate.ts`), so an edit trimmed to its music is never refused for
+  being shorter than the music allows, and an accepted editing style is judged by the same window.
+- **The music start, the beat grid and the beats a plan reports agree.** The beat tracker puts a track's first beat
+  anywhere in its first beat period, so the length rule measures the music from the first usable beat
+  (`earliestMusicStartSec`: the first of the track's de-duplicated beats, or 0 s when it has fewer than 4), where both
+  planners can start it at the earliest. The rules planner starts the music where its beat grid starts (always on a
+  beat) and never moves it off the grid: an edit that would end less than 0.1 s before the music does is shortened
+  instead (the `MUSIC_TOO_SHORT` repair), and the beat montage ends on the last whole beat that leaves 0.15 s of the
+  track (a 45 s montage with a 40 s, 120 BPM track runs 39.5 s rather than 40 s with the music). Both planners report
+  `audio.beatAlignment` from the plan itself: its cuts as it plays (the segments timed as the renderer times them,
+  `feltJoinTimes`) that land within 40 ms of a beat counted from where its music actually starts. The rules planner
+  compares them with the grid it cut to; for the AI plan, `toPlanCandidate` works the list out from the track's beats
+  and the plan's own music start and replaces the model's, so the same cuts get the same report from either planner.
+  A 30 s edit with a 30 s, 120 BPM track whose first beat is at 0.3 s is planned to 29.5 s with the music from 0.3 s
+  and every montage cut on a beat; before, it ran 30 s with the music from 0 s and every cut 0.2 s off a beat while
+  `beatAlignment` listed them all.
 
 Each style keeps its character, so the five edits stay different:
 
@@ -786,6 +817,11 @@ choices do not raise `OFF_STYLE_TRANSITION` warnings; errors are unchanged.
   BPM get no tempo points ("tempo unknown").
 - Unchanged: only the owner's own tracks; unusable tracks stay last with their reason; nothing is chosen
   automatically; "No music" stays a first-class choice. The fit never fetches, plays or looks up anything.
+- Length (`trackUnusableReason`, `trackTrimReason`): a track is judged by the shared length rule (§4.7 item 5, from
+  its first beat, `RankableTrack.firstBeatSec`). A track a little shorter than the edit is usable and says so ("Trims
+  the edit to 39.8 s"); a track too short for that is unusable: "Shorter than the edit (0:30)." (a track that is not
+  shorter but leaves under 5 s of music after its first beat, which only a very short edit can meet: "Too short for a
+  N-second edit (m:ss).").
 
 #### 4.3.1.8 Owner-facing wording (Australian English)
 
@@ -804,11 +840,15 @@ choices do not raise `OFF_STYLE_TRANSITION` warnings; errors are unchanged.
 | Videos differ | "Your videos differ here: 1 cuts on the beat, 1 doesn't." (no button) |
 | Matches | "Matches your settings" (no button) |
 | Older measurement | "Measured before transitions and beat were added. Upload it again to include it." |
-| Older version of the measuring | Per video: "Measured with an older version of the measuring. Upload it again to include it." Summary: "2 videos were measured with an older version of the measuring. Upload them again to include them." (one video: "1 video was measured … Upload it again to include it.") |
+| Older version of the measuring | Per video: "Measured with an older version of the measuring, so it is not used. Upload the video again, then remove this copy." Summary: "2 videos were measured with an older version of the measuring and are not used. Upload them again, then remove the old copies from their projects." (one video: "1 video was measured with an older version of the measuring and is not used. Upload it again, then remove the old copy from its project.") Its suggestions, if asked for: "This video was measured with an older version of the measuring, so its suggestions are not offered. Upload it again to get new ones." (409) |
+| Accepted value with no video behind it now | The row's line ends "What you accepted earlier from your videos is still in use." (with "In use: from your videos" and **Change: use each style's own**) |
 | End screen | "Skipped a dark end screen in the last 3 s." |
 | Plan note (rules planner) | "Straight cuts with a white flash on every 4th beat, from your style." / "The finished look lands on the biggest lift in 'Track' (estimate)." |
 | Plan note (editing style left out) | The three step-down notes and their revision wordings, word for word in §4.3.1.6 ("Never worse than the defaults") |
 | Plan note (trimmed to the music) | "The edit was trimmed to 39.8 s so it ends before the music does." |
+| Music start picker (§4.7 item 5) | Start cannot be chosen: "This track is shorter than the edit, so the music starts at the beginning and the edit will be trimmed to 39.8 s so it ends before the music does." ("This track is as long as the edit, …" within 0.05 s; "This track is not much longer than the edit, …"; with a later first beat "… so the music starts on its first beat, 0.3 s in, and the edit will be trimmed to 29.5 s …"). Start on Automatic or chosen and the track trims the edit: "The edit will be trimmed to 44.9 s so it ends before the music does." |
+| Track too short (form, route 400, worker) | "The chosen track is 30 seconds long, which is shorter than the 45-second edit. Choose a longer track or a shorter length." (a track that is not shorter but leaves under 5 s of music after its first beat, which only a very short edit can meet: "From its first beat the chosen track leaves only N seconds of music, which is too short for the M-second edit. Choose a longer track or a shorter length.") |
+| Suggested for you (length) | "Trims the edit to 39.8 s" (a reason on a usable track) · "Shorter than the edit (0:30)." (unusable) |
 
 Never used: "exact", "precisely", "detected", "trending", "viral", "your TikTok". The style is "from your videos".
 
@@ -823,14 +863,19 @@ New card above **Reference videos** in `preferences-tab.tsx` (component `YourSty
 - Rows in this order: Pace, Length, Colour, On-screen text, Transitions, Cutting to the beat, Big moment (reveal),
   Zooms, Music. Each row: what was seen (plain sentence), the agreement chip ("Seen in 3 of 4 videos"), and either
   **Use this** / **No thanks**, "Matches your settings", "Your videos differ here" or the not-measured reason. A
-  small "In use: from your videos" chip on accepted rows, with **Change**.
+  small "In use: from your videos" chip on accepted rows, with **Change**. A value accepted from the videos that no
+  combined video backs any more (removed, or measured with an older version of the measuring) keeps its chip and
+  **Change**, with "What you accepted earlier from your videos is still in use." (§4.3.1.4): the rows and **Go back
+  to each style's own** stay on the card while anything from the videos is in use, even with no video combined.
 - **Videos** list under the rows: thumbnail, file name, measured date (Melbourne time), the per-video line, "older
   measurement" chip where it applies, **Open project**.
 - States: loading skeleton; empty ("Upload a few of your own posted videos with **Add a reference video** in any
-  project and the editor will estimate your style. Nothing has been measured yet."); measuring ("2 videos are still
-  being measured"); only older measurements; videos measured with an older version of the measuring (the notice
-  "2 videos were measured with an older version of the measuring. Upload them again to include them.", an "Older
-  version of the measuring" chip on each, and the videos list stays visible when none of them can be combined);
+  project and the editor will estimate your style. Nothing has been measured yet.", without the last sentence while
+  something accepted from earlier videos is still in use); measuring ("2 videos are still being measured"); only older
+  measurements; videos measured with an older version of the measuring (the notice "2 videos were measured with an
+  older version of the measuring and are not used. Upload them again, then remove the old copies from their
+  projects.", an "Older version of the measuring" chip and note on each, and the videos list stays visible when none
+  of them can be combined; their Studio reference cards offer no suggestions);
   nothing reportable ("Not enough to go on yet — 1 video had no clear
   beat and too few joins. Another video or two will help."); load error with **Try again**; staff see it read-only.
   Works at 360 px (rows stack).
@@ -1010,18 +1055,31 @@ duration. Editing the licence re-asks for confirmation (branch -2 behaviour kept
 2. Each library track has genres and moods (editable chips on the track row; `music_tracks.genres`, `moods`).
 3. In the Studio generation form, the Music select gains a **"Suggested for you"** group (top 3 usable tracks) with a
    reason line ("Matches hip hop · upbeat · by an artist you like · 96 BPM suits the beat montage"). Unusable
-   tracks (not ready, licence expired, shorter than the edit) are listed greyed with the reason.
+   tracks (not ready, licence expired, too short for the edit by the rule in item 5) are listed greyed with the
+   reason; a track a little shorter than the edit is usable, and its reason line says "Trims the edit to 39.8 s".
 4. No track is ever chosen automatically; "No music" stays a first-class choice.
 5. **Length and the chosen track** (one rule, `editLengthForTrack` in `packages/core/src/edit-length.ts`, used by the
-   form, `POST /api/projects/[id]/generate`, both planners and the worker): with the music start on automatic, a track
-   that leaves at least 0.15 s after the edit plays as it is. A track a little shorter trims the edit to what it
-   leaves (its length less 0.15 s, rounded down to 0.1 s) when that is at least 5 s and 88 % of the asked length: a
-   45 s edit with a 40 s track becomes 39.8 s, the plan says "The edit was trimmed to 39.8 s so it ends before the
-   music does.", and the music start picker says so before generating. A shorter track is refused before anything is
-   queued: "The chosen track is 30 seconds long, which is shorter than the 45-second edit. Choose a longer track or a
-   shorter length." (the form keeps **Generate** disabled with that sentence; the route answers 400). With a chosen
-   start the track must leave the whole edit after it (unchanged). "Suggested for you" still never suggests a track
-   shorter than the edit (item 3).
+   form, `POST /api/projects/[id]/generate`, "Suggested for you", both planners and the worker). The planners start
+   the music on a beat, at the earliest on the track's first usable beat (`earliestMusicStartSec`: the beat tracker
+   puts it anywhere in the first beat period; 0 s for a track with fewer than 4 beats), so the rule measures the music
+   from there, with the music start on automatic or chosen. When the music from the first beat leaves at least 0.15 s
+   after the edit, the edit plays as asked. Otherwise it is trimmed to what that music leaves (the track less its first
+   beat and 0.15 s, rounded down to 0.1 s, allowing for binary rounding: 16.15 − 0.15 counts as 16.0), as long as the
+   track is long enough: its length less 0.15 s is at least 88 % of the asked length (the length alone decides this,
+   never the beat phase), and the music from the first beat is at least 5 s. A 45 s edit with a 40 s track becomes
+   39.8 s (39.4 s when the first beat is at 0.45 s), and a 30 s edit with a 30 s track 29.8 s (29.5 s from a first beat
+   at 0.3 s). The plan says "The edit was trimmed to 39.8 s so it ends before the music does.", and the music start
+   picker says so before generating (§4.3.1.8): when the start cannot be chosen, in its note on where the music starts
+   ("This track is as long as the edit, so the music starts on its first beat, 0.3 s in, and the edit will be trimmed
+   to 29.5 s so it ends before the music does."), and otherwise whenever the track trims the edit, on Automatic and
+   with a chosen start (a track 0.10–0.14 s longer than the edit, or one whose first beat is late: "The edit will be
+   trimmed to 44.9 s so it ends before the music does."). A shorter track is refused before anything is queued: "The
+   chosen track is 30 seconds long, which is shorter than the 45-second edit. Choose a longer track or a shorter
+   length." (the form keeps **Generate** disabled with that sentence; the route answers 400; the worker refuses it
+   before asking either planner, revisions included). With a chosen start the track must also leave the whole edit
+   after that point (unchanged); the planners start the music on the first beat at or after it, or on the latest beat
+   that still leaves room for the planned length. "Suggested for you" suggests a track the rule trims, with "Trims the
+   edit to 39.8 s", and lists a track it refuses as unusable (item 3).
 6. If an artist preference has no match: "None of your tracks are by Drake. Look for similar tracks in your music
    library subscription, then upload them here." No external search happens.
 7. Settings → Integrations shows **"Music library connection — Not available. Download tracks from your
@@ -1636,7 +1694,8 @@ All under `/api`, session required, JSON errors as in `docs/api.md`, CSRF guard 
 `GET /api/projects/[id]/status` (changed): edit DTOs gain `dismissed: boolean`; `defaults` come from
 `effectivePreferences` and gain `styleOrder`, `musicVolume`; a new `references: ReferenceDto[]`
 (`{ id, filename, status, statusMessage, thumbnailUrl, profile }`); `music` options gain `licenceState`,
-`suggestion?: { rank, reasons[] }`.
+`suggestion?: { rank, reasons[] }` and `firstBeatSec` (where the music can start at the earliest,
+`earliestMusicStartSec`; 0 before analysis), from which the form's length rule measures the music (§4.7 item 5).
 
 ### 9.2 Reference videos
 
@@ -1645,10 +1704,10 @@ All under `/api`, session required, JSON errors as in `docs/api.md`, CSRF guard 
 | POST | `/api/projects/[id]/uploads` (changed) | `kind: 'reference_video'` now accepted (video MIME rules), plus optional `referenceOptions: { useVision: boolean }` stored in `driverState` | unchanged | studio access |
 | POST | `/api/uploads/[id]/complete` (changed) | — | `{ assetId, kind: 'reference_video' }`; queues `ingest.asset` | studio access; audit `reference.uploaded` |
 | GET | `/api/references` | — | `{ references: Array<ReferenceDto & { projectId, projectTitle }> }` | owner |
-| POST | `/api/references/[assetId]/decide` | `{ accept: SuggestionField[], dismiss: SuggestionField[] }` | `{ profile, preferences }` | owner; audit `reference.suggestions_decided` |
+| POST | `/api/references/[assetId]/decide` | `{ accept: SuggestionField[], dismiss: SuggestionField[] }` | `{ profile, preferences }`; 409 `CONFLICT` "This video was measured with an older version of the measuring, so its suggestions are not offered. Upload it again to get new ones." for a profile from another measuring version (nothing is written) | owner; audit `reference.suggestions_decided` |
 | GET | `/api/references/summary` (v2, §4.3.1.9) | — | `{ summary: ReferenceStyleSummary, suggestions: SummarySuggestion[], videos: { total, measured, olderMeasurement, olderVersion, measuring, failed } }` (`olderVersion`: measured with an older version of the measuring, not combined) | signed in (staff read-only) |
 | POST | `/api/references/summary/decide` (v2) | `{ accept: ReferenceSummaryField[], dismiss: ReferenceSummaryField[], valueKeys: Record<field, string> }` | `{ summary, preferences }`; 409 `CONFLICT` "Your style summary changed — check the new suggestion." when a `valueKey` no longer matches | owner; audit `reference.summary_decided` |
-| PUT | `/api/settings` (v2 change) | `preferences.editingStyle` value fields editable; `sources` and `summaryDecisions` rejected with `VALIDATION`; a changed field records `sources[field] = { by: 'owner' }` | unchanged | owner; audit `preferences.editing_style_changed` |
+| PUT | `/api/settings` (v2 change) | `preferences.editingStyle` value fields editable; `sources` and `summaryDecisions` rejected with `VALIDATION`; a `musicFit` whose `bpmLow` is above its `bpmHigh` rejected with `VALIDATION` (400 on `preferences.editingStyle.musicFit.bpmLow`, "The music tempo range is the wrong way round: the lower BPM (bpmLow) must not be above the higher BPM (bpmHigh)."; nothing is stored; a single tempo is fine); a changed field records `sources[field] = { by: 'owner' }` | unchanged | owner; audit `preferences.editing_style_changed` |
 | DELETE | `/api/assets/[id]` (existing) | — | — | studio access; works for references |
 
 ### 9.3 Music
@@ -1657,7 +1716,7 @@ All under `/api`, session required, JSON errors as in `docs/api.md`, CSRF guard 
 | --- | --- | --- | --- | --- |
 | POST / PATCH | `/api/music`, `/api/music/[id]` (changed) | licence schema additions (§5.3), `genres: string[]` | `MusicTrackSummary` + `genres`, `licenceState: 'confirmed'\|'not_confirmed'\|'expired'\|'meta_only'` | owner for licence changes (as today: owner-only settings) |
 | GET | `/api/music/[id]/listen` | — | `{ url, expiresInSeconds }` (expiring link to the track file, `Content-Type` audio) | signed in |
-| GET | `/api/music/suggestions?durationSec=25&styleId=beat_montage` | — | `{ tracks: Array<{ id, score, reasons: string[], usable: boolean, unusableReason?: string }> }` | signed in |
+| GET | `/api/music/suggestions?durationSec=25&styleId=beat_montage` | — | `{ tracks: Array<{ id, score, reasons: string[], usable: boolean, unusableReason?: string }> }`; length by the shared rule (§4.7 item 5): a track that trims the edit is usable, with the reason "Trims the edit to 39.8 s" | signed in |
 | GET | `/api/music/references` | — | `{ mode, canEmbed: boolean, missing: string[], references: MusicReferenceDto[] }` | signed in |
 | POST | `/api/music/references` | `{ url, notes? }` | `MusicReferenceDto` (409 if already saved) | owner; audit `music.reference_added` |
 | PATCH / DELETE | `/api/music/references/[id]` | `{ notes }` | `MusicReferenceDto` / `{ ok }` | owner; audit `music.reference_removed` |
