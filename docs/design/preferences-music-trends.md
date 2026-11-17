@@ -908,10 +908,11 @@ New card above **Reference videos** in `preferences-tab.tsx` (component `YourSty
   **Use this** / **No thanks**, "Matches your settings", "Your videos differ here" or the not-measured reason. A
   small "In use: from your videos" chip on accepted rows, with **Change** (it sends the row to
   `POST /api/references/summary/reset`, which resets every value accepting the row set, §4.3.1.5). The chip and
-  **Change** stay next to a new suggestion while the value accepted earlier is still in use (§4.3.1.4). A value accepted from the videos that no
-  combined video backs any more (removed, or measured with an older version of the measuring) keeps its chip and
-  **Change**, with "What you accepted earlier from your videos is still in use." (§4.3.1.4): the rows and **Go back
-  to each style's own** stay on the card while anything from the videos is in use, even with no video combined.
+  **Change** stay next to a new suggestion while the value accepted earlier is still in use (§4.3.1.4). A value
+  accepted from the videos that no combined video backs any more (removed, or measured with an older version of the
+  measuring) keeps its chip and **Change**, with "What you accepted earlier from your videos is still in use."
+  (§4.3.1.4): the rows and **Go back to each style's own** stay on the card while anything from the videos is in use,
+  even with no video combined.
 - **Videos** list under the rows: thumbnail, file name, measured date (Melbourne time), the per-video line, "older
   measurement" chip where it applies, **Open project**.
 - States: loading skeleton; empty ("Upload a few of your own posted videos with **Add a reference video** in any
