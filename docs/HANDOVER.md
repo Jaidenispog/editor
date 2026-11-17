@@ -257,6 +257,11 @@ History of the background runs:
     data/ folder (also on 2 CPUs); a faketime audit (app and Postgres on the same fake clock) found no other
     time-of-day dependence. Check GitHub's CI result after every push (the local verify-all.sh does not run on a
     fresh checkout).
+    Merged and pushed together with item 17 as 60800f2 (README follow-up f0b913a) after verify-all.sh on main:
+    1,677 unit tests passed + 1 skipped, integration 12/12, Stage A 51/51, Stage B 77/77, Stage C bookings 124/124,
+    website 114/114, TikTok 105/105. **GitHub CI is green for the first time**: runs #94 (60800f2) and #95 (f0b913a),
+    17 Nov 2026. CI's "Install FFmpeg" step took 9 minutes on the runner (slow apt mirror); caching it is a possible
+    speed-up, not a correctness issue.
 
 Check the task list or `/workflows` first. **While a run is alive, do not edit `packages/ai`, `apps/web`,
 `apps/worker` or the root dev-ops files yourself**: its agents are writing them. Agents never commit; the lead
