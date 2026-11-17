@@ -50,6 +50,21 @@ describe('rankTracksForPreferences', () => {
     expect(list.every((t) => t.usable || t.rank === null)).toBe(true);
   });
 
+  it('suggests a track a little shorter than the edit, saying it trims the edit (the shared length rule)', () => {
+    const list = rankTracksForPreferences(
+      [track('forty', { genres: ['hip hop'], durationSec: 40 }), track('late', { genres: ['hip hop'], durationSec: 40, firstBeatSec: 0.45 }), track('thirty', { genres: ['hip hop'], durationSec: 30 })],
+      taste,
+      { durationSec: 45, now: NOW },
+    );
+    const byId = Object.fromEntries(list.map((t) => [t.id, t]));
+    expect(byId['forty']).toMatchObject({ usable: true, rank: 1, reasons: ['Matches hip hop', 'Trims the edit to 39.8 s'] });
+    // Measured from its first beat, as the planners start the music on a beat.
+    expect(byId['late']).toMatchObject({ usable: true, rank: 2, reasons: ['Matches hip hop', 'Trims the edit to 39.4 s'] });
+    expect(byId['thirty']).toMatchObject({ usable: false, rank: null, unusableReason: 'Shorter than the edit (0:30).' });
+    // A track that covers the edit says nothing about the length.
+    expect(rankTracksForPreferences([track('long', { genres: ['hip hop'], durationSec: 60 })], taste, { durationSec: 45, now: NOW })[0]?.reasons).toEqual(['Matches hip hop']);
+  });
+
   it('treats an "I\'m not sure" track as unusable even when the rights box was ticked', () => {
     const unsure = MusicLicenceSchema.parse({ kind: 'unknown', permitted: { promotionalUse: true, instagram: true, tiktok: true }, confirmedByOwnerAt: '2026-11-01T00:00:00.000Z' });
     const list = rankTracksForPreferences([track('unsure', { genres: ['hip hop'], moods: ['upbeat'], licence: unsure }), track('fine')], taste, { durationSec: 25, now: NOW });

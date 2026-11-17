@@ -4,12 +4,15 @@ import {
   AppError,
   ReferenceStyleProfileSchema,
   SUMMARY_MAX_PROFILES,
+  SUMMARY_ROW_STYLE_FIELDS,
   applySummaryDecisions,
   describeStyleSignals,
+  isOlderMeasuringVersion,
   readReferenceProfile,
   resetEditingStyle,
   summariseReferenceStyle,
   type EditingPreferences,
+  type EditingStyleRowField,
   type ReferenceStyleProfile,
   type ReferenceStyleProfileV2,
   type ReferenceStyleSummary,
@@ -50,8 +53,8 @@ export async function listReferences(): Promise<ReferenceListItem[]> {
 
 /**
  * Applies the owner's decisions on a reference's suggestions. Accepting sets the declared value and pins the field
- * `by: 'reference'` (with the file name) so learning never overrides it; dismissing only records the decision.
- * Owner only; audited.
+ * `by: 'reference'` (with the file name) so learning never overrides it; dismissing only records the decision. A video
+ * measured with another version of the measuring is refused (409): its suggestions are not offered. Owner only; audited.
  */
 export async function decideReference(user: SessionUser, assetId: string, input: { accept: ReferenceSuggestionField[]; dismiss: ReferenceSuggestionField[] }): Promise<{ profile: ReferenceStyleProfile; preferences: EditingPreferences }> {
   const db = getDb();
@@ -60,6 +63,9 @@ export async function decideReference(user: SessionUser, assetId: string, input:
   const parsed = asset.referenceProfile ? ReferenceStyleProfileSchema.safeParse(asset.referenceProfile) : null;
   if (!parsed?.success) throw new AppError('CONFLICT', 'This reference video has not been measured yet.');
   const profile = parsed.data;
+  // Its pace, length and colour came from another version of the measuring, like the rest of it (§4.3.1.4).
+  const read = readReferenceProfile(profile);
+  if (read && isOlderMeasuringVersion(read)) throw new AppError('CONFLICT', 'This video was measured with an older version of the measuring, so its suggestions are not offered. Upload it again to get new ones.');
   const overlap = input.accept.filter((f) => input.dismiss.includes(f));
   if (overlap.length) throw new AppError('VALIDATION', 'A suggestion cannot be both used and dismissed.', { details: [{ path: 'accept', message: overlap.join(', ') }] });
   const suggestions = new Map(profile.suggestions.map((s) => [s.field, s]));
@@ -100,13 +106,15 @@ export interface SummaryVideoDto {
   /** The per-video line (estimates), or null for an older measurement. */
   line: string | null;
   olderMeasurement: boolean;
+  /** Measured with an older version of the measuring: listed, but not combined into "your style". */
+  olderVersion: boolean;
 }
 
 /** GET /api/references/summary. */
 export interface ReferenceSummaryDto {
   summary: ReferenceStyleSummary;
   suggestions: ReferenceStyleSummary['suggestions'];
-  videos: { total: number; measured: number; olderMeasurement: number; measuring: number; failed: number };
+  videos: { total: number; measured: number; olderMeasurement: number; olderVersion: number; measuring: number; failed: number };
   list: SummaryVideoDto[];
 }
 
@@ -139,6 +147,7 @@ async function summaryInputs(): Promise<{ profiles: ReferenceStyleProfileV2[]; l
       measuredAt: profile.measuredAt,
       line: profile.style ? describeStyleSignals(profile.style, profile.colourLook) : null,
       olderMeasurement: profile.style === null,
+      olderVersion: isOlderMeasuringVersion(profile),
     })),
   );
   return { profiles: latest.map((m) => m.profile), list, measuring, failed, total: rows.length };
@@ -155,7 +164,7 @@ export async function getReferenceSummary(): Promise<ReferenceSummaryDto> {
   return {
     summary,
     suggestions: summary.suggestions,
-    videos: { total: inputs.total, measured: summary.measured, olderMeasurement: summary.olderMeasurement, measuring: inputs.measuring, failed: inputs.failed },
+    videos: { total: inputs.total, measured: summary.measured, olderMeasurement: summary.olderMeasurement, olderVersion: summary.olderVersion, measuring: inputs.measuring, failed: inputs.failed },
     list: inputs.list,
   };
 }
@@ -188,10 +197,20 @@ export async function decideReferenceSummary(
   return { summary: summariseReferenceStyle(profiles, next.preferences), preferences: next.preferences };
 }
 
-/** "Go back to each style's own": the editing style returns to its defaults; length, pace, colour and text stay (owner only). */
-export async function resetReferenceSummary(user: SessionUser): Promise<{ summary: ReferenceStyleSummary; preferences: EditingPreferences }> {
+/**
+ * "Go back to each style's own": the editing style returns to its defaults; length, pace, colour and text stay (owner
+ * only). With `row` ("Change: use each style's own" on one row), only the values accepting that row set, all of them
+ * ("Cutting to the beat" also the beats per cut), with their sources.
+ */
+export async function resetReferenceSummary(user: SessionUser, row?: EditingStyleRowField): Promise<{ summary: ReferenceStyleSummary; preferences: EditingPreferences }> {
   const { profiles } = await summaryInputs();
-  const next = await updateSettingsLocked((current) => ({ ...current, preferences: resetEditingStyle(current.preferences) }));
-  await writeAudit({ userId: user.id, action: 'preferences.editing_style_changed', entityType: 'settings', entityId: 'default', data: { reset: true, by: 'owner' } });
+  const next = await updateSettingsLocked((current) => ({ ...current, preferences: resetEditingStyle(current.preferences, row) }));
+  await writeAudit({
+    userId: user.id,
+    action: 'preferences.editing_style_changed',
+    entityType: 'settings',
+    entityId: 'default',
+    data: row ? { reset: true, by: 'owner', row, fields: [...SUMMARY_ROW_STYLE_FIELDS[row]] } : { reset: true, by: 'owner' },
+  });
   return { summary: summariseReferenceStyle(profiles, next.preferences), preferences: next.preferences };
 }

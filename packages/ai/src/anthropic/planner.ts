@@ -1,9 +1,11 @@
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import type Anthropic from '@anthropic-ai/sdk';
-import { AppError, CancelledError, EDIT_PLAN_VERSION, VERTICAL_1080 } from '@studio/core';
+import { AppError, CancelledError, EDIT_PLAN_VERSION, VERTICAL_1080, type AudioPlan, type Segment } from '@studio/core';
 import type { Logger } from 'pino';
 import { DEFAULT_MODEL_RATES, type RateTable } from '../pricing.js';
-import { effectiveSettings } from '../rules/settings.js';
+import { feltJoinTimes } from '../rules/editing-style.js';
+import { beatAlignmentFor } from '../rules/music.js';
+import { plannedSettings } from '../rules/settings.js';
 import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '../types.js';
 import { mapAnthropicError, usageFrom, type AnthropicMessagesClient, type StructuredResponse } from './client.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerUserContent, fixedMusicStartFor } from './prompts.js';
@@ -98,17 +100,26 @@ function cut(text: string, max: number): string {
 
 /**
  * Turns the model's wire output into an EditPlan-shaped object. Only fields the model does not decide are set
- * here (version, output format, target, style, the real music track id, and the music start when the owner
- * fixed it); everything else is passed through
- * for validateEditPlan to judge, so a mistake becomes a repairable validation error rather than a silent fix.
+ * here (version, output format, target, style, the real music track id, the music start when the owner
+ * fixed it, and the beat-alignment info, worked out from the plan's own cuts and music start); everything else is
+ * passed through for validateEditPlan to judge, so a mistake becomes a repairable validation error rather than a
+ * silent fix.
  */
 export function toPlanCandidate(wire: PlannerWire, input: PlannerInput): unknown {
-  const s = effectiveSettings(input);
+  const s = plannedSettings(input);
   const fixedStart = fixedMusicStartFor(input);
   const music =
     input.music && s.musicOn && wire.audio.music
       ? { ...wire.audio.music, trackId: input.music.trackId, ...(fixedStart !== null ? { startOffsetSec: fixedStart } : {}) }
       : null;
+  // Which cuts land on a beat follows from the plan's own cuts (as it plays) and where its music actually starts, worked
+  // out as for the rules planner's plans: the model's own list is replaced, so a plan never says a cut is on the beat
+  // when it is not, and a track with no clear beat gets no beat-alignment info at all.
+  let beatAlignment: AudioPlan['beatAlignment'] = null;
+  if (music && input.music) {
+    const cuts = feltJoinTimes(wire.segments as unknown as Segment[], Boolean(s.styleFromVideos?.accent));
+    beatAlignment = beatAlignmentFor(input.music, music.startOffsetSec, cuts);
+  }
   return {
     version: EDIT_PLAN_VERSION,
     styleId: input.styleId,
@@ -120,7 +131,7 @@ export function toPlanCandidate(wire: PlannerWire, input: PlannerInput): unknown
     segments: wire.segments,
     textOverlays: wire.textOverlays,
     captions: wire.captions,
-    audio: { ...wire.audio, music },
+    audio: { ...wire.audio, music, beatAlignment },
     colourPreset: wire.colourPreset,
   };
 }

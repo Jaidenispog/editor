@@ -256,20 +256,109 @@ No AI service is called by any test (a fake Anthropic client and a fake text est
 - Unit: `packages/core/test/reference-style.test.ts` (binomial kMin table 15 → 10, 30 → 17, 8 → 7; reasons the beat was
   not measured; drop on a step, single knock rejected, click windows smoothed; every palette family and the worked
   example; v1 → v2 reads; summary 1 of 1, 1 of 2 differs, 3 of 4 pooled, octave-folded tempos, older profiles only for
-  v1 rows; `alsoChanges`, `valueKey` stability and conflicts; no "exact/precise/detected/trending/viral" wording),
+  v1 rows, profiles from an older measuring version (a simulated bump to version 2) combined into no row, the pace
+  included, and counted with the "measured with an older version of the measuring" wording, still counted after the
+  same videos are uploaded again (so the wording says to remove the old copies), and none of their own suggestions
+  left waiting (`openSuggestions`, what Settings → Reference videos counts); a transitions value accepted from
+  three videos stays in use, with the "still in use" line and stoppable, after a version bump and with no videos;
+  stopping "Cutting to the beat" (`resetEditingStyle(prefs, row)`) also takes back the beats per cut accepted with it,
+  with their sources and the row's decision, leaves the other rows as they were (each row resets only its own values),
+  and beats per cut left from the videos keep the row in use until then; transitions and a pace accepted from three
+  videos stay in use, with the line, next to the different values the same videos give when measured again (also
+  after "No thanks", not after using the new one or stopping the row);
+  `alsoChanges`,
+  `valueKey` stability and conflicts; no "exact/precise/detected/trending/viral" wording),
+  `packages/core/test/editing-style.test.ts` (an accepted music fit alone is not a planning value; `MusicFitSchema`
+  accepts an ordered range and a single tempo and refuses `bpmLow` above `bpmHigh`, nested too),
   `packages/core/test/music-ranking.test.ts` (fit: in-range above out-of-range, half time +1, drop +1, unusable last,
-  no fit = unchanged order), `packages/ai/test/rules-editing-style.test.ts` (defaults: a stored hash of 40 plans equal
-  to the commit before this feature; accepted style: all five plans valid with no errors and still different, beat
-  montage accents on every 4th beat within ±40 ms, 2-beat shots, process story ≥ 70 % of cuts on the beat, the reveal
-  on the strongest beat within ±0.1 s, punch-ins continuing the same shot at 1.2× and never above 1.25, clean promo
-  calm, "remove the flashy transitions" removes every accent, dismissed = defaults, deterministic; AI brief and
-  `extraStyleTransitions`).
+  no fit = unchanged order; a 40 s track for a 45 s edit is suggested with "Trims the edit to 39.8 s", 39.4 s from a
+  first beat at 0.45 s), `packages/ai/test/rules-editing-style.test.ts` (defaults: 40 plans equal to the commit before
+  this feature apart from the cut times listed as on the beat, which now come from each plan as it plays (one hash
+  with those times emptied, one of the whole plans); accepted style: all five plans valid with no errors and still
+  different, beat montage accents each on a 4th beat within ±40 ms (and its note saying so, with their number), 2-beat
+  shots, process story ≥ 70 % of cuts on the
+  beat, the reveal on the strongest beat within ±0.1 s, punch-ins continuing the same shot at 1.2× and never above
+  1.25, clean promo calm, "remove the flashy transitions" removes every accent, dismissed = defaults, a music fit
+  alone = defaults in every style and take with no `editingStyle` in the AI brief, deterministic; AI brief and
+  `extraStyleTransitions`), `packages/ai/test/rules-palette-note.test.ts` (eight palettes: white flashes and dips to
+  black every 4 or 8 beats or at the reveal only with straight cuts, cross-fades or slides, cross-fades alone, wipes
+  and slides alone × the Transitions preference restrained and varied × five styles × three tracks, none included ×
+  15/20/30 s × two takes: the note for the accepted transitions is read as text and checked against the plan's
+  segments as they play. Every join kind it credits to the owner's videos is in the plan and in their palette
+  (straight cuts only when the palette cuts straight, clean promo's "cross-fade lengths" only for a cross-fade of the
+  palette's length); every kind it calls the style's own is in the plan and the style uses it; "rather than the
+  transitions from your videos" only when the plan has no transition that only the palette could have made; clean
+  promo's "no white flashes" names the palette's accent and the plan has none; every join the plan made is described,
+  straight cuts included; every accent it claims is there, at the reveal or on the beats it names, and every accent
+  the plan has is described. Revisions (240: "Make it 30 seconds." from a version made with the same palette or
+  without one, and "Make it faster.") are checked the same way with the joins of the shots they kept, by segment id,
+  left out, and never say that nothing comes from the videos. Also the cinematic reveal's single flash at the reveal,
+  the montage's "every 4th beat from 0:04 to 0:12" only for an unbroken run, and a calm cinematic reveal with slides
+  in the palette saying it keeps its own cross-fades rather than "Transitions as in your videos").
+- Planner step-down and plan notes: `packages/ai/test/rules-editing-style-sweep.test.ts` (design §4.3.1.6 "Never
+  worse than the defaults"): every N, cross-fades of 0.3–1 s alone and with the beat, the reveal and punch-ins, at
+  15/30/45/60 s × five styles × four music cases (70 s tracks at 60 s) × three takes, each judged by the worker's
+  window around the planned length, with the default plan judged the same way; pinned per-step counts at 60 s; every
+  keep-rest plan differs from the plan without the editing style and every other fallback plan is that plan; no
+  fallback plan mentions the transitions from the owner's videos; fake builds that write a note before failing never
+  leak it into a later step; the comparison build (kept on failure, cancellations passed on); and a revision (before &
+  after 30 s → "Make it 60 seconds.") with the revision wording, every kept join unchanged, and the wording for a new
+  edit when the earlier clips are gone.
+- Edit length and the chosen track (design §4.7 item 5): `packages/core/test/edit-length.test.ts` (`durationBoundsFor`
+  and `editLengthForTrack`: kept, trimmed to 39.8 s for 45 s with a 40 s track, the 88 % and 5 s limits, the refusal
+  message; no tenth lost to binary rounding (16 s with 16.15 s kept, 74/65.35, 90/79.35 and 10/8.95 trimmed); the
+  music measured from the first beat (45/40 → 39.5 s from 0.3 s, 39.4 s from 0.45 s; 30/30 → 29.5 s from 0.3 s),
+  whether a track is long enough judged on its length alone; `earliestMusicStartSec`, `usableBeats` and `hasBeatGrid`,
+  which tells a track with a beat from one with no clear beat),
+  `packages/ai/test/planned-length.test.ts` (the rules plan, the AI brief's `target` and the AI plan's
+  `targetDurationSec` all 39.8 s; music switched off by an instruction keeps 45 s; a revised length is trimmed too; a
+  30 s track is refused with the shared message; the AI brief's reveal on the biggest lift worked out for the trimmed
+  length, with the music where the rules planner starts it), `packages/ai/test/rules-music-start.test.ts` (first beats
+  at 0.3 and 0.45 s with a 40 s track for 45 s, and 30 s and 30.2 s tracks for 30 s, every style, default and every
+  2 beats, two takes: the music starts on a beat, every cut listed as on the beat is within 40 ms of one as the plan
+  plays, the music lasts 0.1 s past the edit, the montage's cuts are all on beats, the trimmed note; an AI plan built
+  from the same cuts reports exactly the same beats, and its list follows where its music actually starts, not the
+  model's own list; the AI brief's target and fixed start leave room from the first beat),
+  `packages/ai/test/rules-no-clear-beat.test.ts` (a SYNTHETIC 40 s track with no beat, and one with 3 beats: across
+  every style, the default and an accepted style, with and without "Cut to the beat" and "Land the reveal on a beat",
+  two takes, neither planner reports `beatAlignment`, plan facts say `beatAligned: false` (and
+  `packages/core/test/foundations.test.ts` checks `planCutsOnTheBeat`: a listed cut counts only when the track, when
+  known, has a beat) and no plan note claims a
+  beat; the fitted styles' cuts are exactly those of the same edit without music; the beat montage keeps its 120 BPM
+  (or 60 BPM from the 3 beats) stand-in from where the music starts and says the track has no clear beat; the notes
+  for beat options with nothing to work with, one sentence when both apply; with the start chosen, the reveal still
+  lands on the track's biggest lift where the footage reaches it, and never falls back to a downbeat),
+  `apps/worker/test/plan-length.test.ts` (no database: the worker's own `planWithFallback` + `planningContextFor` on
+  the planner fixtures with 40 s tracks; 0 of 315 edits fail across the default and six accepted styles × five styles
+  × three tracks × three takes, where the window around the requested 45 s refuses 15 default-style plans (9 before
+  the beat montage stopped running to the end of the music); the step-down still runs; a revision asking for 45 s; a
+  30 s track refused, and refused before the AI planner is asked, for a first plan and a revision; first beats at 0.3
+  and 0.45 s through the worker: music on a beat, no false beat claims, music to the end),
+  `apps/web/test/music-curve.test.ts` (what the music start picker says when the edit is trimmed, also with a start
+  that can be chosen, when the track is as long as the edit or its first beat is late, or the track is too short;
+  `latestMusicStart` without the binary rounding loss).
 - Database + ffmpeg: `apps/worker/test/preferences-db.test.ts` ingests a SYNTHETIC R2 reference: a version 2 profile
   with flashes on the beat, no array longer than 8 numbers, no AI call, and only the thumbnail left under the asset's
   storage prefix. `apps/web/test/preferences-routes.integration.test.ts` covers `GET /api/references/summary` (staff
   read-only), `POST …/summary/decide` (owner-only, CSRF, stale `valueKey` → 409 with nothing written, accept writes
   `editingStyle` + `sources` + `summaryDecisions` and the audit rows), Settings refusing `sources`/`summaryDecisions`
-  and recording owner changes, and `…/summary/reset`.
+  and recording owner changes, `…/summary/reset`, a SYNTHETIC profile from another measuring version (listed with
+  `olderVersion`, rows exactly as without it, none of its own suggestions waiting in what `GET /api/references` gives
+  the Settings list, its own suggestions refused with 409 and nothing written, still counted after the same video is
+  uploaded again, until the old copy is removed), a transitions value accepted from the
+  videos that stays in use and stoppable once the stored profiles are moved to another measuring version,
+  `PUT /api/settings` refusing a reversed `musicFit` tempo range (400 on
+  `preferences.editingStyle.musicFit.bpmLow`, nothing stored), and "Change: use each style's own" on "Cutting to the
+  beat" (`…/summary/reset` with `{ field: 'beatSync' }`: owner only, other fields 400 with nothing written, beat sync
+  and the beats per cut accepted with it back to the defaults with no sources or decision, the transitions accepted with
+  them still in use, the audit row), and transitions accepted earlier that stay in use, with the line and stoppable,
+  once the stored videos are measured again as cross-fades. `apps/web/test/your-style.test.ts` checks what the card
+  sends for that button (the whole row) and which rows offer it, next to a new suggestion too. `apps/web/test/studio-access.integration.test.ts`
+  checks generation start with the music start on automatic: a 50 s edit with a 40 s track is refused with the
+  planners' message, a 45 s edit is accepted, and the track's music option carries its first beat (`firstBeatSec`).
+  `apps/web/test/music-routes.integration.test.ts` checks that "Suggested for you" offers that 40 s track for a 45 s
+  edit with "Trims the edit to 39.8 s", and that the Sound panel's "Cut to the beat" starts as on only when the
+  version's track has a beat (a stored plan listing cuts on the beat of a track with no clear beat starts it as off).
 - Only with the owner's real videos (design §4.3.1.10): 3–5 of their own posted videos, cuts and flashes counted by a
   person on a 15 s excerpt of each (cut count ± 10 %, flash count ± 1, tempo ± 2 BPM or an octave). Thresholds are
   starting values from synthetic clips until then.

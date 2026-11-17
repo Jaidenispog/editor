@@ -2,9 +2,12 @@ import {
   RESTRAINED_TRANSITIONS,
   STYLES,
   computeTimeline,
+  earliestMusicStartSec,
+  editLengthForTrack,
   effectivePreferences,
-  isDefaultEditingStyle,
+  isDefaultPlanningStyle,
   type BeatsPerCut,
+  type EditLengthForTrack,
   type EditingStyle,
   type TransitionPalette,
   type ZoomUse,
@@ -59,14 +62,25 @@ export interface EffectiveSettings {
   revisionHints: RevisionHints | null;
   /** Mentions of a skin fade in the owner's own words (the only case "Skin fade" text is honest). */
   ownerMentionsSkinFade: boolean;
-  /** The editing style accepted from the owner's own videos; null when every value is the default. */
+  /** The editing style accepted from the owner's own videos; null when every value the planners use is the default. */
   styleFromVideos: ResolvedEditingStyle | null;
+  /**
+   * Set only by the editing-style fallback (`buildWithStyleFallback` in planner.ts): which of its steps this build is.
+   * The build adds that step's plan note once it knows whether it kept the earlier version's joins.
+   */
+  styleFallback: StyleFallbackStep | null;
   notes: string[];
 }
 
-/** Resolves the accepted editing style for this plan; null with the defaults (plans are then unchanged). */
+/** The steps of the editing-style fallback, each with its own plan note (see `STYLE_FALLBACK_NOTES` in planner.ts). */
+export type StyleFallbackStep = 'transitionsOnly' | 'transitionsKeepRest' | 'wholeStyle';
+
+/**
+ * Resolves the accepted editing style for this plan; null when every value the planners use is the default (plans are
+ * then unchanged). Only the planning fields count: an accepted music fit alone only ranks the owner's tracks.
+ */
 export function resolveEditingStyle(style: EditingStyle | undefined, transitionsHint: 'none' | 'restrained' | null): ResolvedEditingStyle | null {
-  if (!style || isDefaultEditingStyle(style)) return null;
+  if (!style || isDefaultPlanningStyle(style)) return null;
   let palette = style.transitionPalette;
   let accent = palette?.accent ?? null;
   if (palette && transitionsHint === 'none') {
@@ -159,6 +173,7 @@ export function effectiveSettings(input: PlannerInput): EffectiveSettings {
     revisionHints: hints,
     ownerMentionsSkinFade: /\bskin[\s-]?fade\b/i.test(`${prefs.standingInstructions} ${input.instructions} ${input.revisionInstruction ?? ''}`),
     styleFromVideos: null,
+    styleFallback: null,
     notes: [],
   };
   let transitionsHint: 'none' | 'restrained' | null = null;
@@ -182,6 +197,38 @@ export function effectiveSettings(input: PlannerInput): EffectiveSettings {
   }
   s.styleFromVideos = resolveEditingStyle(prefs.editingStyle, transitionsHint);
   s.pacing = clamp(s.pacing, 0.55, 1.7);
+  return s;
+}
+
+/**
+ * The length this plan aims for once its music is known, by the rule in @studio/core (`editLengthForTrack`): the
+ * requested (or revised) length, or a little less when the music from the track's first usable beat
+ * (`earliestMusicStartSec`, where both planners can start it at the earliest, since the music starts on a beat) does
+ * not cover it; a track too short for that is refused with a message for the owner. The same rule applies with a start
+ * the owner chose: the music then starts on the first beat at or after the choice, or on the latest beat that still
+ * leaves room for this length (`beatGrid`). Without music (none chosen, or switched off by an instruction) the length
+ * stays as asked.
+ */
+export function plannedLength(input: PlannerInput, s: Pick<EffectiveSettings, 'target' | 'musicOn'> = effectiveSettings(input)): EditLengthForTrack {
+  if (!input.music || !s.musicOn) return { ok: true, targetSec: s.target, trimmed: false };
+  return editLengthForTrack(s.target, input.music.durationSec, earliestMusicStartSec(input.music.beatTimesSec, input.music.durationSec));
+}
+
+/**
+ * The length both planners aim for and the worker checks a plan against: {@link plannedLength}, or the requested length
+ * when the track is too short (the rules planner then refuses the edit with the rule's message).
+ */
+export function plannedTargetSec(input: PlannerInput): number {
+  const s = effectiveSettings(input);
+  const length = plannedLength(input, s);
+  return length.ok ? length.targetSec : s.target;
+}
+
+/** {@link effectiveSettings} with the target set to {@link plannedTargetSec} (for the AI brief and the AI plan). */
+export function plannedSettings(input: PlannerInput): EffectiveSettings {
+  const s = effectiveSettings(input);
+  const length = plannedLength(input, s);
+  if (length.ok) s.target = length.targetSec;
   return s;
 }
 

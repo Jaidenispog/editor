@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_EDITING_STYLE,
   DEFAULT_SETTINGS,
+  EDITING_STYLE_ROW_FIELDS,
   FORBIDDEN_STYLE_WORDS,
+  SUMMARY_ROW_STYLE_FIELDS,
+  isDefaultPlanningStyle,
+  OLDER_VERSION_NOTE,
+  REFERENCE_STYLE_ANALYSIS_VERSION,
   ReferenceStyleProfileSchema,
   alignCutsToBeats,
   applySummaryDecisions,
@@ -13,7 +19,11 @@ import {
   energyShape,
   findDrop,
   foldTempo,
+  isOlderMeasuringVersion,
   measureBeatSignal,
+  olderVersionNotice,
+  openSuggestions,
+  STILL_IN_USE_LINE,
   paletteFromCounts,
   profileReference,
   readReferenceProfile,
@@ -250,6 +260,91 @@ describe('summariseReferenceStyle', () => {
     expect(t.evidence.notMeasured).toEqual([{ reason: 'older_measurement', count: 1 }]);
   });
 
+  it('combines only profiles measured with the current version of the measuring and counts the others', () => {
+    // As if the measuring were tuned and its version raised to 2: two videos measured with version 1 (cross-fades)
+    // are left out of every row; the two measured with version 2 (white flashes) and a v1-only profile are combined.
+    const at = (style: ReferenceStyleSignals, analysisVersion: number) => ({ ...style, analysisVersion });
+    const cross = assembleReferenceSignals(rawStyle({ joins: Array.from({ length: 6 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })) }));
+    const profiles = [profileWith(at(r2(), 2), 'new-a'), profileWith(at(r2(), 2), 'new-b'), profileWith(at(cross, 1), 'old-a'), profileWith(at(cross, 1), 'old-b'), profileWith(null, 'v1')];
+    const s = summariseReferenceStyle(profiles, prefs(), { analysisVersion: 2 });
+    expect(s).toMatchObject({ total: 3, measured: 2, olderMeasurement: 1, olderVersion: 2 });
+    expect(s.referenceAssetIds).toEqual(['new-a', 'new-b', 'v1']);
+    const t = s.suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(t.state).toBe('open');
+    expect(t.evidence).toMatchObject({ measured: 2, agreeing: 2, total: 3 });
+    expect(t.value).toMatchObject({ accent: { type: 'fadewhite' } });
+    // Not the pace either: its shot lengths came from the older measuring too.
+    expect(s.suggestions.find((r) => r.field === 'pacing')!.evidence.total).toBe(3);
+    // Measured with one version, the same videos all count, and then the transitions differ.
+    const today = summariseReferenceStyle(profiles.map((p) => (p.style ? { ...p, style: { ...p.style, analysisVersion: 2 } } : p)), prefs(), { analysisVersion: 2 });
+    expect(today).toMatchObject({ total: 5, measured: 4, olderVersion: 0 });
+    expect(today.suggestions.find((r) => r.field === 'transitionPalette')!.state).toBe('differs');
+    // Only older versions: nothing is combined, and nothing is suggested.
+    const only = summariseReferenceStyle([profileWith(at(cross, 1), 'old-a')], prefs(), { analysisVersion: 2 });
+    expect(only).toMatchObject({ total: 0, measured: 0, olderMeasurement: 0, olderVersion: 1, updatedAt: null, referenceAssetIds: [] });
+    expect(only.suggestions.every((r) => r.state === 'not_measured' && r.action === null)).toBe(true);
+  });
+
+  it('tells the owner about videos measured with an older version of the measuring', () => {
+    // A profile is measured with the current version; once the version is raised it is an older one.
+    const current = profileWith(assembleReferenceSignals(rawStyle()), 'a');
+    expect(current.style!.analysisVersion).toBe(REFERENCE_STYLE_ANALYSIS_VERSION);
+    expect(isOlderMeasuringVersion(current)).toBe(false);
+    expect(isOlderMeasuringVersion(current, REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toBe(true);
+    expect(isOlderMeasuringVersion(profileWith(null, 'v1'), REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toBe(false);
+    // Uploading a video again adds a new copy and keeps the old one, so the wording stays true until it is removed.
+    expect(olderVersionNotice(2)).toBe('2 videos were measured with an older version of the measuring and are not used. Upload them again, then remove the old copies from their projects.');
+    expect(olderVersionNotice(1)).toBe('1 video was measured with an older version of the measuring and is not used. Upload it again, then remove the old copy from its project.');
+    expect(OLDER_VERSION_NOTE).toBe('Measured with an older version of the measuring, so it is not used. Upload the video again, then remove this copy.');
+    for (const text of [olderVersionNotice(3), OLDER_VERSION_NOTE]) expect(text).not.toMatch(FORBIDDEN_STYLE_WORDS);
+    // After the three videos are uploaded again (new assets, current version), the old copies are still counted.
+    const next = REFERENCE_STYLE_ANALYSIS_VERSION + 1;
+    const old = ['a', 'b', 'c'].map((id) => profileWith(assembleReferenceSignals(rawStyle()), id));
+    const again = ['a2', 'b2', 'c2'].map((id) => profileWith({ ...assembleReferenceSignals(rawStyle()), analysisVersion: next }, id));
+    expect(summariseReferenceStyle([...again, ...old], prefs(), { analysisVersion: next })).toMatchObject({ total: 3, olderVersion: 3 });
+  });
+
+  it('leaves the suggestions of a video measured with an older version of the measuring out of those waiting', () => {
+    // What Settings → Editing preferences → Reference videos counts ("N suggestions waiting for you") and the Studio card
+    // offers; POST /api/references/[assetId]/decide refuses such a video's suggestions with 409.
+    const style = assembleReferenceSignals(rawStyle());
+    const today = profileWith(style, 'a');
+    const other = profileWith({ ...style, analysisVersion: REFERENCE_STYLE_ANALYSIS_VERSION + 1 }, 'b');
+    expect(openSuggestions(today).length).toBeGreaterThan(0);
+    expect(other.suggestions).toEqual(today.suggestions);
+    expect(isOlderMeasuringVersion(other)).toBe(true);
+    expect(openSuggestions(other)).toEqual([]);
+    // After a version bump the video measured today waits for nothing, and one measured by the new version does.
+    expect(openSuggestions(today, REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toEqual([]);
+    expect(openSuggestions(other, REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toEqual(openSuggestions(today));
+    // A video measured before transitions and beat were added still offers its own (only its version is unknown).
+    const v1 = profileWith(null, 'c');
+    expect(isOlderMeasuringVersion(v1)).toBe(false);
+    expect(openSuggestions(v1).length).toBeGreaterThan(0);
+  });
+
+  it('keeps an accepted editing-style row in use, and stoppable, when no current video backs it', () => {
+    // Three videos with cross-fades; the owner accepts the transitions. Then the measuring version is raised (or the
+    // videos are removed): nothing is combined, but the cross-fades from the videos are still what the planners use.
+    const cross = assembleReferenceSignals(rawStyle({ joins: Array.from({ length: 8 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })) }));
+    const profiles = ['a', 'b', 'c'].map((id) => profileWith(cross, id));
+    const summary = summariseReferenceStyle(profiles, prefs());
+    const row = summary.suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(row.state).toBe('open');
+    const accepted = applySummaryDecisions(prefs(), summary, { accept: ['transitionPalette'], dismiss: [], valueKeys: { transitionPalette: row.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+    expect(accepted.editingStyle!.sources.transitionPalette?.by).toBe('reference');
+    for (const later of [summariseReferenceStyle(profiles, accepted, { analysisVersion: REFERENCE_STYLE_ANALYSIS_VERSION + 1 }), summariseReferenceStyle([], accepted)]) {
+      expect(later.total).toBe(0);
+      const t = later.suggestions.find((r) => r.field === 'transitionPalette')!;
+      expect(t).toMatchObject({ state: 'not_measured', value: null, action: null, inUse: true });
+      expect(t.seen).toBe(`Transitions: not measured yet. ${STILL_IN_USE_LINE}`);
+      // Rows not taken from the videos stay as they were.
+      expect(later.suggestions.filter((r) => r.field !== 'transitionPalette').every((r) => !r.inUse && !r.seen.includes(STILL_IN_USE_LINE))).toBe(true);
+    }
+    // Without anything accepted from the videos, nothing is in use.
+    expect(summariseReferenceStyle([], prefs()).suggestions.some((r) => r.inUse)).toBe(false);
+  });
+
   it('accepts with side effects visible, records the valueKey and detects a changed summary', () => {
     const flashy = assembleReferenceSignals(rawStyle({ joins: Array.from({ length: 8 }, (_, i): RawJoin => ({ kind: 'slide_vertical', timeSec: 2 * i + 1, durationSec: 0.3, direction: 'up' })) }));
     const summary = summariseReferenceStyle([profileWith(flashy, 'a')], prefs());
@@ -288,6 +383,120 @@ describe('summariseReferenceStyle', () => {
     expect(reset.transitions).toBe('varied');
     expect(reset.editingStyle.summaryDecisions.colour).toBeDefined();
     expect(reset.editingStyle.summaryDecisions.transitionPalette).toBeUndefined();
+  });
+
+  it('stops a row with every value accepting it set: "Cutting to the beat" also takes back the beats per cut', () => {
+    const profiles = ['a', 'b', 'c'].map((id) => profileWith(assembleReferenceSignals(rawStyle()), id));
+    const summary = summariseReferenceStyle(profiles, prefs());
+    const beat = summary.suggestions.find((r) => r.field === 'beatSync')!;
+    const palette = summary.suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(beat.alsoChanges).toEqual([{ field: 'beatsPerCut', value: 2 }]);
+    const accepted = applySummaryDecisions(prefs(), summary, { accept: ['beatSync', 'transitionPalette'], dismiss: [], valueKeys: { beatSync: beat.valueKey!, transitionPalette: palette.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+    expect(accepted.editingStyle).toMatchObject({ beatSync: 'on', beatsPerCut: 2, sources: { beatSync: { by: 'reference' }, beatsPerCut: { by: 'reference' } } });
+
+    // "Change: use each style's own" on the beat row: both values go back to the defaults the planners use, with their
+    // sources and the row's decision; the transitions accepted with it are untouched.
+    expect(SUMMARY_ROW_STYLE_FIELDS.beatSync).toEqual(['beatSync', 'beatsPerCut']);
+    const stopped = resetEditingStyle(accepted, 'beatSync');
+    const es = stopped.editingStyle;
+    expect(es).toMatchObject({ beatSync: DEFAULT_EDITING_STYLE.beatSync, beatsPerCut: DEFAULT_EDITING_STYLE.beatsPerCut });
+    expect(es.sources.beatSync).toBeUndefined();
+    expect(es.sources.beatsPerCut).toBeUndefined();
+    expect(es.summaryDecisions.beatSync).toBeUndefined();
+    expect(es.transitionPalette).toEqual(accepted.editingStyle.transitionPalette);
+    expect(es.sources.transitionPalette).toEqual(accepted.editingStyle.sources.transitionPalette);
+    expect(es.summaryDecisions.transitionPalette).toEqual(accepted.editingStyle.summaryDecisions.transitionPalette);
+    // The card offers the beat again with nothing in use there; the transitions are still in use from the videos.
+    const after = summariseReferenceStyle(profiles, stopped);
+    expect(after.suggestions.find((r) => r.field === 'beatSync')).toMatchObject({ state: 'open', inUse: false });
+    expect(after.suggestions.find((r) => r.field === 'transitionPalette')).toMatchObject({ state: 'accepted', inUse: true });
+    // Stopping the transitions row as well leaves nothing the planners use, as "Go back to each style's own" does.
+    expect(isDefaultPlanningStyle(resetEditingStyle(stopped, 'transitionPalette').editingStyle)).toBe(true);
+    expect(isDefaultPlanningStyle(resetEditingStyle(accepted).editingStyle)).toBe(true);
+    // Each row resets only its own values.
+    for (const row of EDITING_STYLE_ROW_FIELDS) {
+      const one = resetEditingStyle(accepted, row).editingStyle;
+      for (const f of ['transitionPalette', 'beatSync', 'beatsPerCut', 'reveal', 'zoom', 'musicFit'] as const) {
+        expect(stableJson(one[f]), `${row}: ${f}`).toBe(stableJson(SUMMARY_ROW_STYLE_FIELDS[row].includes(f) ? DEFAULT_EDITING_STYLE[f] : accepted.editingStyle[f]));
+      }
+    }
+  });
+
+  it('shows the beats per cut accepted with "Cutting to the beat" as in use until they are stopped too', () => {
+    // As stopping the beat row left it before: beat sync changed (by the owner), the beats per cut still from the videos.
+    const profiles = ['a', 'b', 'c'].map((id) => profileWith(assembleReferenceSignals(rawStyle()), id));
+    const summary = summariseReferenceStyle(profiles, prefs());
+    const beat = summary.suggestions.find((r) => r.field === 'beatSync')!;
+    const accepted = applySummaryDecisions(prefs(), summary, { accept: ['beatSync'], dismiss: [], valueKeys: { beatSync: beat.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+    const owner = { by: 'owner' as const, at: '2026-11-16T04:00:00Z', referenceAssetIds: [], referenceName: '' };
+    const halfStopped: EditingPreferences = { ...accepted, editingStyle: { ...accepted.editingStyle, beatSync: 'auto', sources: { ...accepted.editingStyle.sources, beatSync: owner } } };
+    expect(halfStopped.editingStyle).toMatchObject({ beatsPerCut: 2, sources: { beatsPerCut: { by: 'reference' } } });
+    // With no video behind it any more (removed, or measured with an older version): the row still says so.
+    const none = summariseReferenceStyle([], halfStopped).suggestions.find((r) => r.field === 'beatSync')!;
+    expect(none).toMatchObject({ value: null, inUse: true });
+    expect(none.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
+    // Stopping the row takes the beats per cut back too: nothing from the videos is left in use.
+    const stopped = resetEditingStyle(halfStopped, 'beatSync');
+    expect(stopped.editingStyle).toMatchObject({ beatSync: 'auto', beatsPerCut: null });
+    expect(summariseReferenceStyle([], stopped).suggestions.some((r) => r.inUse)).toBe(false);
+  });
+
+  it('keeps a value accepted earlier in use, with the line, when the videos measured again suggest another', () => {
+    // Three videos with half-second cross-fades and 2 s shots; the owner accepts the transitions and the pace.
+    const cross = assembleReferenceSignals(rawStyle({ joins: Array.from({ length: 7 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })) }));
+    const before = ['a', 'b', 'c'].map((id) => profileWith(cross, id));
+    const first = summariseReferenceStyle(before, prefs());
+    const palette = first.suggestions.find((r) => r.field === 'transitionPalette')!;
+    const pace = first.suggestions.find((r) => r.field === 'pacing')!;
+    expect(palette.value).toMatchObject({ types: ['fade'] });
+    expect(pace.value).toBe('balanced');
+    const accepted = applySummaryDecisions(prefs(), first, { accept: ['transitionPalette', 'pacing'], dismiss: [], valueKeys: { transitionPalette: palette.valueKey!, pacing: pace.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+
+    // The same videos measured again by a newer version of the measuring see straight cuts every half second (the old
+    // copies are left out as an older version). The cross-fades and the balanced pace accepted earlier are still what
+    // the planners and the form use.
+    const next = REFERENCE_STYLE_ANALYSIS_VERSION + 1;
+    const hard = assembleReferenceSignals(rawStyle({ joins: Array.from({ length: 31 }, (_, i): RawJoin => ({ kind: 'hard', timeSec: 0.5 * (i + 1), durationSec: 0 })) }));
+    const again = ['a2', 'b2', 'c2'].map((id) => profileWith({ ...hard, analysisVersion: next }, id));
+    const later = summariseReferenceStyle([...again, ...before], accepted, { analysisVersion: next });
+    expect(accepted.editingStyle.transitionPalette).toEqual(palette.value);
+    expect(accepted.pacing).toBe('balanced');
+    const t = later.suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(t).toMatchObject({ state: 'open', action: 'Use straight cuts', inUse: true });
+    expect(t.value).toMatchObject({ hardCutShare: 1, types: [] });
+    expect(t.seen).toBe(`Straight cuts between almost every shot. Seen in 3 of 3 videos. ${STILL_IN_USE_LINE}`);
+    // Length, pace, colour and text say so too (they have no Change on the card; they change in the editing preferences).
+    const p = later.suggestions.find((r) => r.field === 'pacing')!;
+    expect(p).toMatchObject({ value: 'fast', state: 'open', inUse: true });
+    expect(p.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
+    // Rows with nothing accepted from the videos are offered as before.
+    for (const r of later.suggestions.filter((x) => !['transitionPalette', 'pacing'].includes(x.field))) {
+      expect(r.inUse, r.field).toBe(false);
+      expect(r.seen, r.field).not.toContain(STILL_IN_USE_LINE);
+    }
+
+    // "No thanks" to the new one keeps the earlier one in use; using the new one or stopping the row ends the line.
+    const dismissed = applySummaryDecisions(accepted, later, { accept: [], dismiss: ['transitionPalette'], valueKeys: { transitionPalette: t.valueKey! } }, '2026-11-16T04:00:00Z').preferences;
+    expect(summariseReferenceStyle([...again, ...before], dismissed, { analysisVersion: next }).suggestions.find((r) => r.field === 'transitionPalette')).toMatchObject({ state: 'dismissed', inUse: true, seen: t.seen });
+    const used = applySummaryDecisions(accepted, later, { accept: ['transitionPalette'], dismiss: [], valueKeys: { transitionPalette: t.valueKey! } }, '2026-11-16T04:00:00Z').preferences;
+    const usedRow = summariseReferenceStyle([...again, ...before], used, { analysisVersion: next }).suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(usedRow).toMatchObject({ state: 'accepted', inUse: true });
+    expect(usedRow.seen).not.toContain(STILL_IN_USE_LINE);
+    const stoppedRow = summariseReferenceStyle([...again, ...before], resetEditingStyle(accepted, 'transitionPalette'), { analysisVersion: next }).suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(stoppedRow).toMatchObject({ state: 'open', inUse: false });
+    expect(stoppedRow.seen).not.toContain(STILL_IN_USE_LINE);
+
+    // Beats per cut left in use from the videos (beat sync changed by the owner) show on the beat row next to a suggestion.
+    const onBeat = ['d', 'e', 'f'].map((id) => profileWith(assembleReferenceSignals(rawStyle()), id));
+    const beatSummary = summariseReferenceStyle(onBeat, prefs());
+    const beat = beatSummary.suggestions.find((r) => r.field === 'beatSync')!;
+    expect(beat.alsoChanges).toEqual([{ field: 'beatsPerCut', value: 2 }]);
+    const withBeat = applySummaryDecisions(prefs(), beatSummary, { accept: ['beatSync'], dismiss: [], valueKeys: { beatSync: beat.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+    const owner = { by: 'owner' as const, at: '2026-11-16T04:00:00Z', referenceAssetIds: [], referenceName: '' };
+    const half: EditingPreferences = { ...withBeat, editingStyle: { ...withBeat.editingStyle, beatSync: 'off', sources: { ...withBeat.editingStyle.sources, beatSync: owner } } };
+    const beatRow = summariseReferenceStyle(onBeat, half).suggestions.find((r) => r.field === 'beatSync')!;
+    expect(beatRow).toMatchObject({ state: 'open', inUse: true });
+    expect(beatRow.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
   });
 
   it('keeps valueKeys stable regardless of key order', () => {

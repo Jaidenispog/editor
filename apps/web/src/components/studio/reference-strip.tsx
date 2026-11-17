@@ -5,10 +5,12 @@ import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import {
   OLDER_MEASUREMENT_NOTE,
+  OLDER_VERSION_NOTE,
   describeEndScreen,
   describeReferenceProfile,
   describeStyleSignals,
   describeSuggestion,
+  isOlderMeasuringVersion,
   openSuggestions,
   MATCHES_SETTINGS_REASON,
   type ReferenceStyleProfileV2,
@@ -181,12 +183,14 @@ function ReferenceCard({ reference, onChanged }: { reference: ReferenceDto; onCh
           )}
           {profile?.style ? <p className="mt-1 text-sm text-charcoal-700 [overflow-wrap:anywhere]" data-testid="reference-style-line">{describeStyleSignals(profile.style, profile.colourLook)}</p> : null}
           {profile && !profile.style ? <p className="mt-1 text-xs text-charcoal-500">{OLDER_MEASUREMENT_NOTE}</p> : null}
+          {profile && isOlderMeasuringVersion(profile) ? <p className="mt-1 text-xs text-charcoal-500">{OLDER_VERSION_NOTE}</p> : null}
           {profile?.style && describeEndScreen(profile.style) ? <p className="mt-1 text-xs text-charcoal-500">{describeEndScreen(profile.style)}</p> : null}
           {profile?.originalsDeletedAt ? <p className="mt-1 text-xs text-charcoal-500">The video itself has been deleted; only these measurements and the thumbnail are kept.</p> : null}
           {profile && profile.text.source === 'not_measured' ? <p className="mt-1 text-xs text-charcoal-500">On-screen text was not measured.</p> : null}
         </div>
       </div>
-      {profile ? <Suggestions reference={reference} profile={profile} onChanged={onChanged} /> : null}
+      {/* A video measured with another version of the measuring offers nothing: every number in it came from that measuring. */}
+      {profile && !isOlderMeasuringVersion(profile) ? <Suggestions reference={reference} profile={profile} onChanged={onChanged} /> : null}
       <div className="mt-3 flex flex-wrap gap-2">
         {reference.status === 'failed' ? (
           <Button size="sm" variant="secondary" className="min-h-11 sm:min-h-8" loading={busy === 'retry'} onClick={() => act('retry')}>

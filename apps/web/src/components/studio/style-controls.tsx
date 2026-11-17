@@ -2,7 +2,7 @@
 
 import { Music, Sparkles } from 'lucide-react';
 import { useEffect, useId, useMemo, useState } from 'react';
-import { LICENCE_STATE_LABELS, licenceStateOf, type StyleId } from '@studio/core';
+import { LICENCE_STATE_LABELS, editLengthForTrack, licenceStateOf, type StyleId } from '@studio/core';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { Select, Textarea } from '@/components/ui/field';
@@ -126,6 +126,10 @@ export function StyleControls({
   const musicValid = !musicTrackId || (musicChoice?.status === 'ready' && musicChoice.licenceConfirmed);
   // The chosen start always leaves room for the whole edit, even after the length slider moves.
   const effectiveMusicStart = musicChoice && musicStartSec !== null && latestMusicStart(musicChoice.durationSec, durationSec) > 0 ? Math.min(musicStartSec, latestMusicStart(musicChoice.durationSec, durationSec)) : null;
+  // A track whose music (from its first beat) is a little shorter than the edit trims it, with the start on automatic
+  // or chosen (the shared rule the planners use); a track too short for that would fail every edit, so Generate waits
+  // for a longer track or a shorter length.
+  const musicLength = musicChoice?.status === 'ready' && musicChoice.durationSec ? editLengthForTrack(durationSec, musicChoice.durationSec, musicChoice.firstBeatSec) : null;
 
   const titles = useMemo(() => new Map(status.music.map((m) => [m.id, m.artist ? `${m.title} – ${m.artist}` : m.title])), [status.music]);
   const musicOptions = useMemo(
@@ -151,6 +155,7 @@ export function StyleControls({
   else if (supported.length === 0) blockedReason = 'These clips do not support any style yet. Tag what each clip shows.';
   else if (chosen.length === 0) blockedReason = 'Choose at least one style.';
   else if (!musicValid) blockedReason = 'The chosen music is not ready or its licence is not confirmed.';
+  else if (musicLength && !musicLength.ok) blockedReason = musicLength.message;
 
   const toggle = (id: StyleId) =>
     setDeselected((prev) => {

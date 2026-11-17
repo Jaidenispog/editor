@@ -3,9 +3,12 @@ import {
   CancelledError,
   DEFAULT_EDITING_STYLE,
   EDIT_PLAN_VERSION,
+  MUSIC_TAIL_SEC,
   STYLES,
   VERTICAL_1080,
   computeTimeline,
+  durationBoundsFor,
+  hasBeatGrid,
   paletteTransitionTypes,
   validateEditPlan,
   type AudioPlan,
@@ -19,10 +22,10 @@ import {
 import type { AiCallOptions, EditPlanner, PlannerInput, PlannerResult } from '../types.js';
 import { fitDuration, play, startTimes, totalDuration, grow, shrink, type Draft } from './draft.js';
 import { collectFootage, type Candidate, type Footage } from './footage.js';
-import { alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
-import { ACCENT_PEAK_FRACTION, alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, isAccent, notePalette, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
+import { MUSIC_END_GAP_SEC, NO_CLEAR_BEAT_NOTES, alignedCuts, beatGrid, landRevealOnBeat, snapCutsToBeats, type BeatGrid } from './music.js';
+import { PALETTE_NOTE_SLOT, alignAccentsToBeats, applyMontagePalette, applyReveal, applyZoomStyle, feltCutTime, feltJoinTimes, notePalette, paletteNoteFor, planReveal, recheckRevealNote, revealIndex, snapCutsToBeatSteps, withPalette } from './editing-style.js';
 import { clamp, hashString, round, seededRandom } from './random.js';
-import { beatSyncFor, effectiveSettings, tameTransition, type EffectiveSettings, type ResolvedEditingStyle } from './settings.js';
+import { beatSyncFor, effectiveSettings, plannedLength, tameTransition, type EffectiveSettings, type ResolvedEditingStyle, type StyleFallbackStep } from './settings.js';
 import { STYLE_BUILDERS, applyOpening, type BuildContext, type Recipe } from './styles.js';
 import { buildCaptions, resolveText } from './text.js';
 
@@ -49,6 +52,16 @@ const STYLE_RATIONALE: Record<PlannerInput['styleId'], string> = {
   clean_promo: 'Uses the steadiest, best-exposed shots with soft transitions and the business name up front.',
   process_story: 'Shows the cut in the order it happened: the start, the work and the finished result.',
 };
+
+/** The beat montage's sentence for a track with no clear beat: it cuts to a steady stand-in rhythm, not to a beat. */
+const MONTAGE_NO_BEAT_RATIONALE = 'Opens on the strongest detail shot, cuts through the work to a steady rhythm and holds the finished cut at the end.';
+
+/** The style's rationale sentence (the beat montage cuts to a steady rhythm when its track has no clear beat). */
+function styleRationale(input: PlannerInput, s: EffectiveSettings): string {
+  const music = s.musicOn ? input.music : null;
+  if (input.styleId === 'beat_montage' && music && !hasBeatGrid(music.beatTimesSec, music.durationSec)) return MONTAGE_NO_BEAT_RATIONALE;
+  return STYLE_RATIONALE[input.styleId];
+}
 
 /**
  * Deterministic edit planner with no network access. It is the fallback whenever the AI planner is not
@@ -82,7 +95,7 @@ export class RulesPlanner implements EditPlanner {
     let attempt = base.attempt;
     let plan: EditPlan | null = null;
     for (let take = 0; take < 3; take++) {
-      const intro = [STYLE_RATIONALE[input.styleId], ...(attempt > 0 && !base.revising ? [`Take ${attempt + 1} uses different shots and timing from the earlier takes.`] : [])];
+      const intro = [styleRationale(input, base), ...(attempt > 0 && !base.revising ? [`Take ${attempt + 1} uses different shots and timing from the earlier takes.`] : [])];
       const s: EffectiveSettings = { ...base, attempt, notes: [...intro, ...base.notes], emphasise: [...base.emphasise], deemphasise: [...base.deemphasise] };
       plan = buildWithStyleFallback(input, s, footage);
       const isRegenerate = !s.revising && previous && attempt > 0;
@@ -93,20 +106,43 @@ export class RulesPlanner implements EditPlanner {
   }
 }
 
-/** Plan notes for the editing-style fallback (owner-facing). */
+/** Plan notes for the editing-style fallback (owner-facing), for an edit built from scratch. */
 export const STYLE_FALLBACK_NOTES = {
   transitionsOnly: "The transitions from your videos could not be fitted to this footage at this length, so this version uses the style's own transitions.",
   transitionsKeepRest: "The transitions from your videos could not be fitted to this footage at this length, so this version uses the style's own transitions and keeps the rest of your editing style.",
   wholeStyle: "Your editing style could not be fitted to this footage at this length, so this version uses the style's own timing and transitions.",
-} as const;
+} as const satisfies Record<StyleFallbackStep, string>;
+
+/**
+ * The same notes for a revision that kept shots from the earlier version (owner-facing). A revision keeps the joins of
+ * the shots it keeps ("keep everything the request does not mention"), so leaving out the transitions from the owner's
+ * videos changes only the shots it adds; the kept joins (the owner's transitions among them) stay as they were, unless
+ * the request itself changes transitions ("remove the flashy transitions"), which has its own note.
+ */
+export const STYLE_FALLBACK_REVISION_NOTES = {
+  transitionsOnly:
+    "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this version use the style's own transitions; this does not change the joins kept from the earlier version.",
+  transitionsKeepRest:
+    "The transitions from your videos could not be fitted to this footage at this length, so the shots added in this version use the style's own transitions and the rest of your editing style is kept; this does not change the joins kept from the earlier version.",
+  wholeStyle:
+    "Your editing style could not be fitted to this footage at this length, so the shots added in this version use the style's own timing and transitions; this does not change the joins kept from the earlier version.",
+} as const satisfies Record<StyleFallbackStep, string>;
+
+/** The plan note for a fallback step: the revision wording when the build kept joins from the earlier version. */
+export function styleFallbackNote(step: StyleFallbackStep, keptEarlierJoins: boolean): string {
+  return (keptEarlierJoins ? STYLE_FALLBACK_REVISION_NOTES : STYLE_FALLBACK_NOTES)[step];
+}
 
 /**
  * Last resort for the owner's accepted editing style, one step at a time. When the edit cannot be built with it, it is
  * built again without the transitions from the owner's videos (long cross-fades use up length the footage may not
- * have) but with the rest of the style: cutting to the beat, beats per cut, the reveal and zooms. Only when that also
- * fails is it built with each style's own timing and transitions. The plan says which part was left out; the owner's
- * settings stay as they are. Errors that also happen without the editing style (and cancellations) are passed on
- * unchanged.
+ * have) but with the rest of the style: cutting to the beat, beats per cut, the reveal and zooms. When that build is no
+ * different from the one without the editing style (the rest needs music, or its beat steps place no cut here), that
+ * plan is used instead, with the note that the editing style could not be fitted: a plan never says it keeps what it
+ * does not apply. Only when leaving out the transitions fails too is the edit built with each style's own timing and
+ * transitions. Each step's note is added by the build itself (`styleFallback`), in the revision wording when it kept
+ * the earlier version's joins. The owner's settings stay as they are. Errors that also happen without the editing style
+ * (and cancellations) are passed on unchanged; the comparison build never fails an edit that already has a plan.
  */
 export function buildWithStyleFallback(
   input: PlannerInput,
@@ -116,9 +152,11 @@ export function buildWithStyleFallback(
 ): EditPlan {
   const es = s.styleFromVideos;
   if (!es) return build(input, s, footage);
+  // A build writes its notes into the settings it is given, even when it then fails: every later step starts from
+  // this copy, so no note from a failed attempt reaches the plan.
   const before = { notes: [...s.notes], emphasise: [...s.emphasise], deemphasise: [...s.deemphasise] };
-  const again = (styleFromVideos: ResolvedEditingStyle | null, note: string) =>
-    build(input, { ...s, styleFromVideos, notes: [...before.notes, note], emphasise: [...before.emphasise], deemphasise: [...before.deemphasise] }, footage);
+  const again = (styleFromVideos: ResolvedEditingStyle | null, styleFallback: StyleFallbackStep) =>
+    build(input, { ...s, styleFromVideos, styleFallback, notes: [...before.notes], emphasise: [...before.emphasise], deemphasise: [...before.deemphasise] }, footage);
   try {
     return build(input, s, footage);
   } catch (err) {
@@ -127,39 +165,54 @@ export function buildWithStyleFallback(
   if (es.palette) {
     const rest: ResolvedEditingStyle = { ...es, palette: null, accent: null };
     // With nothing else accepted, leaving out the transitions is leaving out the whole editing style.
-    if (!hasPlanningValues(rest)) return again(null, STYLE_FALLBACK_NOTES.transitionsOnly);
+    if (!hasPlanningValues(rest)) return again(null, 'transitionsOnly');
+    let keepRest: EditPlan | null = null;
     try {
-      return again(rest, STYLE_FALLBACK_NOTES.transitionsKeepRest);
+      keepRest = again(rest, 'transitionsKeepRest');
     } catch (err) {
       if (!couldNotBuild(err)) throw err;
     }
+    if (keepRest) {
+      let plain: EditPlan;
+      try {
+        plain = again(null, 'wholeStyle');
+      } catch (err) {
+        if (err instanceof CancelledError) throw err;
+        return keepRest;
+      }
+      return sameApartFromRationale(keepRest, plain) ? plain : keepRest;
+    }
   }
-  return again(null, STYLE_FALLBACK_NOTES.wholeStyle);
+  return again(null, 'wholeStyle');
 }
 
 function couldNotBuild(err: unknown): boolean {
   return err instanceof AppError && err.code === 'PROCESSING_FAILED';
 }
 
-/** True when the editing style (without its transitions) still changes how the rules planner builds an edit. */
+/** True when two plans differ only in their notes. */
+function sameApartFromRationale(a: EditPlan, b: EditPlan): boolean {
+  return JSON.stringify({ ...a, rationale: '' }) === JSON.stringify({ ...b, rationale: '' });
+}
+
+/**
+ * True when the accepted editing style has a planning value besides its transitions: beat sync, beats per cut, the
+ * reveal or zooms. Whether they change a particular edit is only known once it is built (see buildWithStyleFallback).
+ */
 function hasPlanningValues(es: ResolvedEditingStyle): boolean {
   return es.beatSync !== DEFAULT_EDITING_STYLE.beatSync || es.beatsPerCut !== DEFAULT_EDITING_STYLE.beatsPerCut || es.reveal !== DEFAULT_EDITING_STYLE.reveal || es.zoom.mode !== DEFAULT_EDITING_STYLE.zoom.mode;
 }
 
-/** Shortens the target to the music when the chosen track is a little shorter than the edit. */
+/**
+ * Shortens the target to the music when the chosen track is a little shorter than the edit, by the shared rule
+ * (`plannedLength`, the same length the AI brief and the worker's check use); refuses a track too short for that.
+ */
 function capTargetToMusic(input: PlannerInput, s: EffectiveSettings): void {
-  const music = input.music;
-  if (!music || !s.musicOn) return;
-  const room = Math.floor((music.durationSec - 0.15) * 10) / 10;
-  if (room >= s.target) return;
-  if (room < Math.max(5, s.target * 0.88)) {
-    throw new AppError(
-      'PROCESSING_FAILED',
-      `The chosen track is ${Math.round(music.durationSec)} seconds long, which is shorter than the ${Math.round(s.target)}-second edit. Choose a longer track or a shorter length.`,
-    );
-  }
-  s.target = room;
-  s.notes.push(`The edit was trimmed to ${room} s so it ends before the music does.`);
+  const length = plannedLength(input, s);
+  if (!length.ok) throw new AppError('PROCESSING_FAILED', length.message);
+  if (!length.trimmed) return;
+  s.target = length.targetSec;
+  s.notes.push(`The edit was trimmed to ${length.targetSec} s so it ends before the music does.`);
 }
 
 /** Order of source ranges, used to tell whether a regenerated take differs from the previous one. */
@@ -168,8 +221,11 @@ function signature(plan: Pick<EditPlan, 'segments'>): string {
 }
 
 function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage): EditPlan {
+  // An editing-style fallback note goes right after the notes this build was given (see buildWithStyleFallback).
+  const leadNotes = s.notes.length;
   const previous = s.revising ? (input.previousPlan ?? null) : null;
-  const taken = new Set(previous?.segments.map((seg) => seg.id) ?? []);
+  const earlierIds = new Set(previous?.segments.map((seg) => seg.id) ?? []);
+  const taken = new Set(earlierIds);
   let counter = 0;
   const nextId = () => {
     let id: string;
@@ -178,7 +234,8 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     taken.add(id);
     return id;
   };
-  const needsGrid = input.styleId === 'beat_montage' || Boolean(input.music && s.musicOn);
+  const musicPlays = Boolean(input.music && s.musicOn);
+  const needsGrid = input.styleId === 'beat_montage' || musicPlays;
   const preferStart = previous?.audio.music?.startOffsetSec;
   const es = s.styleFromVideos;
   let fullGrid = needsGrid ? beatGrid(s.musicOn ? input.music : null, s.target, s.attempt, preferStart, input.musicStartSec ?? null) : null;
@@ -237,13 +294,20 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   if (es && input.styleId === 'beat_montage' && grid) applyMontagePalette(ctx, drafts, grid);
   else if (es) notePalette(ctx);
   const everyN = es?.beatsPerCut ?? null;
-  if (grid?.fromMusic && !recipe.exact && beatMode === 'on' && everyN) {
-    if (snapCutsToBeatSteps(drafts, grid, everyN, s.style.pacing.minShotSec) > 0) ctx.notes.push(`Shots last whole steps of ${everyN} beat${everyN === 1 ? '' : 's'} where the style's shot lengths allow, from your style.`);
-  } else if (grid?.fromMusic && !recipe.exact && beatMode === 'on' && snapCutsToBeats(drafts, grid) > 0) ctx.notes.push('Cuts are nudged onto the beat of the music where the footage allows.');
+  if (grid && !recipe.exact && beatMode === 'on') {
+    // A track with no clear beat has only the steady stand-in rhythm, which is not its beat: nothing is moved onto it.
+    if (!grid.fromMusic) {
+      if (musicPlays) ctx.notes.push(NO_CLEAR_BEAT_NOTES.cuts);
+    } else if (everyN) {
+      if (snapCutsToBeatSteps(drafts, grid, everyN, s.style.pacing.minShotSec) > 0) ctx.notes.push(`Shots last whole steps of ${everyN} beat${everyN === 1 ? '' : 's'} where the style's shot lengths allow, from your style.`);
+    } else if (snapCutsToBeats(drafts, grid) > 0) ctx.notes.push('Cuts are nudged onto the beat of the music where the footage allows.');
+  }
   if (es && grid?.fromMusic && !recipe.exact) alignAccentsToBeats(drafts, grid);
   // "Land the finished look on the strongest beat" (from the owner's videos): with the music start on automatic the
   // start moves (by whole bars) so the track's biggest lift falls where the reveal is; then the reveal is nudged onto it.
-  const reveal = es?.reveal === 'strongest_beat' && fullGrid?.fromMusic && !previous ? planRevealFor(ctx, drafts, fullGrid) : null;
+  // The biggest lift comes from the track's loudness, so this also runs for a track with no clear beat (planReveal and
+  // applyReveal then never fall back to a downbeat).
+  const reveal = es?.reveal === 'strongest_beat' && fullGrid && musicPlays && !previous ? planRevealFor(ctx, drafts, fullGrid) : null;
   if (reveal?.musicStartSec !== null && reveal?.musicStartSec !== undefined && input.music) {
     fullGrid = beatGrid(input.music, s.target, s.attempt, undefined, reveal.musicStartSec);
     if (grid) grid = fullGrid;
@@ -252,6 +316,12 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   if (!reveal && grid?.fromMusic && input.revealOnBeat) {
     if (landRevealOnBeat(drafts, grid)) ctx.notes.push('The first shot of the finished cut starts on a beat.');
     else ctx.notes.push('The reveal could not be moved onto a beat with this footage, so it stays where the cut works best.');
+  } else if (!reveal && grid && musicPlays && input.revealOnBeat) ctx.notes.push(NO_CLEAR_BEAT_NOTES.reveal);
+  const noBeatCuts = ctx.notes.indexOf(NO_CLEAR_BEAT_NOTES.cuts);
+  const noBeatReveal = ctx.notes.indexOf(NO_CLEAR_BEAT_NOTES.reveal);
+  if (noBeatCuts >= 0 && noBeatReveal >= 0) {
+    ctx.notes[noBeatCuts] = NO_CLEAR_BEAT_NOTES.cutsAndReveal;
+    ctx.notes.splice(noBeatReveal, 1);
   }
 
   const keepPreviousText = Boolean(previous && !recipe.exact && previous.textOverlays.length > 0 && s.text !== 'none');
@@ -286,8 +356,9 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
   const state: ComposeState = {
     bannedText: new Set<string>(),
     captionsOn: captionsWanted,
-    musicOn: Boolean(input.music && s.musicOn),
-    musicOffset: fullGrid?.fromMusic ? fullGrid.startOffsetSec : 0,
+    musicOn: musicPlays,
+    // Where the grid starts, also for a track with no clear beat (its stand-in rhythm starts where its music does).
+    musicOffset: musicPlays && fullGrid ? fullGrid.startOffsetSec : 0,
     accentPeaks: Boolean(es?.accent),
   };
   const vctx: PlanValidationContext = {
@@ -299,6 +370,13 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     ...(es?.palette ? { extraStyleTransitions: paletteTransitionTypes(es.palette) } : {}),
   };
 
+  if (s.styleFallback) {
+    // A revision keeps the shots it can from the earlier version, each with its join; only shots it adds get new ones.
+    // Kept shots keep their earlier ids (new ones never reuse them), so this reports what the build actually did.
+    const keptEarlierJoins = drafts.some((d, i) => i > 0 && earlierIds.has(d.id));
+    ctx.notes.splice(leadNotes, 0, styleFallbackNote(s.styleFallback, keptEarlierJoins));
+  }
+
   let lastErrors: PlanIssue[] = [];
   // The plan only says the finished look lands on the biggest lift while it still does.
   const recheckReveal = () => {
@@ -308,25 +386,48 @@ function buildPlan(input: PlannerInput, s: EffectiveSettings, footage: Footage):
     recheckReveal();
     const plan = compose(ctx, drafts, textFor, state, previous, grid);
     const res = validateEditPlan(plan, vctx);
-    if (res.ok && res.plan) return res.plan;
-    lastErrors = res.errors;
-    if (!repair(ctx, drafts, plan, res.errors, state, fit, retransition)) break;
+    const errors = withMusicGap(plan, res.errors, input);
+    if (res.ok && res.plan && errors.length === 0) return res.plan;
+    lastErrors = errors;
+    if (!repair(ctx, drafts, plan, errors, state, fit, retransition)) break;
   }
-  // Last chance: accept a plan that is a little off the ±5 % aim but inside the window the worker allows.
+  // Last chance: accept a plan that is a little off the ±5 % aim but inside the window the worker allows (the same
+  // `durationBoundsFor` around the same target, trimmed to the music when it was).
   recheckReveal();
   const plan = compose(ctx, drafts, textFor, state, previous, grid);
-  const slack = Math.max(2, s.target * 0.12);
-  const loose = validateEditPlan(plan, { ...vctx, durationBounds: { min: s.target - slack, max: s.target + slack } });
-  if (loose.ok && loose.plan) return loose.plan;
-  const durationOnly = (loose.errors.length ? loose.errors : lastErrors).every((e) => e.code === 'DURATION_OUT_OF_RANGE');
+  const loose = validateEditPlan(plan, { ...vctx, durationBounds: durationBoundsFor(s.target) });
+  const looseErrors = withMusicGap(plan, loose.errors, input);
+  if (loose.ok && loose.plan && looseErrors.length === 0) return loose.plan;
+  const durationOnly = (looseErrors.length ? looseErrors : lastErrors).every((e) => e.code === 'DURATION_OUT_OF_RANGE');
   const name = STYLES[input.styleId].name.toLowerCase();
   throw new AppError(
     'PROCESSING_FAILED',
     durationOnly
       ? `There is not enough usable footage for a ${Math.round(s.target)}-second ${name}. Add more clips or choose a shorter length.`
       : `The ${name} could not be built from this footage.`,
-    { details: { errors: loose.errors.length ? loose.errors : lastErrors } },
+    { details: { errors: looseErrors.length ? looseErrors : lastErrors } },
   );
+}
+
+/**
+ * The validator's issues plus one of the rules planner's own: the music starts where the beat grid starts (on a beat,
+ * see compose), so an edit must end at least 0.1 s before the music from there does (the validator alone allows the
+ * music to end up to 0.05 s early). Such an edit is reported as MUSIC_TOO_SHORT, and the repair shortens it.
+ */
+function withMusicGap(plan: EditPlan, errors: readonly PlanIssue[], input: PlannerInput): PlanIssue[] {
+  const m = plan.audio.music;
+  const music = input.music;
+  if (!m || !music || errors.some((e) => e.code === 'MUSIC_TOO_SHORT')) return [...errors];
+  const total = computeTimeline(plan).totalDurationSec;
+  if (m.startOffsetSec + total <= music.durationSec - MUSIC_END_GAP_SEC + 1e-6) return [...errors];
+  return [
+    ...errors,
+    {
+      code: 'MUSIC_TOO_SHORT',
+      message: `Music starts at ${m.startOffsetSec.toFixed(1)}s and the track (${music.durationSec.toFixed(1)}s) ends as the edit does`,
+      path: 'audio.music',
+    },
+  ];
 }
 
 /** The reveal plan for this edit from where the reveal currently sits (see planReveal). */
@@ -406,6 +507,7 @@ function draftsFromPlan(ctx: BuildContext, prev: EditPlan): Draft[] | null {
       keep: seg.role === 'result' ? 'end' : seg.role === 'before' ? 'start' : 'centre',
       slot: 'body',
       autoTransition: false,
+      joinFrom: 'kept',
     });
   });
   if (drafts.length === 0) return null;
@@ -552,6 +654,7 @@ interface ComposeState {
   bannedText: Set<string>;
   captionsOn: boolean;
   musicOn: boolean;
+  /** Where the music starts: the start of the beat grid (on a beat when the track has beats), never moved. */
   musicOffset: number;
   /** Report an accent's peak (not its end) as the moment of the cut (only with an accepted accent). */
   accentPeaks: boolean;
@@ -574,7 +677,6 @@ function compose(
   const { input, s, footage } = ctx;
   const style = s.style;
   const total = totalDuration(drafts);
-  const starts = startTimes(drafts);
 
   const anyAudio = drafts.some((d) => d.cand.hasAudio);
   const music = input.music && state.musicOn ? input.music : null;
@@ -606,7 +708,10 @@ function compose(
     const prevMusic = previous?.audio.music;
     const change = s.revisionHints?.music === 'quieter' ? 0.7 : s.revisionHints?.music === 'louder' ? 1.25 : 1;
     const volume = prevMusic ? prevMusic.volume * change : s.musicVolume;
-    const offset = clamp(state.musicOffset, 0, Math.max(0, music.durationSec - total - 0.1));
+    // The music starts where the beat grid starts (on a beat, when the track has beats): the cuts were placed on that
+    // grid, and beatAlignment below is measured against it. It is never moved to fit a longer edit; such an edit is
+    // shortened instead (see withMusicGap and repair).
+    const offset = state.musicOffset;
     musicPlan = {
       trackId: music.trackId,
       startOffsetSec: round(offset, 3),
@@ -616,16 +721,21 @@ function compose(
       duckUnderOriginal: true,
     };
   }
-  const cutTimes = starts.slice(1).map((t, i) => {
-    const tr = drafts[i + 1]?.transitionIn ?? null;
-    return t + (state.accentPeaks && isAccent(tr) ? ACCENT_PEAK_FRACTION * tr!.durationSec : (tr?.durationSec ?? 0));
-  });
+  // The cuts as the plan plays them (its segments, timed as the renderer times them), against the grid the cuts were
+  // placed on, which starts where the music does: the same report the AI plan gets for the same cuts (toPlanCandidate).
+  // Only a grid of the track's own beats is reported: the stand-in rhythm for a track with no clear beat is not its beat.
   const beatAlignment =
-    musicPlan && grid?.fromMusic ? { bpm: grid.bpm && grid.bpm > 0 ? round(grid.bpm, 1) : null, alignedCutTimesSec: alignedCuts(grid, cutTimes) } : null;
+    musicPlan && grid?.fromMusic
+      ? { bpm: grid.bpm && grid.bpm > 0 ? round(grid.bpm, 1) : null, alignedCutTimesSec: alignedCuts(grid, feltJoinTimes(segments, state.accentPeaks)) }
+      : null;
 
   const overlays = textFor(drafts).filter((o) => !state.bannedText.has(o.text));
   const captions = state.captionsOn ? buildCaptions(drafts, footage.transcripts) : [];
   if (!music && !originalEnabled && !keep.some(Boolean)) ctx.notes.push('This edit has no sound: there is no music and the original sound is switched off.');
+  // The note for the transitions from the owner's videos says what this plan has: the joins the palette really chose
+  // (`joinFrom`), the style's own, and the accents it places, where.
+  const paletteNote = s.styleFromVideos && ctx.notes.includes(PALETTE_NOTE_SLOT) ? paletteNoteFor(s.styleFromVideos, input.styleId, segments, drafts.map((d) => d.joinFrom), revealIndex(input.styleId, drafts), grid) : null;
+  const notes = ctx.notes.flatMap((n) => (n !== PALETTE_NOTE_SLOT ? [n] : paletteNote ? [paletteNote] : []));
 
   const title = previous?.title ?? `${style.name}${s.attempt > 0 ? ` · take ${s.attempt + 1}` : ''}`;
   return {
@@ -633,7 +743,7 @@ function compose(
     styleId: input.styleId,
     title: title.slice(0, 80),
     description: describe(ctx, drafts, total, music?.title ?? null, originalEnabled || keep.some(Boolean)),
-    rationale: [...new Set(ctx.notes)].join(' ').slice(0, 2000),
+    rationale: [...new Set(notes)].join(' ').slice(0, 2000),
     output: VERTICAL_1080,
     targetDurationSec: round(clamp(s.target, 5, 90), 2),
     segments,
@@ -708,6 +818,8 @@ function repair(
         if (d?.transitionIn) {
           const t = d.transitionIn.durationSec * 0.6;
           d.transitionIn = t >= 0.2 ? { ...d.transitionIn, durationSec: round(t, 2) } : null;
+          // A transition from the palette dropped for length is a straight cut the palette did not choose.
+          if (!d.transitionIn && d.joinFrom === 'videos') d.joinFrom = undefined;
           d.autoTransition = false;
           changed = true;
           refit = true;
@@ -716,6 +828,8 @@ function repair(
       case 'FLASHY_TRANSITION':
         if (d) {
           d.transitionIn = tameTransition({ ...ctx.s, transitions: 'calm' }, d.transitionIn);
+          // The calm replacement is not the palette's transition.
+          if (d.joinFrom === 'videos') d.joinFrom = undefined;
           d.autoTransition = false;
           changed = true;
         }
@@ -745,21 +859,16 @@ function repair(
       case 'MUSIC_TOO_SHORT': {
         const music = ctx.input.music;
         if (music) {
+          // The music stays on the beat it starts on (the cuts follow that beat grid). The fit's tolerance (or a
+          // longer revision) can land past what the music leaves after it: fit to that instead (the validator's
+          // length window still applies).
           const total = totalDuration(drafts);
-          const next = Math.max(0, music.durationSec - total - 0.1);
-          if (next < state.musicOffset) {
-            state.musicOffset = next;
+          const room = music.durationSec - state.musicOffset - MUSIC_TAIL_SEC;
+          if (total > room && room > 0) {
+            cap = room - 0.05;
             changed = true;
-          } else {
-            // The fit's tolerance can land a little past the end of a track the target was trimmed to: fit to
-            // what the music leaves instead (the validator's length window still applies).
-            const room = music.durationSec - state.musicOffset - 0.15;
-            if (total > room && room > 0) {
-              cap = room - 0.05;
-              changed = true;
-            }
-            refit = true;
           }
+          refit = true;
         }
         break;
       }

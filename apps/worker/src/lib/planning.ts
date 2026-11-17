@@ -1,5 +1,5 @@
 import { AppError, CancelledError, errorMessage, validateEditPlan, type EditPlan, type PlanIssue, type PlanValidationContext, type PlanValidationResult } from '@studio/core';
-import type { AiUsage, EditPlanner, PlannerInput } from '@studio/ai';
+import { plannedLength, type AiUsage, type EditPlanner, type PlannerInput } from '@studio/ai';
 import type { Logger } from 'pino';
 
 export interface PlanOutcome {
@@ -19,6 +19,8 @@ const MAX_REPAIRS = 2;
  * Asks the configured planner for a plan, validates it against the real footage, feeds validation errors
  * back for repair (up to MAX_REPAIRS), and falls back to the deterministic rules planner when the primary
  * planner is unavailable or keeps producing invalid plans. The renderer only ever sees a validated plan.
+ * A chosen track too short for the edit (the shared length rule, `plannedLength`) is refused first, with the rule's
+ * message, before any planner is asked (both planners would aim for a length the music cannot give).
  */
 export async function planWithFallback(
   primary: EditPlanner,
@@ -28,6 +30,8 @@ export async function planWithFallback(
   logger: Logger,
   signal: AbortSignal,
 ): Promise<PlanOutcome> {
+  const length = plannedLength(input);
+  if (!length.ok) throw new AppError('PROCESSING_FAILED', length.message);
   const usages: AiUsage[] = [];
   let attempts = 0;
   let previousErrors: PlanIssue[] | undefined;

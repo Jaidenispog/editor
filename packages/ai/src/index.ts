@@ -3,6 +3,7 @@ export * from './pricing.js';
 export * from './factory.js';
 export * from './plan-with-repair.js';
 export { RulesPlanner } from './rules/planner.js';
+export { plannedLength, plannedTargetSec } from './rules/settings.js';
 export { HeuristicLabeler } from './rules/labeler.js';
 export { AnthropicPlanner, toPlanCandidate, PLANNER_MAX_TOKENS, PLANNER_RETRY_MAX_TOKENS, type AnthropicPlannerOptions } from './anthropic/planner.js';
 export { AnthropicVisionLabeler, normaliseLabels, MAX_FRAMES_PER_REQUEST, type AnthropicVisionLabelerOptions } from './anthropic/labeler.js';

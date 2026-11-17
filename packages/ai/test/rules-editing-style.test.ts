@@ -15,7 +15,7 @@ import {
 } from '@studio/core';
 import { RulesPlanner } from '../src/rules/planner.js';
 import { strongestBeat } from '../src/rules/music.js';
-import { allowedTransitionsFor, buildPlannerUserContent } from '../src/anthropic/prompts.js';
+import { allowedTransitionsFor, buildPlannerUserContent, editingStyleBriefFor } from '../src/anthropic/prompts.js';
 import type { PlannerInput } from '../src/types.js';
 import { clickTrack, labelledProject, plannerInput } from './fixtures.js';
 
@@ -88,13 +88,19 @@ function beatOf(plan: EditPlan, t: number): { index: number; dist: number } {
 
 describe('editing style from your videos in the rules planner', () => {
   it('defaults: all plans are identical to before this feature (stored snapshot)', () => {
-    const plans: unknown[] = [];
+    const plans: EditPlan[] = [];
     for (const styleId of STYLE_IDS)
       for (const m of [null, clickTrack()])
         for (const attempt of [0, 1])
           for (const beatSync of [undefined, 'on'] as const) plans.push(planner.plan(plannerInput(labelledProject(), { styleId, music: m, attempt, ...(beatSync ? { beatSync } : {}), revealOnBeat: beatSync === 'on' })));
-    // Hash of the same 40 plans computed on commit 5801c8c, before the editing style existed.
-    expect(createHash('sha256').update(JSON.stringify(plans)).digest('hex')).toBe('a3db9b9764310e7a2e2c148fe40be720014bd9523edd103607ff8efe5f5f398d');
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    // Everything but the cut times listed as on the beat is as on commit 5801c8c, before the editing style existed: that
+    // commit's 40 plans hashed to a3db9b97…, and the same plans with `alignedCutTimesSec` emptied hash to this value.
+    const unlisted = plans.map((p) => ({ ...p, audio: { ...p.audio, beatAlignment: p.audio.beatAlignment && { ...p.audio.beatAlignment, alignedCutTimesSec: [] } } }));
+    expect(hash(unlisted)).toBe('1111c7cf4dd356ebad17691ee6062b692810e36a4282658d90f832e3c6bde18c');
+    // The listed times now come from each plan as it plays (its segments, timed as the renderer times them), not from the
+    // planner's drafts: 9 of these plans list some cuts one millisecond later than before. Pinned as well.
+    expect(hash(plans)).toBe('e2a24f91bc454d380935672d71bb14bd6fd4d402154b3bb31d60676da269a722');
   });
 
   it('finds the strongest beat of the synthetic track', () => {
@@ -120,7 +126,7 @@ describe('editing style from your videos in the rules planner', () => {
     expect(signatures.size).toBe(5);
   });
 
-  it('beat montage: hard cuts except accents, white flashes peaking on every 4th beat, 2-beat shots', () => {
+  it('beat montage: hard cuts except accents, white flashes peaking on 4th beats, 2-beat shots', () => {
     const plan = accepted.get('beat_montage')!;
     const js = joins(plan);
     expect(js.every((j) => j.type === null || j.type === 'fadewhite')).toBe(true);
@@ -135,7 +141,10 @@ describe('editing style from your videos in the rules planner', () => {
     const median = plays[Math.floor(plays.length / 2)]!;
     expect(median / 0.5).toBeGreaterThanOrEqual(1.5);
     expect(median / 0.5).toBeLessThanOrEqual(2.5);
-    expect(plan.rationale).toContain('white flash on every 4th beat, from your style');
+    // The note says what the plan has: each of its flashes on a 4th beat, with 4th beats between them that have none
+    // (the footage decides where one fits), so not "on every 4th beat".
+    expect(flashes.length).toBe(5);
+    expect(plan.rationale).toContain('Straight cuts with 5 white flashes, each on a 4th beat, from your style.');
   });
 
   it('process story: at least 70 % of cuts land within 40 ms of a beat', () => {
@@ -201,6 +210,20 @@ describe('editing style from your videos in the rules planner', () => {
       expect(planner.plan(inputFor(styleId, dismissed))).toEqual(defaults.get(styleId));
       expect(planner.plan(inputFor(styleId, ACCEPTED))).toEqual(accepted.get(styleId));
     }
+  });
+
+  it('an accepted music fit alone leaves every plan as the defaults and adds nothing to the AI brief (it only ranks tracks)', () => {
+    const fitOnly: EditingStyle = {
+      ...DEFAULT_EDITING_STYLE,
+      musicFit: { bpmLow: 110, bpmHigh: 130, prefersClearDrop: true, dynamicRangeDb: 8 },
+      sources: { musicFit: { by: 'reference', at: '2026-11-15T00:00:00Z', referenceAssetIds: ['ref-1'], referenceName: 'Your videos (1)' } },
+    };
+    // Even takes of the cinematic reveal dip to black into the final shot: the place an editing style would move.
+    for (const styleId of STYLE_IDS)
+      for (const attempt of [0, 1, 2]) expect(planner.plan(inputFor(styleId, fitOnly, { attempt })), `${styleId} take ${attempt + 1}`).toEqual(planner.plan(inputFor(styleId, DEFAULT_EDITING_STYLE, { attempt })));
+    const job = JSON.parse(buildPlannerUserContent(inputFor('cinematic_reveal', fitOnly))[0]!.text.replace(/^Job description \(JSON\):\n/, '')) as Record<string, unknown>;
+    expect(job['editingStyle']).toBeUndefined();
+    expect(editingStyleBriefFor(inputFor('cinematic_reveal', fitOnly))).toBeNull();
   });
 
   it('a style without a beat still gets its palette (cross-fades) and push-ins', () => {

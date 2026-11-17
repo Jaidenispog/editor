@@ -21,7 +21,7 @@ packages/config Typed environment (Zod). Secrets never leave the server.
 1. Browser uploads originals in 8 MiB parts (`upload_sessions`) → `media_assets` row → `ingest.asset` job.
 2. Worker ingest: `ffprobe` (rotation, HDR, HEVC, audio) → proxy (960p SDR, auto-rotated, tonemapped) → thumbnail → scene detection → quality metrics → audio analysis → sampled frames → vision labelling (if configured) → optional transcription when speech is likely → `media_assets.analysis`.
 3. Owner presses **Generate 5 edits** → `generations` row + `edits` (one per chosen style) + `edit_versions` v1 → `edits.generate` job.
-4. Worker planning: builds the planner input (analyses, manual tags, music beats, preferences, brand) → planner (Anthropic structured output, or rules planner) → `validateEditPlan` against real footage bounds → repair loop → stores plan → enqueues `render.preview` per version.
+4. Worker planning: builds the planner input (analyses, manual tags, music beats, preferences, brand) → planner (Anthropic structured output, or rules planner) → `validateEditPlan` against real footage bounds and the length window (`durationBoundsFor`: ±12 %, at least ±2 s) around the length both planners aimed for (`plannedTargetSec`: the requested or revised length, trimmed by the shared `editLengthForTrack` rule in `packages/core/src/edit-length.ts` when the chosen track's music, measured from its first beat where the planners can start it at the earliest, is a little shorter, so a 45 s edit with a 40 s track is planned and checked as 39.8 s; a track too short for that is refused before either planner is asked (`planWithFallback`), and already at `POST …/generate` for a new generation) → repair loop → stores plan → enqueues `render.preview` per version. The rules planner starts the music on the beat the planned length was measured from or a later one and never moves it off its beat grid; for both planners `audio.beatAlignment` lists the plan's own cuts (as it plays) that land on a beat from where its music actually starts (the AI plan's list is worked out, not taken from the model), and is null for a track with no clear beat (fewer than 4 usable beats, `hasBeatGrid`): the steady stand-in rhythm the rules planner keeps for such a track is not its beat, so nothing is snapped to it or reported on it.
 5. Worker render: compiles the validated plan to one FFmpeg filtergraph (trim/speed/crop/zoom/colour/transitions + ASS text overlay + music/original sound mix + loudness) → 540×960 preview → uploaded to storage → `preview_ready`. Cut points, segment lengths and transition overlaps are snapped to the output frame grid cumulatively (`quantiseTimeline` in `packages/media/src/render/video-filters.ts`), so the file length and every cut stay within half a frame of the plan however many short or speed-changed shots it has; each segment is padded by a few cloned frames before its exact `trim`, so it never comes out a frame short.
 6. Revise/regenerate creates a **new version** (old versions stay). Export renders 1080×1920 H.264/AAC MP4 only for the versions the owner asks for.
 
@@ -236,8 +236,9 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   - `packages/core/src/reference-style.ts` (pure): `assembleReferenceSignals` reduces the raw events to the stored
     numbers (`reference-signals.ts` schema), with beat sync reportable only above chance (binomial p < 0.01),
     `findDrop` on the 0.25 s energy curve (also used for the owner's tracks), `paletteFromCounts` in
-    `TRANSITION_TYPES` only, `summariseReferenceStyle` (latest 12 profiles, ≥ 60 % agreement), wording that always
-    says "estimate", and `applySummaryDecisions` / `resetEditingStyle`.
+    `TRANSITION_TYPES` only, `summariseReferenceStyle` (latest 12 profiles, ≥ 60 % agreement; a profile measured with
+    an older `REFERENCE_STYLE_ANALYSIS_VERSION` is listed but never combined, and the summary says how many), wording
+    that always says "estimate", and `applySummaryDecisions` / `resetEditingStyle`.
   - `preferences.editingStyle` (`packages/core/src/editing-style.ts`, defaults change nothing): `transitionPalette`,
     `beatSync`, `beatsPerCut`, `reveal`, `zoom`, `musicFit`, plus server-managed `sources` and `summaryDecisions`.
     Only an owner decision writes it (summary routes or Settings, through `updateSettingsLocked`).
@@ -248,7 +249,11 @@ Built once so every Stage B/C module integrates the same way and parallel work p
   push-in / punch-in zooms capped so exports do not soften; clean promo stays calm. With the default style every plan
   is byte-identical to before (snapshot test). The AI brief gets `job.editingStyle` (with the reveal's output time)
   and the palette in `allowedTransitions`; the validator's `extraStyleTransitions` silences only the
-  `OFF_STYLE_TRANSITION` warning. `musicFit` only ranks the owner's own licensed tracks.
+  `OFF_STYLE_TRANSITION` warning. `musicFit` only ranks the owner's own licensed tracks: only the planning fields make
+  the planners use the style (`isDefaultPlanningStyle`). When an edit cannot be built with the accepted style
+  (`PROCESSING_FAILED`), the rules planner steps down (`buildWithStyleFallback`): without the transitions from the
+  owner's videos, keeping the rest where it changes the plan, then without the style, each with a note that says what
+  the plan does (revision wordings when a revision kept the earlier version's joins; design §4.3.1.6).
 - **Brand in videos**: `packages/media/src/render/logo.ts` lays out the corner mark (≤ 150 px, inset 12 px in R_head)
   and the end card (≤ 420 × 300 px at y 380, last min(2 s, 30 %)) from the text layout of the same render, so the
   corner mark steps aside for top text and the end card is skipped when top or centre text overlaps it; every

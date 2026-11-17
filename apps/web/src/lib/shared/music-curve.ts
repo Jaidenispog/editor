@@ -1,3 +1,5 @@
+import { editLengthForTrack, floorToTenth } from '@studio/core';
+
 /**
  * Helpers for the music start-point picker. Isomorphic (no server imports): the server shrinks the stored
  * energy curve before sending it, the browser maps slider positions to seconds.
@@ -33,14 +35,48 @@ export function downsampleEnergy(energy: readonly number[] | null | undefined, s
 }
 
 /**
- * The latest start (seconds) that still lets an edit of `editSec` finish before the track ends; 0 when the
- * track is shorter than the edit or its length is unknown.
+ * The latest start (seconds, rounded down to 0.1 s) that still lets an edit of `editSec` finish before the track ends;
+ * 0 when the track is shorter than the edit or its length is unknown.
  */
 export function latestMusicStart(trackSec: number | null | undefined, editSec: number): number {
   if (!trackSec || !(trackSec > 0)) return 0;
-  return Math.max(0, Math.floor((trackSec - editSec) * 10) / 10);
+  return Math.max(0, floorToTenth(trackSec - editSec));
 }
 
 function round3(v: number): number {
   return Math.round(v * 1000) / 1000;
+}
+
+/** Seconds with up to two decimals, for the picker's notes ("0.45"). */
+function seconds2(v: number): string {
+  return String(Math.round(v * 100) / 100);
+}
+
+/**
+ * What the music does to the edit's length by the rule the planners use (`editLengthForTrack`, the music measured from
+ * the track's first beat `firstBeatSec`, where the planners start it at the earliest), with the start on automatic or
+ * chosen: "The edit will be trimmed to 39.8 s so it ends before the music does." when the track trims it, the rule's
+ * refusal when the track is too short, otherwise null (also when its length is not known yet).
+ */
+export function musicLengthNote(trackSec: number | null | undefined, editSec: number, firstBeatSec = 0): string | null {
+  if (!trackSec || !(trackSec > 0)) return null;
+  const length = editLengthForTrack(editSec, trackSec, firstBeatSec);
+  if (!length.ok) return length.message;
+  return length.trimmed ? `The edit will be trimmed to ${length.targetSec} s so it ends before the music does.` : null;
+}
+
+/**
+ * What the picker says when the start cannot be chosen (the track is not longer than the edit), with where the music
+ * starts and what happens to the length by the rule the planners use (`editLengthForTrack`): the edit is trimmed to end
+ * before the music, or the track is too short for the edit.
+ */
+export function automaticStartNote(trackSec: number | null | undefined, editSec: number, firstBeatSec = 0): string {
+  if (!trackSec || !(trackSec > 0)) return 'The length of this track is not known yet, so the music starts at the beginning.';
+  const length = editLengthForTrack(editSec, trackSec, firstBeatSec);
+  if (!length.ok) return length.message;
+  const lead = Math.abs(trackSec - editSec) <= 0.05 ? 'This track is as long as the edit' : trackSec < editSec ? 'This track is shorter than the edit' : 'This track is not much longer than the edit';
+  const where = firstBeatSec > 0.05 ? `on its first beat, ${seconds2(firstBeatSec)} s in,` : 'at the beginning';
+  return length.trimmed
+    ? `${lead}, so the music starts ${where} and the edit will be trimmed to ${length.targetSec} s so it ends before the music does.`
+    : `${lead}, so the music starts ${where.replace(/,$/, '')}.`;
 }

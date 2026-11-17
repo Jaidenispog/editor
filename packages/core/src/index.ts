@@ -8,6 +8,7 @@ export * from './analysis.js';
 export * from './edit-plan.js';
 export * from './timeline.js';
 export * from './plan-validation.js';
+export * from './edit-length.js';
 export * from './jobs.js';
 export * from './revision.js';
 export * from './music.js';

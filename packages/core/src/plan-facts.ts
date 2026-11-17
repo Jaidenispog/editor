@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { hasBeatGrid } from './edit-length.js';
 import type { EditPlan } from './edit-plan.js';
 import { ColourPresetSchema, RESTRAINED_TRANSITIONS, StyleIdSchema } from './styles.js';
 import { computeTimeline, round3 } from './timeline.js';
@@ -27,10 +28,28 @@ export const PlanFactsSchema = z.object({
   musicStartSec: z.number().nonnegative().nullable(),
   /** Any of the clips' own sound is heard. */
   originalSound: z.boolean(),
-  /** Cuts were aligned to the music's beats. */
+  /** Cuts were aligned to the music's beats (see {@link planCutsOnTheBeat}; never for a track with no clear beat). */
   beatAligned: z.boolean(),
 });
 export type PlanFacts = z.infer<typeof PlanFactsSchema>;
+
+/** The beats of a plan's track, as stored after analysis. */
+export interface TrackBeats {
+  beatTimesSec: readonly number[];
+  durationSec: number;
+}
+
+/**
+ * True when a plan lists cuts on the beat of its music (`audio.beatAlignment`). Both planners report that only for a
+ * track with a beat (`hasBeatGrid`), never for the steady stand-in rhythm of a track with no clear beat. Plans made before
+ * they stopped doing so can still list such cuts, so pass the plan's track when it is known (the Sound panel does): a
+ * track with no clear beat, or a track that is gone (`null`), then never counts as on the beat. Pure.
+ */
+export function planCutsOnTheBeat(plan: Pick<EditPlan, 'audio'>, track?: TrackBeats | null): boolean {
+  const listed = (plan.audio.beatAlignment?.alignedCutTimesSec.length ?? 0) > 0;
+  if (!listed || track === undefined) return listed;
+  return track !== null && hasBeatGrid(track.beatTimesSec, track.durationSec);
+}
 
 function median(values: number[]): number {
   if (values.length === 0) return 0;
@@ -90,6 +109,6 @@ export function computePlanFacts(plan: EditPlan): PlanFacts {
     musicVolume: music ? music.volume : null,
     musicStartSec: music ? round3(music.startOffsetSec) : null,
     originalSound: plan.audio.originalSound.enabled || plan.segments.some((s) => s.keepOriginalSound),
-    beatAligned: (plan.audio.beatAlignment?.alignedCutTimesSec.length ?? 0) > 0,
+    beatAligned: planCutsOnTheBeat(plan),
   };
 }

@@ -25,7 +25,7 @@ import {
   type TransitionSignal,
   type ZoomSignal,
 } from './reference-signals.js';
-import { classifyPacing, suggestedDuration, type ColourLook, type ReferenceStyleProfileV2, type ReferenceSuggestionField } from './reference.js';
+import { classifyPacing, isOlderMeasuringVersion, suggestedDuration, type ColourLook, type ReferenceStyleProfileV2, type ReferenceSuggestionField } from './reference.js';
 import type { EditingPreferences } from './settings.js';
 import type { TransitionType } from './styles.js';
 
@@ -651,18 +651,31 @@ export interface SummarySuggestion {
   evidence: SummaryEvidence;
   alsoChanges: SummaryAlsoChange[];
   state: SummaryRowState;
-  /** True when the value in use came from your videos. */
+  /**
+   * True when the value in use came from your videos. It stays `inUse` while that value is in use, also when the videos
+   * now suggest another one (`state` open or dismissed, `seen` ending with {@link STILL_IN_USE_LINE}), and for an
+   * editing-style row when nothing measured backs it any more (`value` null: the videos were removed, or measured with
+   * an older version of the measuring), so the card can still show it and, on an editing-style row, offer to stop it.
+   */
   inUse: boolean;
 }
 
+/**
+ * Added to a row whose value from the videos is still in use while the videos now suggest another one, and to an
+ * editing-style row whose value from the videos is still in use when nothing measured backs it now.
+ */
+export const STILL_IN_USE_LINE = 'What you accepted earlier from your videos is still in use.';
+
 export interface ReferenceStyleSummary {
-  /** Profiles considered (latest 12 ready ones). */
+  /** Profiles combined into the rows (of the latest 12 ready ones, those not from an older version of the measuring). */
   total: number;
-  /** Profiles with v2 signals. */
+  /** Profiles with v2 signals measured by the current version of the measuring. */
   measured: number;
-  /** Profiles measured before transitions and beat were added. */
+  /** Profiles measured before transitions and beat were added (they count for length, pace, colour and text only). */
   olderMeasurement: number;
-  /** Latest measurement time considered (ISO), or null. */
+  /** Profiles measured by an older version of the measuring: not combined into any row (upload them again). */
+  olderVersion: number;
+  /** Latest measurement time combined (ISO), or null. */
   updatedAt: string | null;
   referenceAssetIds: string[];
   suggestions: SummarySuggestion[];
@@ -684,6 +697,28 @@ export const SUMMARY_ROW_LABELS: Record<Exclude<ReferenceSummaryField, 'beatsPer
   musicFit: 'Music',
 };
 const ROW_ORDER = Object.keys(SUMMARY_ROW_LABELS) as Array<keyof typeof SUMMARY_ROW_LABELS>;
+
+/** The rows that set the editing style (each with **Change: use each style's own** while a value from the videos is in use). */
+export const EDITING_STYLE_ROW_FIELDS = ['transitionPalette', 'beatSync', 'reveal', 'zoom', 'musicFit'] as const satisfies readonly EditingStyleField[];
+export type EditingStyleRowField = (typeof EDITING_STYLE_ROW_FIELDS)[number];
+
+/**
+ * The editing-style values a row sets when it is accepted: its own, and for "Cutting to the beat" also the beats per cut
+ * (the value its `alsoChanges` carry, or none). A row is in use from the videos while any of them is, and stopping it
+ * (`resetEditingStyle(prefs, row)`) resets all of them, so nothing accepted with a row stays in use unseen. A bolder
+ * palette's `transitions: 'varied'` is an ordinary preference shown under Transitions, and stays, as with the reset.
+ */
+export const SUMMARY_ROW_STYLE_FIELDS: Readonly<Record<EditingStyleRowField, readonly EditingStyleField[]>> = {
+  transitionPalette: ['transitionPalette'],
+  beatSync: ['beatSync', 'beatsPerCut'],
+  reveal: ['reveal'],
+  zoom: ['zoom'],
+  musicFit: ['musicFit'],
+};
+
+export function isEditingStyleRow(field: string): field is EditingStyleRowField {
+  return (EDITING_STYLE_ROW_FIELDS as readonly string[]).includes(field);
+}
 
 const REASON_WORDS: Record<string, string> = {
   no_audio: 'had no sound',
@@ -793,10 +828,14 @@ function zoomWords(z: ZoomUse, checked: number): { seen: string; action: string 
 /**
  * Combines the latest reference profiles (all projects) into "your style" (design §4.3.1.4). Each video counts once;
  * a row is offered only when at least 60 % of the measured videos agree and at least two were measured (or exactly
- * one video was uploaded). Older v1-only profiles count for the length, pace, colour and text rows only. Pure.
+ * one video was uploaded). Older v1-only profiles count for the length, pace, colour and text rows only. Profiles
+ * measured by another version of the measuring (`style.analysisVersion` is not `opts.analysisVersion`, by default
+ * REFERENCE_STYLE_ANALYSIS_VERSION) are not combined into any row: every number in them, the shot lengths behind the
+ * pace included, came from that measuring. They are counted in `olderVersion` so the owner can be told. Pure.
  */
-export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceStyleProfileV2[], prefs: EditingPreferences): ReferenceStyleSummary {
-  const profiles = profilesNewestFirst.slice(0, SUMMARY_MAX_PROFILES);
+export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceStyleProfileV2[], prefs: EditingPreferences, opts: { analysisVersion?: number } = {}): ReferenceStyleSummary {
+  const latest = profilesNewestFirst.slice(0, SUMMARY_MAX_PROFILES);
+  const profiles = latest.filter((p) => !isOlderMeasuringVersion(p, opts.analysisVersion));
   const effective = effectivePreferences(prefs);
   const style: EditingStyle = prefs.editingStyle ?? DEFAULT_EDITING_STYLE;
   const v2 = profiles.filter((p) => p.style !== null);
@@ -1037,12 +1076,32 @@ export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceS
     }
   }
 
+  /**
+   * True while an editing-style value a row set when it was accepted from the videos is in use (its source is the videos
+   * and it is not the default): "Cutting to the beat" also counts the beats per cut accepted with it.
+   */
+  const rowFromVideos = (field: EditingStyleRowField) => SUMMARY_ROW_STYLE_FIELDS[field].some((f) => styleFromVideos(f) && stableJson(style[f]) !== stableJson(DEFAULT_EDITING_STYLE[f]));
+
   const suggestions: SummarySuggestion[] = ROW_ORDER.map((field) => {
     const c = candidates.get(field)!;
     const label = SUMMARY_ROW_LABELS[field];
     if (!('value' in c)) {
       const evidenceLine = c.evidence.measured > 0 || c.evidence.notMeasured.length ? ` ${seenIn(c.evidence)}` : '';
-      return { field, label, value: null, valueKey: null, seen: `${c.seen}${c.differs ? evidenceLine : ''}`, action: null, evidence: c.evidence, alsoChanges: [], state: c.differs ? 'differs' : 'not_measured', inUse: false };
+      // An editing-style value accepted from the videos stays in use until the owner changes it, even when no current
+      // video backs it (all removed, or measured with an older version of the measuring): the row says so.
+      const stillInUse = isEditingStyleRow(field) && rowFromVideos(field);
+      return {
+        field,
+        label,
+        value: null,
+        valueKey: null,
+        seen: `${c.seen}${c.differs ? evidenceLine : ''}${stillInUse ? ` ${STILL_IN_USE_LINE}` : ''}`,
+        action: null,
+        evidence: c.evidence,
+        alsoChanges: [],
+        state: c.differs ? 'differs' : 'not_measured',
+        inUse: stillInUse,
+      };
     }
     const valueKey = stableJson({ value: c.value, alsoChanges: c.alsoChanges });
     const decision = style.summaryDecisions[field];
@@ -1051,17 +1110,21 @@ export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceS
     if (decision && decision.valueKey === valueKey && decision.decision === 'dismissed') state = 'dismissed';
     else if (matches) state = decision && decision.valueKey === valueKey && decision.decision === 'accepted' ? 'accepted' : 'matches';
     else state = 'open';
+    // A value accepted from the videos stays in use until the owner chooses, also when the videos now suggest another
+    // one (measured again, or other videos added): the row offers the new suggestion and still says the earlier one is
+    // in use (with Change on an editing-style row), so the card never hides what is applied.
+    const inUse = isEditingStyleRow(field) ? rowFromVideos(field) : c.fromVideos;
     return {
       field,
       label,
       value: c.value,
       valueKey,
-      seen: `${c.seen} ${seenIn(c.evidence)}`,
+      seen: `${c.seen} ${seenIn(c.evidence)}${inUse && !matches ? ` ${STILL_IN_USE_LINE}` : ''}`,
       action: state === 'open' || state === 'dismissed' ? c.action : null,
       evidence: c.evidence,
       alsoChanges: c.alsoChanges,
       state,
-      inUse: matches && c.fromVideos,
+      inUse,
     };
   });
 
@@ -1070,6 +1133,7 @@ export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceS
     total: profiles.length,
     measured: v2.length,
     olderMeasurement: profiles.length - v2.length,
+    olderVersion: latest.length - profiles.length,
     updatedAt: times[times.length - 1] ?? null,
     referenceAssetIds: profiles.map((p) => p.assetId),
     suggestions,
@@ -1153,11 +1217,22 @@ export function applySummaryDecisions(prefs: EditingPreferences, summary: Refere
  * their summary decisions are forgotten so the rows can be accepted again). Length, pace, colour and text stay, and so
  * does `preferences.transitions` ('varied', pinned by the reference) when accepting a bolder palette turned it on: it
  * is an ordinary preference the owner changes in Settings, and the reset copy says it stays.
+ *
+ * With `row`, only that row ("Change: use each style's own" on it): every editing-style value accepting it set
+ * ({@link SUMMARY_ROW_STYLE_FIELDS}: "Cutting to the beat" also resets the beats per cut) returns to its default, with its
+ * source and the row's decision forgotten. Pure.
  */
-export function resetEditingStyle(prefs: EditingPreferences): EditingPreferences {
-  const decisions = { ...(prefs.editingStyle?.summaryDecisions ?? {}) };
-  for (const f of EDITING_STYLE_FIELDS) delete decisions[f];
-  return { ...prefs, editingStyle: { ...DEFAULT_EDITING_STYLE, summaryDecisions: decisions } };
+export function resetEditingStyle(prefs: EditingPreferences, row?: EditingStyleRowField): EditingPreferences {
+  const style = prefs.editingStyle ?? DEFAULT_EDITING_STYLE;
+  const decisions = { ...style.summaryDecisions };
+  const sources = { ...style.sources };
+  const values: Partial<Record<EditingStyleField, unknown>> = {};
+  for (const f of row ? SUMMARY_ROW_STYLE_FIELDS[row] : EDITING_STYLE_FIELDS) {
+    values[f] = DEFAULT_EDITING_STYLE[f];
+    delete sources[f];
+    delete decisions[f];
+  }
+  return { ...prefs, editingStyle: { ...style, ...values, sources, summaryDecisions: decisions } as EditingStyle };
 }
 
 // ---------------------------------------------------------------- wording for one video
@@ -1193,6 +1268,22 @@ export function describeEndScreen(style: ReferenceStyleSignals): string | null {
 
 /** Shown on a reference measured before v2. */
 export const OLDER_MEASUREMENT_NOTE = 'Measured before transitions and beat were added. Upload it again to include it.';
+
+/**
+ * Shown on a reference measured by an older version of the measuring (see {@link isOlderMeasuringVersion}). Uploading
+ * the video again adds a new copy and keeps this one, so the note says to remove it: it stays true until then.
+ */
+export const OLDER_VERSION_NOTE = 'Measured with an older version of the measuring, so it is not used. Upload the video again, then remove this copy.';
+
+/**
+ * The summary's line for videos measured by an older version of the measuring, e.g. "2 videos were measured …". Like
+ * {@link OLDER_VERSION_NOTE}, it stays true after the videos are uploaded again, until the old copies are removed.
+ */
+export function olderVersionNotice(count: number): string {
+  return count === 1
+    ? '1 video was measured with an older version of the measuring and is not used. Upload it again, then remove the old copy from its project.'
+    : `${count} videos were measured with an older version of the measuring and are not used. Upload them again, then remove the old copies from their projects.`;
+}
 
 /** Words the reference-style wording never uses. */
 export const FORBIDDEN_STYLE_WORDS = /\b(exact|exactly|precise|precisely|detected|trending|viral|your tiktok)\b/i;

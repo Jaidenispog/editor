@@ -5,7 +5,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { assembleReferenceSignals, profileReference, type EditPlan, type RawJoin } from '@studio/core';
+import { REFERENCE_STYLE_ANALYSIS_VERSION, STILL_IN_USE_LINE, assembleReferenceSignals, isOlderMeasuringVersion, openSuggestions, profileReference, type EditPlan, type RawJoin, type ReferenceStyleProfile, type ReferenceStyleProfileV2 } from '@studio/core';
 import { runMigrations } from '@studio/db';
 import { dropTestDatabase } from './helpers/test-database';
 
@@ -378,5 +378,227 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     expect(back.editingStyle.beatSync).toBe('auto');
     expect(back.pacing).toBe(before.pacing);
     expect(back.defaultDurationSec).toBe(before.defaultDurationSec);
+  });
+
+  it('lists a video measured with another version of the measuring but leaves it out of "your style"', async () => {
+    as(owner);
+    const summaryRoute = await import('../src/app/api/references/summary/route');
+    const before = await call(summaryRoute.GET, 'GET', '/api/references/summary', {});
+    expect(before.json.summary.olderVersion).toBe(0);
+    // A SYNTHETIC reference with cross-fades, stored as a different measuring version would store it (after tuning).
+    const style = assembleReferenceSignals({
+      fps: 30,
+      measuredSec: 16,
+      endScreenTrimmedSec: 0,
+      joins: Array.from({ length: 6 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })),
+      zoomShots: { checked: 16, pushScales: [], pullScales: [] },
+      audio: { bpm: 96, confidence: 0.9, beatTimesSec: Array.from({ length: 26 }, (_, i) => i * 0.625), energy: Array.from({ length: 64 }, () => 0.5), energyStepSec: 0.25, speechLikely: false },
+    });
+    const id = randomUUID();
+    const profile = profileReference(
+      { assetId: id, sourceFilename: 'synthetic-other-version.mp4', durationSec: 16, shotDurationsSec: [], look: { meanLuma: 0.5, meanSaturation: 0.4, contrast: 0.3 }, text: null, measuredAt: new Date(Date.now() + 60_000), style: { ...style, analysisVersion: REFERENCE_STYLE_ANALYSIS_VERSION + 1 } },
+      { defaultDurationSec: 30, pacing: 'balanced', colour: 'natural', textDensity: 'light' },
+    );
+    await db.insert(schema.mediaAssets).values({ id, projectId: ids.project, kind: 'reference_video', originalFilename: 'synthetic-other-version.mp4', mimeType: 'video/mp4', byteSize: 1, originalKey: `projects/${ids.project}/assets/${id}/original.mp4`, status: 'ready', referenceProfile: { ...profile, originalsDeletedAt: new Date().toISOString() } });
+
+    const after = await call(summaryRoute.GET, 'GET', '/api/references/summary', {});
+    expect(after.status).toBe(200);
+    expect(after.json.summary).toMatchObject({ total: before.json.summary.total, measured: before.json.summary.measured, olderVersion: 1 });
+    expect(after.json.videos).toMatchObject({ measured: before.json.videos.measured, olderVersion: 1 });
+    expect(after.json.summary.referenceAssetIds).not.toContain(id);
+    expect(after.json.list.find((v: { id: string }) => v.id === id)).toMatchObject({ olderVersion: true, olderMeasurement: false });
+    // The rows are exactly what they were without it.
+    const rows = (r: { json: { suggestions: Array<{ field: string; valueKey: string | null; evidence: unknown; state: string }> } }) => r.json.suggestions.map((x) => [x.field, x.valueKey, x.evidence, x.state]);
+    expect(rows(after)).toEqual(rows(before));
+
+    // Its own suggestions (its pace, length and colour came from that measuring too) are not offered: Settings →
+    // Reference videos counts none waiting (as the list does, from GET /api/references), the decide route refuses them,
+    // and nothing is written.
+    expect(profile.suggestions.length).toBeGreaterThan(0);
+    const listRoute = await import('../src/app/api/references/route');
+    const listed = (await call(listRoute.GET, 'GET', '/api/references', {})).json.references as Array<{ id: string; profile: ReferenceStyleProfileV2 | null }>;
+    const item = listed.find((r) => r.id === id)!;
+    expect(item.profile?.suggestions.length).toBe(profile.suggestions.length);
+    expect(openSuggestions(item.profile!)).toEqual([]);
+    expect(listed.filter((r) => r.id !== id && r.profile?.style).every((r) => !isOlderMeasuringVersion(r.profile!))).toBe(true);
+    const decideRoute = await import('../src/app/api/references/[assetId]/decide/route');
+    const prefsBefore = (await settingsRow()).preferences;
+    const refused = await call(decideRoute.POST, 'POST', `/api/references/${id}/decide`, { assetId: id }, { accept: [profile.suggestions[0]!.field] });
+    expect(refused.status).toBe(409);
+    expect(refused.json.error.message).toBe('This video was measured with an older version of the measuring, so its suggestions are not offered. Upload it again to get new ones.');
+    expect((await settingsRow()).preferences).toEqual(prefsBefore);
+    const stored = await db.query.mediaAssets.findFirst({ where: (t, { eq }) => eq(t.id, id) });
+    expect((stored?.referenceProfile as ReferenceStyleProfile).decisions).toEqual({});
+
+    // Uploading the same video again adds a new, current copy and keeps the old one, which is still listed and counted:
+    // the wording therefore says to remove the old copy, and removing it clears the count.
+    const againId = randomUUID();
+    const again = profileReference(
+      { assetId: againId, sourceFilename: 'synthetic-other-version.mp4', durationSec: 16, shotDurationsSec: [], look: { meanLuma: 0.5, meanSaturation: 0.4, contrast: 0.3 }, text: null, measuredAt: new Date(Date.now() + 120_000), style },
+      { defaultDurationSec: 30, pacing: 'balanced', colour: 'natural', textDensity: 'light' },
+    );
+    await db.insert(schema.mediaAssets).values({ id: againId, projectId: ids.project, kind: 'reference_video', originalFilename: 'synthetic-other-version.mp4', mimeType: 'video/mp4', byteSize: 1, originalKey: `projects/${ids.project}/assets/${againId}/original.mp4`, status: 'ready', referenceProfile: { ...again, originalsDeletedAt: new Date().toISOString() } });
+    const { eq } = await import('drizzle-orm');
+    try {
+      const uploadedAgain = await call(summaryRoute.GET, 'GET', '/api/references/summary', {});
+      expect(uploadedAgain.json.summary).toMatchObject({ total: before.json.summary.total + 1, olderVersion: 1 });
+      expect(uploadedAgain.json.summary.referenceAssetIds).toContain(againId);
+      const copies = uploadedAgain.json.list.filter((v: { filename: string }) => v.filename === 'synthetic-other-version.mp4');
+      expect(copies.map((v: { id: string; olderVersion: boolean }) => [v.id, v.olderVersion])).toEqual([
+        [againId, false],
+        [id, true],
+      ]);
+      // "Remove" on the old copy (as on its Studio reference card) leaves nothing measured with an older version.
+      const removeRoute = await import('../src/app/api/assets/[id]/route');
+      expect((await call(removeRoute.DELETE, 'DELETE', `/api/assets/${id}`, { id })).status).toBe(200);
+      expect((await call(summaryRoute.GET, 'GET', '/api/references/summary', {})).json.summary.olderVersion).toBe(0);
+    } finally {
+      // The later tests expect only the two current videos with flashes.
+      await db.update(schema.mediaAssets).set({ deletedAt: new Date() }).where(eq(schema.mediaAssets.id, againId));
+    }
+  });
+
+  it('keeps a style accepted from the videos in use, and stoppable, when no current video backs it any more', async () => {
+    as(owner);
+    const { eq } = await import('drizzle-orm');
+    const summaryRoute = await import('../src/app/api/references/summary/route');
+    const decideRoute = await import('../src/app/api/references/summary/decide/route');
+    const settingsRoute = await import('../src/app/api/settings/route');
+    type Row = { field: string; state: string; value: unknown; valueKey: string | null; seen: string; inUse: boolean };
+    const palette = async () => ((await call(summaryRoute.GET, 'GET', '/api/references/summary', {})).json as { suggestions: Row[]; summary: Record<string, number> });
+    const offered = (await palette()).suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(offered.state).toBe('open');
+    const accepted = await call(decideRoute.POST, 'POST', '/api/references/summary/decide', {}, { accept: ['transitionPalette'], valueKeys: { transitionPalette: offered.valueKey } });
+    expect(accepted.status).toBe(200);
+
+    // The measuring version is raised (simulated on the stored profiles): no video of the current version is left.
+    const current = (await db.query.mediaAssets.findMany({ where: (t, { and: all, eq: is, isNull }) => all(is(t.kind, 'reference_video'), isNull(t.deletedAt)) })).filter(
+      (a) => (a.referenceProfile as { style?: { analysisVersion?: number } | null } | null)?.style?.analysisVersion === REFERENCE_STYLE_ANALYSIS_VERSION,
+    );
+    expect(current.length).toBe(2);
+    const withVersion = (profile: unknown, analysisVersion: number) => {
+      const p = profile as { style: Record<string, unknown> };
+      return { ...p, style: { ...p.style, analysisVersion } } as never;
+    };
+    for (const a of current) await db.update(schema.mediaAssets).set({ referenceProfile: withVersion(a.referenceProfile, REFERENCE_STYLE_ANALYSIS_VERSION + 1) }).where(eq(schema.mediaAssets.id, a.id));
+    try {
+      const bumped = await palette();
+      // The two moved here (the copy from another version was removed in the test before).
+      expect(bumped.summary).toMatchObject({ measured: 0, olderVersion: 2 });
+      // The planners still use the cross-fades accepted earlier, so the row says so and can stop them.
+      const row = bumped.suggestions.find((r) => r.field === 'transitionPalette')!;
+      expect(row).toMatchObject({ state: 'not_measured', value: null, inUse: true });
+      expect(row.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
+      expect((await settingsRow()).preferences.editingStyle.transitionPalette).toEqual(offered.value);
+      const stopped = await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { transitionPalette: null } } });
+      expect(stopped.status).toBe(200);
+      expect((await palette()).suggestions.find((r) => r.field === 'transitionPalette')).toMatchObject({ state: 'not_measured', inUse: false });
+    } finally {
+      for (const a of current) await db.update(schema.mediaAssets).set({ referenceProfile: withVersion(a.referenceProfile, REFERENCE_STYLE_ANALYSIS_VERSION) }).where(eq(schema.mediaAssets.id, a.id));
+    }
+  });
+
+  it('refuses a music tempo range the wrong way round at PUT /api/settings and keeps the stored one', async () => {
+    as(owner);
+    const settingsRoute = await import('../src/app/api/settings/route');
+    const fit = (bpmLow: number, bpmHigh: number) => ({ bpmLow, bpmHigh, prefersClearDrop: true, dynamicRangeDb: 8 });
+    const ordered = await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { musicFit: fit(110, 130) } } });
+    expect(ordered.status).toBe(200);
+    expect((await settingsRow()).preferences.editingStyle.musicFit).toEqual(fit(110, 130));
+    const single = await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { musicFit: fit(124, 124) } } });
+    expect(single.status).toBe(200);
+    expect((await settingsRow()).preferences.editingStyle.musicFit).toEqual(fit(124, 124));
+    const reversed = await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { musicFit: fit(130, 110) } } });
+    expect(reversed.status).toBe(400);
+    expect(reversed.json.error.details).toEqual([
+      { path: 'preferences.editingStyle.musicFit.bpmLow', message: 'The music tempo range is the wrong way round: the lower BPM (bpmLow) must not be above the higher BPM (bpmHigh).' },
+    ]);
+    expect((await settingsRow()).preferences.editingStyle.musicFit).toEqual(fit(124, 124));
+  });
+
+  it('"Change: use each style\'s own" on "Cutting to the beat" also stops the beats per cut accepted with it', async () => {
+    as(owner);
+    const summaryRoute = await import('../src/app/api/references/summary/route');
+    const decideRoute = await import('../src/app/api/references/summary/decide/route');
+    const resetRoute = await import('../src/app/api/references/summary/reset/route');
+    type Row = { field: string; state: string; value: unknown; valueKey: string | null; inUse: boolean; alsoChanges: Array<{ field: string; value: unknown }> };
+    const rows = async () => new Map(((await call(summaryRoute.GET, 'GET', '/api/references/summary', {})).json.suggestions as Row[]).map((r) => [r.field, r]));
+    const offered = await rows();
+    const beat = offered.get('beatSync')!;
+    const palette = offered.get('transitionPalette')!;
+    expect(beat).toMatchObject({ state: 'open', alsoChanges: [{ field: 'beatsPerCut', value: 2 }] });
+    const accepted = await call(decideRoute.POST, 'POST', '/api/references/summary/decide', {}, { accept: ['beatSync', 'transitionPalette'], valueKeys: { beatSync: beat.valueKey, transitionPalette: palette.valueKey } });
+    expect(accepted.status).toBe(200);
+    expect((await settingsRow()).preferences.editingStyle).toMatchObject({ beatSync: 'on', beatsPerCut: 2, sources: { beatSync: { by: 'reference' }, beatsPerCut: { by: 'reference' } } });
+
+    // Owner only; a field that is not an editing-style row is refused, and nothing changes.
+    as(staff);
+    expect((await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, { field: 'beatSync' })).status).toBe(403);
+    as(owner);
+    const before = (await settingsRow()).preferences;
+    for (const field of ['pacing', 'beatsPerCut', 'nonsense']) expect((await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, { field })).status, field).toBe(400);
+    expect((await settingsRow()).preferences).toEqual(before);
+
+    // What the card sends for the row: both values go back to the defaults, with their sources and the row's decision.
+    const stopped = await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, { field: 'beatSync' });
+    expect(stopped.status).toBe(200);
+    const style = (await settingsRow()).preferences.editingStyle;
+    expect(style).toMatchObject({ beatSync: 'auto', beatsPerCut: null, transitionPalette: palette.value });
+    expect(style.sources.beatSync).toBeUndefined();
+    expect(style.sources.beatsPerCut).toBeUndefined();
+    expect(style.summaryDecisions.beatSync).toBeUndefined();
+    // The transitions accepted with it stay in use and stoppable; the beat row offers the beat again, nothing in use.
+    expect(style.sources.transitionPalette).toMatchObject({ by: 'reference' });
+    const after = await rows();
+    expect(after.get('beatSync')).toMatchObject({ state: 'open', inUse: false });
+    expect(after.get('transitionPalette')).toMatchObject({ state: 'accepted', inUse: true });
+    expect((stopped.json.summary.suggestions as Row[]).find((r) => r.field === 'beatSync')).toMatchObject({ inUse: false });
+    const audits = (await db.query.auditLog.findMany()).filter((a) => a.action === 'preferences.editing_style_changed').map((a) => a.data);
+    expect(audits).toContainEqual({ reset: true, by: 'owner', row: 'beatSync', fields: ['beatSync', 'beatsPerCut'] });
+  });
+
+  it('shows the transitions accepted earlier as still in use, and stoppable, when the videos measured again suggest others', async () => {
+    as(owner);
+    const { eq } = await import('drizzle-orm');
+    const summaryRoute = await import('../src/app/api/references/summary/route');
+    const resetRoute = await import('../src/app/api/references/summary/reset/route');
+    type Row = { field: string; state: string; value: unknown; seen: string; action: string | null; inUse: boolean };
+    const rows = async () => new Map(((await call(summaryRoute.GET, 'GET', '/api/references/summary', {})).json.suggestions as Row[]).map((r) => [r.field, r]));
+    // The straight cuts with white flashes accepted in the test before are in use.
+    const accepted = (await settingsRow()).preferences.editingStyle.transitionPalette;
+    expect(accepted).toMatchObject({ hardCutShare: 1, accent: { type: 'fadewhite' } });
+    expect((await rows()).get('transitionPalette')).toMatchObject({ state: 'accepted', inUse: true });
+
+    // Both videos measured again (SYNTHETIC): half-second cross-fades instead of the flashes.
+    const cross = assembleReferenceSignals({
+      fps: 30,
+      measuredSec: 16,
+      endScreenTrimmedSec: 0,
+      joins: Array.from({ length: 7 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })),
+      zoomShots: { checked: 16, pushScales: [], pullScales: [] },
+      audio: { bpm: 120, confidence: 0.9, beatTimesSec: Array.from({ length: 33 }, (_, i) => i * 0.5), energy: Array.from({ length: 64 }, () => 0.5), energyStepSec: 0.25, speechLikely: false },
+    });
+    const measured = (await db.query.mediaAssets.findMany({ where: (t, { and: all, eq: is, isNull }) => all(is(t.kind, 'reference_video'), isNull(t.deletedAt)) })).filter(
+      (a) => (a.referenceProfile as { style?: unknown } | null)?.style,
+    );
+    expect(measured.length).toBe(2);
+    try {
+      for (const a of measured) await db.update(schema.mediaAssets).set({ referenceProfile: { ...(a.referenceProfile as object), style: cross } as never }).where(eq(schema.mediaAssets.id, a.id));
+      // The row offers the cross-fades and still says the flashes accepted earlier are in use, with Change.
+      const row = (await rows()).get('transitionPalette')!;
+      expect(row).toMatchObject({ state: 'open', action: 'Use half-second cross-fades', inUse: true });
+      expect(row.value).toMatchObject({ types: ['fade'], durationSec: 0.5 });
+      expect(row.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
+      // They are still what the planners use.
+      expect((await settingsRow()).preferences.editingStyle.transitionPalette).toEqual(accepted);
+      // The card's Change stops them; the cross-fades stay on offer, with nothing in use.
+      expect((await call(resetRoute.POST, 'POST', '/api/references/summary/reset', {}, { field: 'transitionPalette' })).status).toBe(200);
+      expect((await settingsRow()).preferences.editingStyle.transitionPalette).toBeNull();
+      const stopped = (await rows()).get('transitionPalette')!;
+      expect(stopped).toMatchObject({ state: 'open', action: 'Use half-second cross-fades', inUse: false });
+      expect(stopped.seen).not.toContain(STILL_IN_USE_LINE);
+    } finally {
+      for (const a of measured) await db.update(schema.mediaAssets).set({ referenceProfile: a.referenceProfile }).where(eq(schema.mediaAssets.id, a.id));
+    }
   });
 });

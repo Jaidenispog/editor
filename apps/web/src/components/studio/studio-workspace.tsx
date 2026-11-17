@@ -27,7 +27,8 @@ const EMPTY_UPLOADS: UploadItem[] = [];
 function generationSummary(g: GenerationDto): string {
   const ready = g.edits.filter((e) => e.versions.some((v) => v.status === 'preview_ready')).length;
   const names = g.edits.map((e) => e.styleName).join(', ');
-  return `${g.settings.durationSec} s · ${ready} of ${g.edits.length} ready${names ? ` · ${names}` : ''}`;
+  // The requested length: an edit trimmed to a slightly shorter track is shorter (its card shows its real length).
+  return `${g.settings.durationSec} s target · ${ready} of ${g.edits.length} ready${names ? ` · ${names}` : ''}`;
 }
 
 /**

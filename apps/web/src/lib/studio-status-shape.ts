@@ -1,4 +1,4 @@
-import { readReferenceProfile, STYLES, STYLE_IDS, applyManualLabels, effectivePreferences, licenceStateOf, type AppSettings, type MusicLicence, type StyleId, type StyleSupport } from '@studio/core';
+import { readReferenceProfile, STYLES, STYLE_IDS, applyManualLabels, earliestMusicStartSec, effectivePreferences, licenceStateOf, type AppSettings, type MusicLicence, type StyleId, type StyleSupport } from '@studio/core';
 import type { Edit, EditVersion, Generation, JobRow, MediaAsset, MusicTrack, Project } from '@studio/db';
 import { downsampleEnergy } from './shared/music-curve.js';
 import type { AssetDto, AssetShotsDto, EditDto, GenerationDto, MusicOptionDto, ReferenceDto, ShotDto, StudioStatusDto, StyleOptionDto, VersionDto } from './shared/studio-dto.js';
@@ -116,6 +116,7 @@ export function shapeMusicOption(track: MusicTrack): MusicOptionDto {
     licenceConfirmed: Boolean(track.licence.confirmedByOwnerAt),
     licenceSummary: licenceSummary(track.licence),
     energy: track.status === 'ready' && track.beats ? downsampleEnergy(track.beats.energy, track.beats.energyStepSec) : null,
+    firstBeatSec: track.beats && track.durationSec ? earliestMusicStartSec(track.beats.beatTimesSec, track.durationSec) : 0,
     genres: track.genres ?? [],
     moods: track.moods ?? [],
     licenceState: licenceStateOf(track.licence),
