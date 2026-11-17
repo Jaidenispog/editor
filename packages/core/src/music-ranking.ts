@@ -1,3 +1,4 @@
+import { editLengthForTrack } from './edit-length.js';
 import type { MusicFit } from './editing-style.js';
 import { licenceStateOf, type MusicLicence } from './music.js';
 import { STYLES, type StyleId } from './styles.js';
@@ -19,6 +20,8 @@ export interface RankableTrack {
   moods: string[];
   bpm: number | null;
   durationSec: number | null;
+  /** Where its music can start at the earliest (`earliestMusicStartSec`, its first beat); 0 s when unknown. */
+  firstBeatSec?: number;
   status: 'uploaded' | 'processing' | 'ready' | 'failed';
   licence: MusicLicence;
   /** The track's strongest lift (from its stored energy curve, `findDrop`); null when it has none or was not measured. */
@@ -48,15 +51,28 @@ const STYLE_BPM: Record<StyleId, [number, number]> = {
 
 const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 
-/** Why a track cannot be used for an edit of this length, or null. */
+/**
+ * Why a track cannot be used for an edit of this length, or null. Its length is judged by the shared rule the form,
+ * the generate route and the planners use (`editLengthForTrack`): a track a little shorter than the edit is usable (it
+ * trims the edit), a track too short for that is not.
+ */
 export function trackUnusableReason(track: RankableTrack, editSec: number, now: Date = new Date()): string | null {
   if (track.status === 'failed') return "This track couldn't be analysed.";
   if (track.status !== 'ready') return 'Still being analysed.';
   const state = licenceStateOf(track.licence, now);
   if (state === 'not_confirmed') return 'Confirm its licence in Settings → Music first.';
   if (state === 'expired') return 'Its licence has expired.';
-  if (track.durationSec !== null && track.durationSec + 0.05 < editSec) return `Shorter than the edit (${formatSeconds(track.durationSec)}).`;
+  if (track.durationSec !== null && !editLengthForTrack(editSec, track.durationSec, track.firstBeatSec ?? 0).ok) {
+    return track.durationSec < editSec ? `Shorter than the edit (${formatSeconds(track.durationSec)}).` : `Too short for a ${Math.round(editSec)}-second edit (${formatSeconds(track.durationSec)}).`;
+  }
   return null;
+}
+
+/** "Trims the edit to 39.8 s" for a usable track a little shorter than the edit (the shared rule), else null. */
+export function trackTrimReason(track: Pick<RankableTrack, 'durationSec' | 'firstBeatSec'>, editSec: number): string | null {
+  if (track.durationSec === null) return null;
+  const length = editLengthForTrack(editSec, track.durationSec, track.firstBeatSec ?? 0);
+  return length.ok && length.trimmed ? `Trims the edit to ${length.targetSec} s` : null;
 }
 
 /** A track has a clear drop when its strongest lift rises at least this much. */
@@ -66,8 +82,10 @@ export const TRACK_DROP_MIN_RISE_DB = 6;
  * Ranks the owner's own tracks for an edit: +3 per matching genre, +2 per matching mood, +3 for an artist they like,
  * +1 when the tempo suits the style. With `fit` (the tempo and energy measured from the owner's own videos and accepted
  * in Settings): +2 when the track's BPM is in the range, +1 when only half or double its BPM is, +1 for a clear drop
- * when the owner's videos have one. Only numbers are compared: nothing is fetched, played or looked up. Unusable tracks (not ready, licence not confirmed or expired, shorter than the
- * edit) are kept in the list, last, with the reason. The top three usable tracks with a positive score get a rank.
+ * when the owner's videos have one. Only numbers are compared: nothing is fetched, played or looked up. Unusable tracks (not ready, licence not confirmed or expired, too
+ * short for the edit by the shared length rule) are kept in the list, last, with the reason; a track a little shorter
+ * than the edit is usable and says it trims the edit ("Trims the edit to 39.8 s"). The top three usable tracks with a
+ * positive score get a rank.
  * Nothing is ever chosen automatically: "No music" stays a first-class choice in the form. Deterministic.
  */
 export function rankTracksForPreferences(
@@ -119,6 +137,8 @@ export function rankTracksForPreferences(
       }
     }
     const unusable = trackUnusableReason(t, opts.durationSec, opts.now);
+    const trims = unusable === null ? trackTrimReason(t, opts.durationSec) : null;
+    if (trims) reasons.push(trims);
     return { track: t, score, reasons, unusable };
   });
   scored.sort((a, b) => Number(a.unusable !== null) - Number(b.unusable !== null) || b.score - a.score || a.track.title.localeCompare(b.track.title) || a.track.id.localeCompare(b.track.id));

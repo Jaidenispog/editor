@@ -303,6 +303,10 @@ suite('Music routes (database-backed)', () => {
     expect(res.status).toBe(200);
     expect(res.json.tracks[0]).toMatchObject({ id: ids.track, usable: false, rank: null });
     expect(res.json.tracks[0].unusableReason).toMatch(/Shorter than the edit/);
+    // A track a little shorter than the edit trims it (the planners' length rule), so it is suggested and says so.
+    const trims = await call(route.GET, 'GET', '/api/music/suggestions?durationSec=45', {});
+    expect(trims.json.tracks[0]).toMatchObject({ id: ids.track, usable: true });
+    expect(trims.json.tracks[0].reasons).toContain('Trims the edit to 39.8 s');
     expect((await call(route.GET, 'GET', '/api/music/suggestions?durationSec=500', {})).status).toBe(400);
   });
 });

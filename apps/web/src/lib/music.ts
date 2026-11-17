@@ -5,6 +5,7 @@ import {
   MusicLicenceInputSchema,
   STYLE_IDS,
   artistsWithoutMatch,
+  earliestMusicStartSec,
   licenceStateOf,
   musicTasteFrom,
   newId,
@@ -244,10 +245,12 @@ export async function musicSuggestions(query: z.infer<typeof SuggestionsQuerySch
     getSettings(),
   ]);
   const taste = musicTasteFrom(settings.preferences);
-  // The strongest lift of each track comes from its own stored loudness curve (numbers only, nothing is fetched).
+  // The strongest lift of each track comes from its own stored loudness curve (numbers only, nothing is fetched); its
+  // first beat is where the length rule measures the music from (a track a little shorter than the edit trims it).
   const tracks = rows.map((t) => {
     const drop = t.status === 'ready' && t.beats?.energy?.length ? findDrop(t.beats.energy, t.beats.energyStepSec, { spanSec: t.durationSec ?? undefined, beatTimesSec: t.beats.beatTimesSec }) : null;
-    return { ...t, genres: t.genres ?? [], drop: drop?.found ? { riseDb: drop.riseDb } : null };
+    const firstBeatSec = t.beats && t.durationSec ? earliestMusicStartSec(t.beats.beatTimesSec, t.durationSec) : 0;
+    return { ...t, genres: t.genres ?? [], drop: drop?.found ? { riseDb: drop.riseDb } : null, firstBeatSec };
   });
   return {
     tracks: rankTracksForPreferences(tracks, taste, {
