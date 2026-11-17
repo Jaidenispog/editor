@@ -651,9 +651,16 @@ export interface SummarySuggestion {
   evidence: SummaryEvidence;
   alsoChanges: SummaryAlsoChange[];
   state: SummaryRowState;
-  /** True when the value in use came from your videos. */
+  /**
+   * True when the value in use came from your videos. An editing-style row whose value from the videos is still in use
+   * stays `inUse` when nothing measured backs it any more (`value` null: the videos were removed, or measured with an
+   * older version of the measuring), so the card can still show it and offer to stop it.
+   */
   inUse: boolean;
 }
+
+/** Added to an editing-style row whose value from the videos is still in use when nothing measured backs it now. */
+export const STILL_IN_USE_LINE = 'What you accepted earlier from your videos is still in use.';
 
 export interface ReferenceStyleSummary {
   /** Profiles combined into the rows (of the latest 12 ready ones, those not from an older version of the measuring). */
@@ -686,6 +693,10 @@ export const SUMMARY_ROW_LABELS: Record<Exclude<ReferenceSummaryField, 'beatsPer
   musicFit: 'Music',
 };
 const ROW_ORDER = Object.keys(SUMMARY_ROW_LABELS) as Array<keyof typeof SUMMARY_ROW_LABELS>;
+
+function isEditingStyleField(field: string): field is EditingStyleField {
+  return (EDITING_STYLE_FIELDS as readonly string[]).includes(field);
+}
 
 const REASON_WORDS: Record<string, string> = {
   no_audio: 'had no sound',
@@ -1048,7 +1059,21 @@ export function summariseReferenceStyle(profilesNewestFirst: readonly ReferenceS
     const label = SUMMARY_ROW_LABELS[field];
     if (!('value' in c)) {
       const evidenceLine = c.evidence.measured > 0 || c.evidence.notMeasured.length ? ` ${seenIn(c.evidence)}` : '';
-      return { field, label, value: null, valueKey: null, seen: `${c.seen}${c.differs ? evidenceLine : ''}`, action: null, evidence: c.evidence, alsoChanges: [], state: c.differs ? 'differs' : 'not_measured', inUse: false };
+      // An editing-style value accepted from the videos stays in use until the owner changes it, even when no current
+      // video backs it (all removed, or measured with an older version of the measuring): the row says so.
+      const stillInUse = isEditingStyleField(field) && styleFromVideos(field) && stableJson(style[field]) !== stableJson(DEFAULT_EDITING_STYLE[field]);
+      return {
+        field,
+        label,
+        value: null,
+        valueKey: null,
+        seen: `${c.seen}${c.differs ? evidenceLine : ''}${stillInUse ? ` ${STILL_IN_USE_LINE}` : ''}`,
+        action: null,
+        evidence: c.evidence,
+        alsoChanges: [],
+        state: c.differs ? 'differs' : 'not_measured',
+        inUse: stillInUse,
+      };
     }
     const valueKey = stableJson({ value: c.value, alsoChanges: c.alsoChanges });
     const decision = style.summaryDecisions[field];
@@ -1201,14 +1226,20 @@ export function describeEndScreen(style: ReferenceStyleSignals): string | null {
 /** Shown on a reference measured before v2. */
 export const OLDER_MEASUREMENT_NOTE = 'Measured before transitions and beat were added. Upload it again to include it.';
 
-/** Shown on a reference measured by an older version of the measuring (see {@link isOlderMeasuringVersion}). */
-export const OLDER_VERSION_NOTE = 'Measured with an older version of the measuring. Upload it again to include it.';
+/**
+ * Shown on a reference measured by an older version of the measuring (see {@link isOlderMeasuringVersion}). Uploading
+ * the video again adds a new copy and keeps this one, so the note says to remove it: it stays true until then.
+ */
+export const OLDER_VERSION_NOTE = 'Measured with an older version of the measuring, so it is not used. Upload the video again, then remove this copy.';
 
-/** The summary's line for videos measured by an older version of the measuring, e.g. "2 videos were measured …". */
+/**
+ * The summary's line for videos measured by an older version of the measuring, e.g. "2 videos were measured …". Like
+ * {@link OLDER_VERSION_NOTE}, it stays true after the videos are uploaded again, until the old copies are removed.
+ */
 export function olderVersionNotice(count: number): string {
   return count === 1
-    ? '1 video was measured with an older version of the measuring. Upload it again to include it.'
-    : `${count} videos were measured with an older version of the measuring. Upload them again to include them.`;
+    ? '1 video was measured with an older version of the measuring and is not used. Upload it again, then remove the old copy from its project.'
+    : `${count} videos were measured with an older version of the measuring and are not used. Upload them again, then remove the old copies from their projects.`;
 }
 
 /** Words the reference-style wording never uses. */

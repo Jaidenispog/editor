@@ -88,7 +88,7 @@ function Row({
         </div>
       ) : null}
       {row.state === 'matches' ? <span className="text-xs text-charcoal-500">Matches your settings</span> : null}
-      {row.state === 'accepted' && canEdit && EDITING_STYLE_ROW_FIELDS.includes(row.field) ? (
+      {(row.state === 'accepted' || (row.inUse && row.value === null)) && canEdit && EDITING_STYLE_ROW_FIELDS.includes(row.field) ? (
         <div>
           <Button size="sm" variant="ghost" className="min-h-11 sm:min-h-8" loading={busy === `s:${row.field}`} onClick={() => onStop(row.field as EditingStyleField)}>
             Change: use each style&apos;s own
@@ -214,7 +214,9 @@ export function YourStyleSummary({ canEdit }: { canEdit: boolean }) {
           ) : null}
           {data && data.summary.total === 0 && olderVersion === 0 ? (
             <p className="text-sm text-charcoal-600">
-              Upload a few of your own posted videos with <strong>Add a reference video</strong> in any project and the editor will estimate your style. Nothing has been measured yet.
+              Upload a few of your own posted videos with <strong>Add a reference video</strong> in any project and the editor will estimate your style.
+              {/* After the videos were removed, what was accepted from them is still listed below. */}
+              {anyFromVideos ? null : ' Nothing has been measured yet.'}
             </p>
           ) : null}
           {olderVersion > 0 ? <Alert tone="info">{olderVersionNotice(olderVersion)}</Alert> : null}
@@ -222,7 +224,8 @@ export function YourStyleSummary({ canEdit }: { canEdit: boolean }) {
             <Alert tone="info">Your videos were measured before transitions and beat were added. Upload them again to include them in these rows.</Alert>
           ) : null}
           {nothingReportable ? <Alert tone="info">Not enough to go on yet — another video or two will help.</Alert> : null}
-          {data && data.summary.total > 0 ? (
+          {/* The rows also show when no current video backs them but a value from the videos is still in use. */}
+          {data && (data.summary.total > 0 || anyFromVideos) ? (
             <>
               {canEdit ? (
                 <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">

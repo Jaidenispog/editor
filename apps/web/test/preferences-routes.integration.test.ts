@@ -5,7 +5,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { REFERENCE_STYLE_ANALYSIS_VERSION, assembleReferenceSignals, profileReference, type EditPlan, type RawJoin } from '@studio/core';
+import { REFERENCE_STYLE_ANALYSIS_VERSION, STILL_IN_USE_LINE, assembleReferenceSignals, profileReference, type EditPlan, type RawJoin, type ReferenceStyleProfile } from '@studio/core';
 import { runMigrations } from '@studio/db';
 import { dropTestDatabase } from './helpers/test-database';
 
@@ -410,6 +410,57 @@ suite('Preferences, hidden edits and reference videos (database-backed)', () => 
     // The rows are exactly what they were without it.
     const rows = (r: { json: { suggestions: Array<{ field: string; valueKey: string | null; evidence: unknown; state: string }> } }) => r.json.suggestions.map((x) => [x.field, x.valueKey, x.evidence, x.state]);
     expect(rows(after)).toEqual(rows(before));
+
+    // Its own suggestions (its pace, length and colour came from that measuring too) are not offered: refused, and
+    // nothing is written.
+    expect(profile.suggestions.length).toBeGreaterThan(0);
+    const decideRoute = await import('../src/app/api/references/[assetId]/decide/route');
+    const prefsBefore = (await settingsRow()).preferences;
+    const refused = await call(decideRoute.POST, 'POST', `/api/references/${id}/decide`, { assetId: id }, { accept: [profile.suggestions[0]!.field] });
+    expect(refused.status).toBe(409);
+    expect(refused.json.error.message).toBe('This video was measured with an older version of the measuring, so its suggestions are not offered. Upload it again to get new ones.');
+    expect((await settingsRow()).preferences).toEqual(prefsBefore);
+    const stored = await db.query.mediaAssets.findFirst({ where: (t, { eq }) => eq(t.id, id) });
+    expect((stored?.referenceProfile as ReferenceStyleProfile).decisions).toEqual({});
+  });
+
+  it('keeps a style accepted from the videos in use, and stoppable, when no current video backs it any more', async () => {
+    as(owner);
+    const { eq } = await import('drizzle-orm');
+    const summaryRoute = await import('../src/app/api/references/summary/route');
+    const decideRoute = await import('../src/app/api/references/summary/decide/route');
+    const settingsRoute = await import('../src/app/api/settings/route');
+    type Row = { field: string; state: string; value: unknown; valueKey: string | null; seen: string; inUse: boolean };
+    const palette = async () => ((await call(summaryRoute.GET, 'GET', '/api/references/summary', {})).json as { suggestions: Row[]; summary: Record<string, number> });
+    const offered = (await palette()).suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(offered.state).toBe('open');
+    const accepted = await call(decideRoute.POST, 'POST', '/api/references/summary/decide', {}, { accept: ['transitionPalette'], valueKeys: { transitionPalette: offered.valueKey } });
+    expect(accepted.status).toBe(200);
+
+    // The measuring version is raised (simulated on the stored profiles): no video of the current version is left.
+    const current = (await db.query.mediaAssets.findMany({ where: (t, { eq: is }) => is(t.kind, 'reference_video') })).filter(
+      (a) => (a.referenceProfile as { style?: { analysisVersion?: number } | null } | null)?.style?.analysisVersion === REFERENCE_STYLE_ANALYSIS_VERSION,
+    );
+    expect(current.length).toBe(2);
+    const withVersion = (profile: unknown, analysisVersion: number) => {
+      const p = profile as { style: Record<string, unknown> };
+      return { ...p, style: { ...p.style, analysisVersion } } as never;
+    };
+    for (const a of current) await db.update(schema.mediaAssets).set({ referenceProfile: withVersion(a.referenceProfile, REFERENCE_STYLE_ANALYSIS_VERSION + 1) }).where(eq(schema.mediaAssets.id, a.id));
+    try {
+      const bumped = await palette();
+      expect(bumped.summary).toMatchObject({ measured: 0, olderVersion: 3 });
+      // The planners still use the cross-fades accepted earlier, so the row says so and can stop them.
+      const row = bumped.suggestions.find((r) => r.field === 'transitionPalette')!;
+      expect(row).toMatchObject({ state: 'not_measured', value: null, inUse: true });
+      expect(row.seen.endsWith(STILL_IN_USE_LINE)).toBe(true);
+      expect((await settingsRow()).preferences.editingStyle.transitionPalette).toEqual(offered.value);
+      const stopped = await call(settingsRoute.PUT, 'PUT', '/api/settings', {}, { preferences: { editingStyle: { transitionPalette: null } } });
+      expect(stopped.status).toBe(200);
+      expect((await palette()).suggestions.find((r) => r.field === 'transitionPalette')).toMatchObject({ state: 'not_measured', inUse: false });
+    } finally {
+      for (const a of current) await db.update(schema.mediaAssets).set({ referenceProfile: withVersion(a.referenceProfile, REFERENCE_STYLE_ANALYSIS_VERSION) }).where(eq(schema.mediaAssets.id, a.id));
+    }
   });
 
   it('refuses a music tempo range the wrong way round at PUT /api/settings and keeps the stored one', async () => {

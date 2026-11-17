@@ -189,7 +189,8 @@ function ReferenceCard({ reference, onChanged }: { reference: ReferenceDto; onCh
           {profile && profile.text.source === 'not_measured' ? <p className="mt-1 text-xs text-charcoal-500">On-screen text was not measured.</p> : null}
         </div>
       </div>
-      {profile ? <Suggestions reference={reference} profile={profile} onChanged={onChanged} /> : null}
+      {/* A video measured with another version of the measuring offers nothing: every number in it came from that measuring. */}
+      {profile && !isOlderMeasuringVersion(profile) ? <Suggestions reference={reference} profile={profile} onChanged={onChanged} /> : null}
       <div className="mt-3 flex flex-wrap gap-2">
         {reference.status === 'failed' ? (
           <Button size="sm" variant="secondary" className="min-h-11 sm:min-h-8" loading={busy === 'retry'} onClick={() => act('retry')}>

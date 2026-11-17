@@ -18,6 +18,7 @@ import {
   isOlderMeasuringVersion,
   measureBeatSignal,
   olderVersionNotice,
+  STILL_IN_USE_LINE,
   paletteFromCounts,
   profileReference,
   readReferenceProfile,
@@ -286,9 +287,38 @@ describe('summariseReferenceStyle', () => {
     expect(isOlderMeasuringVersion(current)).toBe(false);
     expect(isOlderMeasuringVersion(current, REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toBe(true);
     expect(isOlderMeasuringVersion(profileWith(null, 'v1'), REFERENCE_STYLE_ANALYSIS_VERSION + 1)).toBe(false);
-    expect(olderVersionNotice(2)).toBe('2 videos were measured with an older version of the measuring. Upload them again to include them.');
-    expect(olderVersionNotice(1)).toBe('1 video was measured with an older version of the measuring. Upload it again to include it.');
+    // Uploading a video again adds a new copy and keeps the old one, so the wording stays true until it is removed.
+    expect(olderVersionNotice(2)).toBe('2 videos were measured with an older version of the measuring and are not used. Upload them again, then remove the old copies from their projects.');
+    expect(olderVersionNotice(1)).toBe('1 video was measured with an older version of the measuring and is not used. Upload it again, then remove the old copy from its project.');
+    expect(OLDER_VERSION_NOTE).toBe('Measured with an older version of the measuring, so it is not used. Upload the video again, then remove this copy.');
     for (const text of [olderVersionNotice(3), OLDER_VERSION_NOTE]) expect(text).not.toMatch(FORBIDDEN_STYLE_WORDS);
+    // After the three videos are uploaded again (new assets, current version), the old copies are still counted.
+    const next = REFERENCE_STYLE_ANALYSIS_VERSION + 1;
+    const old = ['a', 'b', 'c'].map((id) => profileWith(assembleReferenceSignals(rawStyle()), id));
+    const again = ['a2', 'b2', 'c2'].map((id) => profileWith({ ...assembleReferenceSignals(rawStyle()), analysisVersion: next }, id));
+    expect(summariseReferenceStyle([...again, ...old], prefs(), { analysisVersion: next })).toMatchObject({ total: 3, olderVersion: 3 });
+  });
+
+  it('keeps an accepted editing-style row in use, and stoppable, when no current video backs it', () => {
+    // Three videos with cross-fades; the owner accepts the transitions. Then the measuring version is raised (or the
+    // videos are removed): nothing is combined, but the cross-fades from the videos are still what the planners use.
+    const cross = assembleReferenceSignals(rawStyle({ joins: Array.from({ length: 8 }, (_, i): RawJoin => ({ kind: 'cross_fade', timeSec: 2 * i + 2, durationSec: 0.5 })) }));
+    const profiles = ['a', 'b', 'c'].map((id) => profileWith(cross, id));
+    const summary = summariseReferenceStyle(profiles, prefs());
+    const row = summary.suggestions.find((r) => r.field === 'transitionPalette')!;
+    expect(row.state).toBe('open');
+    const accepted = applySummaryDecisions(prefs(), summary, { accept: ['transitionPalette'], dismiss: [], valueKeys: { transitionPalette: row.valueKey! } }, '2026-11-15T04:00:00Z').preferences;
+    expect(accepted.editingStyle!.sources.transitionPalette?.by).toBe('reference');
+    for (const later of [summariseReferenceStyle(profiles, accepted, { analysisVersion: REFERENCE_STYLE_ANALYSIS_VERSION + 1 }), summariseReferenceStyle([], accepted)]) {
+      expect(later.total).toBe(0);
+      const t = later.suggestions.find((r) => r.field === 'transitionPalette')!;
+      expect(t).toMatchObject({ state: 'not_measured', value: null, action: null, inUse: true });
+      expect(t.seen).toBe(`Transitions: not measured yet. ${STILL_IN_USE_LINE}`);
+      // Rows not taken from the videos stay as they were.
+      expect(later.suggestions.filter((r) => r.field !== 'transitionPalette').every((r) => !r.inUse && !r.seen.includes(STILL_IN_USE_LINE))).toBe(true);
+    }
+    // Without anything accepted from the videos, nothing is in use.
+    expect(summariseReferenceStyle([], prefs()).suggestions.some((r) => r.inUse)).toBe(false);
   });
 
   it('accepts with side effects visible, records the valueKey and detects a changed summary', () => {

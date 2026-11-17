@@ -51,8 +51,8 @@ export async function listReferences(): Promise<ReferenceListItem[]> {
 
 /**
  * Applies the owner's decisions on a reference's suggestions. Accepting sets the declared value and pins the field
- * `by: 'reference'` (with the file name) so learning never overrides it; dismissing only records the decision.
- * Owner only; audited.
+ * `by: 'reference'` (with the file name) so learning never overrides it; dismissing only records the decision. A video
+ * measured with another version of the measuring is refused (409): its suggestions are not offered. Owner only; audited.
  */
 export async function decideReference(user: SessionUser, assetId: string, input: { accept: ReferenceSuggestionField[]; dismiss: ReferenceSuggestionField[] }): Promise<{ profile: ReferenceStyleProfile; preferences: EditingPreferences }> {
   const db = getDb();
@@ -61,6 +61,9 @@ export async function decideReference(user: SessionUser, assetId: string, input:
   const parsed = asset.referenceProfile ? ReferenceStyleProfileSchema.safeParse(asset.referenceProfile) : null;
   if (!parsed?.success) throw new AppError('CONFLICT', 'This reference video has not been measured yet.');
   const profile = parsed.data;
+  // Its pace, length and colour came from another version of the measuring, like the rest of it (§4.3.1.4).
+  const read = readReferenceProfile(profile);
+  if (read && isOlderMeasuringVersion(read)) throw new AppError('CONFLICT', 'This video was measured with an older version of the measuring, so its suggestions are not offered. Upload it again to get new ones.');
   const overlap = input.accept.filter((f) => input.dismiss.includes(f));
   if (overlap.length) throw new AppError('VALIDATION', 'A suggestion cannot be both used and dismissed.', { details: [{ path: 'accept', message: overlap.join(', ') }] });
   const suggestions = new Map(profile.suggestions.map((s) => [s.field, s]));
